@@ -17,6 +17,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# --- Vercel CLI project link (local machine only) ---
+.vercel/
+
 # --- OS / editor ---
 .DS_Store
 Thumbs.db

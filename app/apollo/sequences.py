@@ -1,13 +1,19 @@
 """
 Apollo sequence ("emailer campaign") management.
 
-Apollo's naming is inconsistent across this resource: creating/updating a
-sequence uses the current `/sequences` path, while sequence actions (steps,
-enrollment, activate/pause) still live under the legacy `/emailer_campaigns`
-path. Both refer to the same underlying object -- a `/sequences` create call
-still returns its result wrapped in an `emailer_campaign` key. Verify each
-path independently against current docs; don't assume they've all moved
-together.
+Apollo's naming is inconsistent across this resource, in two different ways:
+
+1. Creating/updating a sequence uses the current `/sequences` path, while
+   sequence actions (steps, enrollment, activate/deactivate) still live
+   under the legacy `/emailer_campaigns` path. Both refer to the same
+   underlying object -- a `/sequences` create call still returns its result
+   wrapped in an `emailer_campaign` key.
+2. The human-readable doc titles don't match their own URL paths: "Activate
+   a Sequence" is `/approve`, and "Deactivate a Sequence" is `/abort` --
+   neither `/activate` nor `/deactivate`/`/pause` exist.
+
+Verify each path independently against current docs; don't assume naming is
+consistent anywhere in this resource.
 """
 
 from app.apollo.client import ApolloBaseClient
@@ -59,23 +65,39 @@ class SequencesClient(ApolloBaseClient):
         return await self.update_sequence(sequence_id, {"emailer_steps": emailer_steps})
 
     async def enroll_contacts(
-        self, sequence_id: str, contact_ids: list[str], mailbox_id: str | None = None
+        self,
+        sequence_id: str,
+        contact_ids: list[str],
+        mailbox_id: str,
+        allow_no_email: bool = True,
     ) -> dict:
-        payload: dict = {
+        """
+        mailbox_id (send_email_from_email_account_id) is a REQUIRED field for
+        this endpoint, not optional -- omitting it is what caused the 422s.
+        There is no way to enroll contacts without a real connected mailbox.
+
+        allow_no_email (sequence_no_email) defaults to True because contacts
+        created from search_people() never have a real email (Apollo's free
+        search endpoint withholds it) -- without this flag Apollo silently
+        skips every one of them (`skipped_contact_ids: {"...": "contacts_
+        without_email"}`) instead of erroring, which looks like success but
+        enrolls nobody. Set False if the contacts are known to have emails.
+        """
+        payload = {
             "contact_ids": contact_ids,
             "emailer_campaign_id": sequence_id,
+            "send_email_from_email_account_id": mailbox_id,
+            "sequence_no_email": allow_no_email,
         }
-        if mailbox_id:
-            payload["send_email_from_email_account_id"] = mailbox_id
         return await self.request(
             "POST", f"/emailer_campaigns/{sequence_id}/add_contact_ids", json=payload
         )
 
     async def activate_sequence(self, sequence_id: str) -> dict:
-        return await self.request("POST", f"/emailer_campaigns/{sequence_id}/activate", json={})
+        return await self.request("POST", f"/emailer_campaigns/{sequence_id}/approve", json={})
 
-    async def pause_sequence(self, sequence_id: str) -> dict:
-        return await self.request("POST", f"/emailer_campaigns/{sequence_id}/pause", json={})
+    async def deactivate_sequence(self, sequence_id: str) -> dict:
+        return await self.request("POST", f"/emailer_campaigns/{sequence_id}/abort", json={})
 
     async def get_sequence(self, sequence_id: str) -> dict:
         return await self.request("GET", f"/emailer_campaigns/{sequence_id}")
