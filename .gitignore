@@ -1,0 +1,27 @@
+# Frontend (Next.js) has its own .gitignore in frontend/ -- this file only
+# covers the repo root and the Python backend.
+
+# --- Secrets ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Python (backend) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# --- Logs ---
+*.log
