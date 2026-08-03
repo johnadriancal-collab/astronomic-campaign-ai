@@ -26,15 +26,23 @@ export function SiteHeader() {
   return (
     <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur-md">
       <div className="mx-auto flex h-14 max-w-5xl items-center justify-between px-4 sm:px-6">
-        <Link href="/" className="flex items-center gap-2 whitespace-nowrap font-medium tracking-tight">
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground text-xs font-semibold">
-            A
-          </span>
-          <span className="text-sm sm:text-base">
-            <span className="sm:hidden">Campaign AI</span>
-            <span className="hidden sm:inline">Astronomic Campaign AI</span>
-          </span>
-        </Link>
+        <div className="flex items-center gap-6">
+          <Link href="/" className="flex items-center gap-2 whitespace-nowrap font-medium tracking-tight">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground text-xs font-semibold">
+              A
+            </span>
+            <span className="text-sm sm:text-base">
+              <span className="sm:hidden">Campaign AI</span>
+              <span className="hidden sm:inline">Astronomic Campaign AI</span>
+            </span>
+          </Link>
+          <Link
+            href="/manager/campaigns"
+            className="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline"
+          >
+            Campaign Manager
+          </Link>
+        </div>
         <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
           <span
             className={

@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Loader2, Sparkles, Users } from "lucide-react";
+import { ArrowRight, Loader2, LayoutDashboard, Sparkles, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -54,6 +55,21 @@ export default function Home() {
             <Sparkles className="h-3 w-3 text-primary" />
             Claude + Apollo outreach automation
           </span>
+
+          <div className="mb-6 inline-flex items-center gap-1 rounded-full border border-border/60 bg-secondary/30 p-1 text-sm">
+            <span className="flex items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1.5 font-medium text-primary">
+              <Sparkles className="h-3.5 w-3.5" />
+              Build Campaign
+            </span>
+            <Link
+              href="/manager/campaigns"
+              className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+            >
+              <LayoutDashboard className="h-3.5 w-3.5" />
+              Campaign Manager
+            </Link>
+          </div>
+
           <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
             Describe your campaign.
             <br />
