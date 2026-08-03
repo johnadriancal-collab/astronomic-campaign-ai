@@ -20,17 +20,26 @@ from app.apollo.client import ApolloBaseClient
 
 
 class SequencesClient(ApolloBaseClient):
-    async def search_sequences(self, apollo_sequence_id: str) -> dict:
+    async def list_sequences(self, page: int = 1, per_page: int = 100) -> dict:
         """
-        Confirmed LIVE against a real activated sequence: filtering by
-        `emailer_campaign_ids` returns nested `emailer_steps` (each with
-        `id`/`position`/`wait_time`/`wait_mode`/`type`) alongside the
-        sequence's own `active`/`archived`/`status_reason` and its
-        `unique_*` aggregate engagement counts -- this single call is
-        enough to sync both EmailSequence and EmailSequenceStep.
+        Full-account listing for CampaignSyncService's discovery pass.
+        Confirmed LIVE: unlike /emailer_messages/search, this endpoint
+        returns a real `pagination: {page, per_page, total_entries,
+        total_pages}` envelope, so callers can page reliably using
+        `total_pages` instead of a short-page heuristic.
+
+        CONFIRMED LIVE AND IMPORTANT: this endpoint only ever returns
+        non-archived sequences, and -- despite being named "search" --
+        passing `emailer_campaign_ids` (or `archived`/`include_archived`/
+        `status`/`emailer_campaign_statuses`) has NO effect on the result
+        set. Tested directly: filtering by a real id, a different real id,
+        and a nonexistent id all returned the identical unfiltered list.
+        Do not add filter params to this call assuming they'll narrow
+        anything -- verify against the live API first if that's ever
+        needed again.
         """
         return await self.request(
-            "POST", "/emailer_campaigns/search", json={"emailer_campaign_ids": [apollo_sequence_id]}
+            "POST", "/emailer_campaigns/search", json={"page": page, "per_page": per_page}
         )
 
     async def create_sequence(self, name: str) -> dict:
@@ -113,4 +122,15 @@ class SequencesClient(ApolloBaseClient):
         return await self.request("POST", f"/emailer_campaigns/{sequence_id}/abort", json={})
 
     async def get_sequence(self, sequence_id: str) -> dict:
+        """
+        Direct single-sequence lookup -- the correct way to fetch one known
+        sequence by id (list_sequences' filter params don't work, see
+        above). Confirmed LIVE: works for both active and archived
+        sequences (archived ones just come back with `archived: true`
+        rather than a 404), which is exactly what reconciliation needs.
+
+        Response is wrapped: `{"emailer_campaign": {..., "emailer_steps": [...]}, ...}`
+        -- unwrap `resp["emailer_campaign"]` to get the same shape as one
+        element of list_sequences()'s `emailer_campaigns` array.
+        """
         return await self.request("GET", f"/emailer_campaigns/{sequence_id}")

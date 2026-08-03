@@ -24,7 +24,9 @@ from app.config import settings
 
 
 class ApolloAPIError(Exception):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code  # None for network errors / retry-exhausted cases
 
 
 class ApolloBaseClient:
@@ -47,7 +49,7 @@ class ApolloBaseClient:
 
                     if resp.status_code == 429:
                         logger.warning(f"Apollo rate limited on {path}, attempt {attempt}")
-                        last_error = ApolloAPIError(f"Rate limited: {resp.text}")
+                        last_error = ApolloAPIError(f"Rate limited: {resp.text}", status_code=429)
                         continue
 
                     resp.raise_for_status()
@@ -58,7 +60,7 @@ class ApolloBaseClient:
                         f"Apollo API error on {method} {path}: "
                         f"{e.response.status_code} {e.response.text}"
                     )
-                    last_error = ApolloAPIError(str(e))
+                    last_error = ApolloAPIError(str(e), status_code=e.response.status_code)
                     # Client errors (bad request, auth, not found) won't
                     # resolve themselves on retry — fail fast.
                     if e.response.status_code < 500:

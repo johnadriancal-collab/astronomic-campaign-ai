@@ -46,25 +46,23 @@ def make_apollo_search_response(
     step_ids: tuple[str, str] = ("apollo-step-1", "apollo-step-2"),
 ) -> dict:
     return {
-        "emailer_campaigns": [
-            {
-                "id": apollo_sequence_id,
-                "active": active,
-                "archived": archived,
-                "status_reason": status_reason,
-                "unique_scheduled": 10,
-                "unique_delivered": 8,
-                "unique_opened": unique_opened,
-                "unique_clicked": 1,
-                "unique_replied": 0,
-                "unique_bounced": 2,
-                "unique_unsubscribed": 0,
-                "emailer_steps": [
-                    {"id": step_ids[0], "position": 1, "wait_time": 0, "wait_mode": "day", "type": "auto_email"},
-                    {"id": step_ids[1], "position": 2, "wait_time": 3, "wait_mode": "day", "type": "auto_email"},
-                ],
-            }
-        ]
+        "emailer_campaign": {
+            "id": apollo_sequence_id,
+            "active": active,
+            "archived": archived,
+            "status_reason": status_reason,
+            "unique_scheduled": 10,
+            "unique_delivered": 8,
+            "unique_opened": unique_opened,
+            "unique_clicked": 1,
+            "unique_replied": 0,
+            "unique_bounced": 2,
+            "unique_unsubscribed": 0,
+            "emailer_steps": [
+                {"id": step_ids[0], "position": 1, "wait_time": 0, "wait_mode": "day", "type": "auto_email"},
+                {"id": step_ids[1], "position": 2, "wait_time": 3, "wait_mode": "day", "type": "auto_email"},
+            ],
+        }
     }
 
 
@@ -100,7 +98,7 @@ async def test_first_sync_creates_snapshot_from_campaign_plan(stores):
     campaign_store, seq_store, step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response("apollo-seq-1")
+    apollo.get_sequence.return_value = make_apollo_search_response("apollo-seq-1")
     service = make_service(stores, apollo)
 
     sequence, steps = await service.sync("c1")
@@ -120,7 +118,7 @@ async def test_first_sync_populates_status_and_stats_from_apollo(stores):
     campaign_store, _seq_store, _step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response("apollo-seq-1", unique_opened=42)
+    apollo.get_sequence.return_value = make_apollo_search_response("apollo-seq-1", unique_opened=42)
     service = make_service(stores, apollo)
 
     sequence, _steps = await service.sync("c1")
@@ -137,7 +135,7 @@ async def test_first_sync_populates_apollo_step_ids_by_position(stores):
     campaign_store, _seq_store, _step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response("apollo-seq-1")
+    apollo.get_sequence.return_value = make_apollo_search_response("apollo-seq-1")
     service = make_service(stores, apollo)
 
     _sequence, steps = await service.sync("c1")
@@ -151,7 +149,7 @@ async def test_status_derivation_archived_takes_priority_over_active(stores):
     campaign_store, _seq_store, _step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response(
+    apollo.get_sequence.return_value = make_apollo_search_response(
         "apollo-seq-1", active=False, archived=True
     )
     service = make_service(stores, apollo)
@@ -166,7 +164,7 @@ async def test_status_derivation_paused_when_neither_active_nor_archived(stores)
     campaign_store, _seq_store, _step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response(
+    apollo.get_sequence.return_value = make_apollo_search_response(
         "apollo-seq-1", active=False, archived=False
     )
     service = make_service(stores, apollo)
@@ -181,11 +179,11 @@ async def test_resyncing_does_not_duplicate_sequence_or_steps(stores):
     campaign_store, _seq_store, _step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response("apollo-seq-1", unique_opened=1)
+    apollo.get_sequence.return_value = make_apollo_search_response("apollo-seq-1", unique_opened=1)
     service = make_service(stores, apollo)
 
     first_sequence, _ = await service.sync("c1")
-    apollo.search_sequences.return_value = make_apollo_search_response("apollo-seq-1", unique_opened=5)
+    apollo.get_sequence.return_value = make_apollo_search_response("apollo-seq-1", unique_opened=5)
     sequence, steps = await service.sync("c1")
 
     # Same underlying record (not a second one created) -- MemoryEmailSequenceStore.create()
@@ -202,7 +200,7 @@ async def test_failed_apollo_call_does_not_advance_last_synced_at(stores):
     campaign_store, seq_store, _step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response("apollo-seq-1")
+    apollo.get_sequence.return_value = make_apollo_search_response("apollo-seq-1")
     service = make_service(stores, apollo)
 
     # A successful first sync establishes a baseline last_synced_at.
@@ -211,7 +209,7 @@ async def test_failed_apollo_call_does_not_advance_last_synced_at(stores):
     assert first_synced_at is not None
 
     # Now Apollo fails.
-    apollo.search_sequences.side_effect = RuntimeError("Apollo is down")
+    apollo.get_sequence.side_effect = RuntimeError("Apollo is down")
     with pytest.raises(RuntimeError):
         await service.sync("c1")
 
@@ -231,7 +229,7 @@ async def test_failed_first_sync_apollo_call_still_leaves_snapshot_but_no_synced
     campaign_store, seq_store, step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.side_effect = RuntimeError("Apollo is down")
+    apollo.get_sequence.side_effect = RuntimeError("Apollo is down")
     service = make_service(stores, apollo)
 
     with pytest.raises(RuntimeError):
@@ -259,7 +257,7 @@ async def test_get_for_campaign_returns_populated_result_after_sync(stores):
     campaign_store, _seq_store, _step_store = stores
     await campaign_store.create(make_built_campaign("c1"))
     apollo = AsyncMock()
-    apollo.search_sequences.return_value = make_apollo_search_response("apollo-seq-1")
+    apollo.get_sequence.return_value = make_apollo_search_response("apollo-seq-1")
     service = make_service(stores, apollo)
     await service.sync("c1")
 

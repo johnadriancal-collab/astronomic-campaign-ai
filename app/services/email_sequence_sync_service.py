@@ -11,7 +11,10 @@ sync() does two distinct things, in order:
      apollo_sequence_id). This is NOT itself "syncing Apollo state" -- it's
      deriving from data we already have stored, so it can't fail the way
      an Apollo call can, and creating it does not touch last_synced_at.
-  2. Call Apollo (`search_sequences`) and, ONLY if that call succeeds,
+  2. Call Apollo (`get_sequence`, a direct single-id lookup -- confirmed
+     LIVE to work for both active and archived sequences, unlike
+     list_sequences()'s filter params, which don't actually filter
+     anything despite accepting them) and, ONLY if that call succeeds,
      update status/status_reason/aggregate stats/last_synced_at and any
      newly-confirmed apollo_step_id values. No try/except around the
      Apollo call -- an exception propagates to the caller untouched, so a
@@ -84,14 +87,11 @@ class EmailSequenceSyncService:
             # Apollo call -- deliberately no try/except here. If this
             # raises, nothing below runs, so status/stats/last_synced_at
             # and step apollo_step_ids are left exactly as they were.
-            resp = await self.apollo.search_sequences(campaign.apollo_sequence_id)
-            apollo_sequences = resp.get("emailer_campaigns", [])
-            apollo_sequence = next(
-                (s for s in apollo_sequences if s.get("id") == campaign.apollo_sequence_id), None
-            )
+            resp = await self.apollo.get_sequence(campaign.apollo_sequence_id)
+            apollo_sequence = resp.get("emailer_campaign")
             if apollo_sequence is None:
                 raise ValueError(
-                    f"Apollo returned no sequence matching {campaign.apollo_sequence_id}"
+                    f"Apollo returned no sequence for {campaign.apollo_sequence_id}"
                 )
 
             now = datetime.now(timezone.utc)

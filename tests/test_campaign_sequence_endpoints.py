@@ -68,24 +68,22 @@ def test_client():
 
 def apollo_response(apollo_sequence_id: str) -> dict:
     return {
-        "emailer_campaigns": [
-            {
-                "id": apollo_sequence_id,
-                "active": True,
-                "archived": False,
-                "status_reason": "manual_approve",
-                "unique_scheduled": 1,
-                "unique_delivered": 1,
-                "unique_opened": 0,
-                "unique_clicked": 0,
-                "unique_replied": 0,
-                "unique_bounced": 0,
-                "unique_unsubscribed": 0,
-                "emailer_steps": [
-                    {"id": "apollo-step-1", "position": 1, "wait_time": 0, "wait_mode": "day", "type": "auto_email"}
-                ],
-            }
-        ]
+        "emailer_campaign": {
+            "id": apollo_sequence_id,
+            "active": True,
+            "archived": False,
+            "status_reason": "manual_approve",
+            "unique_scheduled": 1,
+            "unique_delivered": 1,
+            "unique_opened": 0,
+            "unique_clicked": 0,
+            "unique_replied": 0,
+            "unique_bounced": 0,
+            "unique_unsubscribed": 0,
+            "emailer_steps": [
+                {"id": "apollo-step-1", "position": 1, "wait_time": 0, "wait_mode": "day", "type": "auto_email"}
+            ],
+        }
     }
 
 
@@ -111,7 +109,7 @@ async def test_get_sequence_404s_when_never_synced(test_client):
 async def test_sync_then_get_returns_the_synced_sequence(test_client):
     client, campaign_store, apollo = test_client
     await campaign_store.create(make_campaign("c1"))
-    apollo.search_sequences.return_value = apollo_response("apollo-seq-1")
+    apollo.get_sequence.return_value = apollo_response("apollo-seq-1")
 
     sync_resp = client.post("/campaign/c1/sequence/sync")
     assert sync_resp.status_code == 200
@@ -141,7 +139,7 @@ async def test_sync_requires_campaign_to_be_built_with_a_sequence(test_client):
 async def test_sync_502s_and_leaves_no_synced_at_on_apollo_failure(test_client):
     client, campaign_store, apollo = test_client
     await campaign_store.create(make_campaign("c1"))
-    apollo.search_sequences.side_effect = RuntimeError("Apollo is down")
+    apollo.get_sequence.side_effect = RuntimeError("Apollo is down")
 
     resp = client.post("/campaign/c1/sequence/sync")
 
