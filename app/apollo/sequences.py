@@ -20,6 +20,19 @@ from app.apollo.client import ApolloBaseClient
 
 
 class SequencesClient(ApolloBaseClient):
+    async def search_sequences(self, apollo_sequence_id: str) -> dict:
+        """
+        Confirmed LIVE against a real activated sequence: filtering by
+        `emailer_campaign_ids` returns nested `emailer_steps` (each with
+        `id`/`position`/`wait_time`/`wait_mode`/`type`) alongside the
+        sequence's own `active`/`archived`/`status_reason` and its
+        `unique_*` aggregate engagement counts -- this single call is
+        enough to sync both EmailSequence and EmailSequenceStep.
+        """
+        return await self.request(
+            "POST", "/emailer_campaigns/search", json={"emailer_campaign_ids": [apollo_sequence_id]}
+        )
+
     async def create_sequence(self, name: str) -> dict:
         return await self.request("POST", "/sequences", json={"name": name})
 

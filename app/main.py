@@ -2,22 +2,103 @@
 FastAPI entry point for Astronomic Campaign AI.
 
 Endpoints:
-    GET  /health                        - health check
-    POST /campaign/preview              - Claude plan only, no Apollo calls
-    POST /campaign/search                - Apollo prospect search using a generated plan's filters
-    POST /campaign                       - builds list/sequence/steps/enrollment (does NOT send unless auto_launch=true)
-    POST /campaign/launch/{sequence_id}  - explicit human-confirmed activation
+    GET  /health                     - health check
+    POST /campaign/preview           - generates CampaignPlan ONCE, creates + stores a Campaign
+    POST /campaign/search            - loads a Campaign by id, searches/ranks using its stored plan
+    POST /campaign/build             - loads a Campaign by id, builds in Apollo from its stored plan/selection
+    GET  /campaign/{campaign_id}     - fetch full Campaign state
+    GET  /campaign/{campaign_id}/leads - the campaign's real, persisted Leads
+    POST /campaign/{campaign_id}/ready    - human approval gate, no Apollo call
+    POST /campaign/{campaign_id}/activate - activates in Apollo, persists only on success
+    POST /campaign/{campaign_id}/pause    - deactivates in Apollo, persists only on success
+    GET  /campaign/{campaign_id}/sequence      - the campaign's synced EmailSequence + steps
+    POST /campaign/{campaign_id}/sequence/sync - explicit manual sync against Apollo
+    GET  /campaign/{campaign_id}/messages                    - synced + fixture EmailMessages for this campaign
+    POST /campaign/{campaign_id}/messages/sync                - explicit manual message sync against Apollo
+    POST /campaign/{campaign_id}/messages/fixtures             - generate local test-fixture messages (no Apollo call)
+    GET  /campaign/{campaign_id}/messages/{message_id}/events        - a message's synced open/click events
+    POST /campaign/{campaign_id}/messages/{message_id}/sync-events   - explicit manual event sync for one message
+
+Campaign routes themselves live in app/api/campaign.py (see
+docs/ARCHITECTURE.md) -- this module only owns app-level concerns: the
+homepage/health routes, and the CampaignService singleton's lifecycle
+(opens the persistent SQLite store once at startup, closes it at
+shutdown).
+
+No endpoint after /campaign/preview ever regenerates a CampaignPlan --
+every later stage loads the plan already stored on the Campaign.
 """
 
-from fastapi import FastAPI, HTTPException
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
-from loguru import logger
 
-from app.models.campaign import CampaignExecutionReport, CampaignPlan, CampaignRequest
+from app.api.campaign import router as campaign_router
+from app.api.leads import router as leads_router
+from app.config import settings
+from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
+from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
+from app.repositories.sqlite_email_message_event_store import SQLiteEmailMessageEventStore
+from app.repositories.sqlite_email_message_store import SQLiteEmailMessageStore
+from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenceStepStore
+from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStore
+from app.repositories.sqlite_lead_store import SQLiteLeadStore
 from app.services.campaign_service import CampaignService
+from app.services.email_message_sync_service import EmailMessageSyncService
+from app.services.email_sequence_sync_service import EmailSequenceSyncService
+from app.services.lead_service import LeadService
 
-app = FastAPI(title="Astronomic Campaign AI")
-service = CampaignService()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # All stores share the same SQLite file (different tables) -- each
+    # manages its own connection independently, matching
+    # SQLiteCampaignStore's existing self-contained connect()/close().
+    campaign_store = SQLiteCampaignStore(settings.database_path)
+    lead_store = SQLiteLeadStore(settings.database_path)
+    campaign_lead_store = SQLiteCampaignLeadStore(settings.database_path)
+    email_sequence_store = SQLiteEmailSequenceStore(settings.database_path)
+    email_sequence_step_store = SQLiteEmailSequenceStepStore(settings.database_path)
+    email_message_store = SQLiteEmailMessageStore(settings.database_path)
+    email_message_event_store = SQLiteEmailMessageEventStore(settings.database_path)
+    await campaign_store.connect()
+    await lead_store.connect()
+    await campaign_lead_store.connect()
+    await email_sequence_store.connect()
+    await email_sequence_step_store.connect()
+    await email_message_store.connect()
+    await email_message_event_store.connect()
+
+    lead_service = LeadService(store=lead_store, campaign_lead_store=campaign_lead_store, campaign_store=campaign_store)
+    app.state.lead_service = lead_service
+    app.state.campaign_service = CampaignService(
+        store=campaign_store, lead_service=lead_service, campaign_lead_store=campaign_lead_store
+    )
+    app.state.email_sequence_sync_service = EmailSequenceSyncService(
+        campaign_store=campaign_store, store=email_sequence_store, step_store=email_sequence_step_store
+    )
+    app.state.email_message_sync_service = EmailMessageSyncService(
+        sequence_store=email_sequence_store,
+        step_store=email_sequence_step_store,
+        message_store=email_message_store,
+        event_store=email_message_event_store,
+        lead_store=lead_store,
+        campaign_lead_store=campaign_lead_store,
+    )
+    yield
+    await campaign_store.close()
+    await lead_store.close()
+    await campaign_lead_store.close()
+    await email_sequence_store.close()
+    await email_sequence_step_store.close()
+    await email_message_store.close()
+    await email_message_event_store.close()
+
+
+app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
+app.include_router(campaign_router)
+app.include_router(leads_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
@@ -43,7 +124,7 @@ HOMEPAGE_HTML = """<!doctype html>
   <li><a href="/redoc">ReDoc</a> — read-only API reference</li>
   <li><a href="/health">/health</a> — raw health-check JSON</li>
 </ul>
-<p>No dedicated frontend yet — <code>POST /campaign/preview</code>, <code>/campaign/search</code>, and <code>/campaign</code> are exercised via the Swagger UI or <code>curl</code> for now.</p>
+<p>No dedicated frontend yet — <code>POST /campaign/preview</code>, <code>/campaign/search</code>, and <code>/campaign/build</code> are exercised via the Swagger UI or <code>curl</code> for now.</p>
 <script>
 fetch("/health").then(r => r.json()).then(d => {
   document.getElementById("dot").classList.add(d.status === "ok" ? "ok" : "err");
@@ -65,53 +146,3 @@ async def home():
 @app.get("/health")
 async def health():
     return {"status": "ok"}
-
-
-@app.post("/campaign/preview", response_model=CampaignPlan)
-async def preview_campaign(req: CampaignRequest):
-    """Returns Claude's generated campaign plan only. No Apollo side effects."""
-    try:
-        return await service.preview(req.prompt)
-    except Exception as e:
-        logger.error(f"Preview failed: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
-
-
-@app.post("/campaign/search")
-async def search_prospects(req: CampaignRequest):
-    """Generates a plan, then returns matching Apollo prospects (no writes)."""
-    try:
-        plan = await service.preview(req.prompt)
-        results = await service.apollo.search_people(plan.filters.model_dump())
-        return results
-    except Exception as e:
-        logger.error(f"Search failed: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
-
-
-@app.post("/campaign")
-async def create_campaign(req: CampaignRequest, auto_launch: bool = False):
-    """
-    Builds the full campaign: searches prospects, creates the list and
-    sequence, adds steps, and enrolls contacts.
-
-    By default this does NOT send any emails, regardless of what Claude's
-    plan sets for `launch` — pass auto_launch=true explicitly, or call
-    /campaign/launch/{sequence_id} once you've reviewed the report.
-    """
-    try:
-        plan, report = await service.build_campaign(req.prompt, auto_launch=auto_launch)
-        return {"plan": plan, "report": report}
-    except Exception as e:
-        logger.error(f"Campaign creation failed: {e}")
-        raise HTTPException(status_code=502, detail=str(e))
-
-
-@app.post("/campaign/launch/{sequence_id}", response_model=CampaignExecutionReport)
-async def launch_campaign(sequence_id: str):
-    """Explicitly activates an already-built sequence, sending it live."""
-    try:
-        return await service.launch(sequence_id)
-    except Exception as e:
-        logger.error(f"Launch failed: {e}")
-        raise HTTPException(status_code=502, detail=str(e))

@@ -18,5 +18,12 @@ class Settings(BaseSettings):
     # Verify this ID exists under your Apollo account's connected mailboxes.
     default_sender_mailbox_id: str | None = None
 
+    # SQLite file path for persistent Campaign storage (see
+    # app/repositories/sqlite_campaign_store.py). Relative paths resolve
+    # against the process's working directory. In production, this should
+    # point at a mounted persistent volume -- the container filesystem
+    # otherwise resets on every redeploy.
+    database_path: str = "data/campaigns.db"
+
 
 settings = Settings()

@@ -1,134 +1,399 @@
 """
-Orchestrates the full campaign pipeline: Claude generates the plan, then
-Apollo builds the list/sequence/steps and enrolls prospects.
+Orchestrates the full campaign pipeline: Claude generates the plan exactly
+ONCE (in preview()), then every later stage loads the stored Campaign by
+id and works from what's already there -- nothing after preview() ever
+calls the Claude plan-generation prompt again.
 
-Design note on launching:
-`CampaignPlan.launch` is a field Claude returns based on its read of the
-prompt, but it is NOT wired to actually activate a sequence. Whether real
-emails go out to real people is controlled only by the explicit
-`auto_launch` argument to `build_campaign` (set by a human via the API
-caller), or by a separate call to `launch()`. A model's own generated
-output shouldn't be the sole trigger for sending live outreach.
+Architecture:
+    preview() -- the ONLY place CampaignAgent.generate_campaign_plan() is
+                 called. Creates and stores a new Campaign.
+    search()  -- loads a Campaign by id, searches Apollo using its STORED
+                 plan.filters, ranks via ProspectRanker, saves the
+                 selection onto the same Campaign. Idempotent: calling it
+                 again on an already-searched campaign returns the cached
+                 result instead of re-searching/re-ranking.
+    build()   -- loads a Campaign by id, requires it to have been
+                 searched, builds list/contacts/sequence/steps/enrollment
+                 from its STORED plan and selected_prospects. Idempotent
+                 per Apollo-ID field, so calling it again after a partial
+                 failure resumes rather than restarts -- this doubles as
+                 both "retry a failed build" and "resume an interrupted
+                 build," which are the same mechanism.
+
+CampaignService depends only on CampaignStore (never a concrete backend)
+and has no ranking/selection logic of its own -- it calls ProspectSelector
+and ProspectRanker and uses whatever they return.
 """
+
+import asyncio
+import uuid
+from collections import defaultdict
+from datetime import datetime, timezone
 
 from loguru import logger
 
 from app.agents.campaign_agent import CampaignAgent
 from app.apollo import ApolloClient
 from app.config import settings
-from app.models.campaign import CampaignExecutionReport, CampaignPlan
+from app.models.campaign import Campaign, CampaignStatus
+from app.repositories.campaign_lead_store import CampaignLeadStore, MemoryCampaignLeadStore
+from app.repositories.campaign_store import CampaignNotFoundError, CampaignStore, MemoryCampaignStore
+from app.services.lead_service import LeadService
+from app.services.prospect_ranker import ProspectRanker
+from app.services.prospect_selector import ProspectSelector
 
 
 class CampaignService:
-    def __init__(self, agent: CampaignAgent | None = None, apollo: ApolloClient | None = None):
+    RETRIEVAL_POOL_SIZE = 100
+
+    def __init__(
+        self,
+        agent: CampaignAgent | None = None,
+        apollo: ApolloClient | None = None,
+        ranker: ProspectRanker | None = None,
+        store: CampaignStore | None = None,
+        lead_service: LeadService | None = None,
+        campaign_lead_store: CampaignLeadStore | None = None,
+    ):
         self.agent = agent or CampaignAgent()
         self.apollo = apollo or ApolloClient()
+        self.ranker = ranker or ProspectRanker()
+        self.store = store or MemoryCampaignStore()
+        self.lead_service = lead_service or LeadService()
+        self.campaign_lead_store = campaign_lead_store or MemoryCampaignLeadStore()
+        # Guards search()/build() against concurrent calls for the same
+        # campaign_id (e.g. React StrictMode's double-invoked mount effect,
+        # or a double-click) racing past each other's idempotency checks --
+        # without this, two concurrent calls can both see "not yet done" and
+        # both run the Apollo/Claude work, silently duplicating real Apollo
+        # side effects and letting whichever save() lands last win.
+        self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    async def preview(self, user_prompt: str) -> CampaignPlan:
-        """Returns Claude's generated plan only — no Apollo calls."""
-        return await self.agent.generate_campaign_plan(user_prompt)
+    async def _require_campaign(self, campaign_id: str) -> Campaign:
+        campaign = await self.store.get(campaign_id)
+        if campaign is None:
+            raise CampaignNotFoundError(campaign_id)
+        return campaign
 
-    async def build_campaign(
-        self, user_prompt: str, auto_launch: bool = False
-    ) -> tuple[CampaignPlan, CampaignExecutionReport]:
-        plan = await self.agent.generate_campaign_plan(user_prompt)
-        report = CampaignExecutionReport(campaign_name=plan.campaign_name)
+    async def preview(self, prompt: str, desired_prospect_count: int = 25) -> Campaign:
+        """The ONE and ONLY place a CampaignPlan is generated."""
+        plan = await self.agent.generate_campaign_plan(prompt)
 
-        try:
-            search_results = await self.apollo.search_people(plan.filters.model_dump())
-            people = search_results.get("people", [])
-            report.prospects_found = len(people)
-        except Exception as e:
-            logger.error(f"Prospect search failed: {e}")
-            report.errors.append(f"Prospect search failed: {e}")
-            return plan, report
-
-        try:
-            list_resp = await self.apollo.create_list(plan.campaign_name)
-            list_id = list_resp.get("label", {}).get("id") or list_resp.get("id")
-            report.apollo_list_id = list_id
-        except Exception as e:
-            logger.error(f"List creation failed: {e}")
-            report.errors.append(f"List creation failed: {e}")
-            return plan, report
-
-        # List membership is set via `label_names` at contact-creation time --
-        # Apollo has no separate "add existing contacts to a list" endpoint.
-        contact_ids: list[str] = []
-        for person in people:
-            try:
-                contact_resp = await self.apollo.create_contact(
-                    {
-                        "first_name": person.get("first_name"),
-                        "last_name": person.get("last_name_obfuscated"),
-                        "email": person.get("email"),
-                        "organization_name": (person.get("organization") or {}).get("name"),
-                        "title": person.get("title"),
-                        "label_names": [plan.campaign_name],
-                    }
-                )
-                cid = contact_resp.get("contact", {}).get("id") or contact_resp.get("id")
-                if cid:
-                    contact_ids.append(cid)
-            except Exception as e:
-                logger.warning(f"Contact creation failed for {person.get('id')}: {e}")
-                report.errors.append(f"Contact creation failed for {person.get('id')}: {e}")
-
-        try:
-            seq_resp = await self.apollo.create_sequence(plan.campaign_name)
-            sequence_id = seq_resp.get("emailer_campaign", {}).get("id") or seq_resp.get("id")
-            report.apollo_sequence_id = sequence_id
-        except Exception as e:
-            logger.error(f"Sequence creation failed: {e}")
-            report.errors.append(f"Sequence creation failed: {e}")
-            return plan, report
-
-        if plan.sequence:
-            try:
-                await self.apollo.add_sequence_steps(
-                    sequence_id, [step.model_dump() for step in plan.sequence]
-                )
-            except Exception as e:
-                logger.warning(f"Adding sequence steps failed: {e}")
-                report.errors.append(f"Adding sequence steps failed: {e}")
-
-        if contact_ids:
-            mailbox_id = settings.default_sender_mailbox_id
-            if not mailbox_id:
-                try:
-                    accounts_resp = await self.apollo.list_email_accounts()
-                    accounts = accounts_resp.get("email_accounts", [])
-                    if accounts:
-                        mailbox_id = accounts[0].get("id")
-                except Exception as e:
-                    logger.warning(f"Could not list Apollo email accounts: {e}")
-
-            if mailbox_id:
-                try:
-                    await self.apollo.enroll_contacts(sequence_id, contact_ids, mailbox_id)
-                    report.prospects_enrolled = len(contact_ids)
-                except Exception as e:
-                    logger.error(f"Enrollment failed: {e}")
-                    report.errors.append(f"Enrollment failed: {e}")
-            else:
-                report.errors.append(
-                    "Enrollment skipped: no sender mailbox available -- set "
-                    "DEFAULT_SENDER_MAILBOX_ID or connect an email account in Apollo"
-                )
-
-        if auto_launch:
-            try:
-                await self.apollo.activate_sequence(sequence_id)
-                report.activated = True
-            except Exception as e:
-                logger.error(f"Activation failed: {e}")
-                report.errors.append(f"Activation failed: {e}")
-
-        return plan, report
-
-    async def launch(self, sequence_id: str) -> CampaignExecutionReport:
-        """Explicit human-confirmed activation of an already-built sequence."""
-        await self.apollo.activate_sequence(sequence_id)
-        return CampaignExecutionReport(
-            campaign_name="", apollo_sequence_id=sequence_id, activated=True
+        campaign = Campaign(
+            campaign_id=str(uuid.uuid4()),
+            original_prompt=prompt,
+            created_at=datetime.now(timezone.utc),
+            plan=plan,
+            desired_prospect_count=desired_prospect_count,
+            retrieval_pool_size=self.RETRIEVAL_POOL_SIZE,
         )
+        campaign.logs.append(f"Plan generated by Claude: '{plan.campaign_name}'")
+        await self.store.create(campaign)
+        return campaign
+
+    async def search(self, campaign_id: str) -> Campaign:
+        async with self._locks[campaign_id]:
+            campaign = await self._require_campaign(campaign_id)
+
+            if campaign.status != CampaignStatus.DRAFT:
+                # Already searched -- return the cached selection rather than
+                # spending another Apollo search + Claude ranking call. Gated
+                # on status alone: it flips to SEARCHED exactly once, right
+                # when ranking completes, so it's authoritative on its own --
+                # checking `selected_prospects` too would wrongly treat a
+                # legitimate zero-selection outcome as "not yet run" and
+                # re-trigger a second real search + ranking call. Once
+                # filter-editing exists, a `force_refresh` param can override
+                # this; for now, repeat calls are free and stable.
+                campaign.logs.append("Search requested again -- returning cached result")
+                return campaign
+
+            search_resp = await self.apollo.search_people(
+                campaign.plan.filters.model_dump(), per_page=campaign.retrieval_pool_size
+            )
+            campaign.total_matches = search_resp.get("total_entries", 0)
+            people = search_resp.get("people", [])
+            campaign.logs.append(
+                f"Apollo search: {campaign.total_matches} total matches, "
+                f"{len(people)} retrieved for ranking"
+            )
+
+            pool = ProspectSelector.select_pool(people, campaign.retrieval_pool_size)
+
+            ranking = await self.ranker.rank(
+                campaign.original_prompt, campaign.plan, pool["pool"], campaign.desired_prospect_count
+            )
+            campaign.selected_prospects = ranking["ranked"]
+            campaign.status = CampaignStatus.SEARCHED
+            campaign.logs.append(
+                f"Claude ranked {len(pool['pool'])} candidates "
+                f"({pool['prospects_with_email']} with email, {pool['prospects_without_email']} without) "
+                f"-> selected {len(ranking['ranked'])}"
+            )
+
+            await self.store.save(campaign)
+            return campaign
+
+    async def build(self, campaign_id: str, auto_launch: bool = False) -> Campaign:
+        async with self._locks[campaign_id]:
+            campaign = await self._require_campaign(campaign_id)
+
+            if campaign.status not in (
+                CampaignStatus.SEARCHED,
+                CampaignStatus.BUILDING,
+                CampaignStatus.BUILT,
+                CampaignStatus.FAILED,
+            ):
+                raise ValueError(
+                    f"Campaign {campaign_id} must be searched before it can be built "
+                    f"(current status: {campaign.status.value})"
+                )
+
+            campaign.status = CampaignStatus.BUILDING
+            await self.store.save(campaign)
+
+            # List -- idempotent: skip if a previous attempt already created one.
+            if not campaign.apollo_list_id:
+                try:
+                    list_resp = await self.apollo.create_list(campaign.plan.campaign_name)
+                    campaign.apollo_list_id = list_resp.get("label", {}).get("id") or list_resp.get("id")
+                    campaign.logs.append(f"List created: {campaign.apollo_list_id}")
+                except Exception as e:
+                    msg = f"List creation failed: {e}"
+                    logger.error(msg)
+                    campaign.errors.append(msg)
+                    campaign.logs.append(msg)
+                    campaign.status = CampaignStatus.FAILED
+                    await self.store.save(campaign)
+                    return campaign
+
+            # Contacts -- Phase 1: ensure every selected prospect has an
+            # Apollo contact, resumable per-person via apollo_contact_map
+            # (keyed by the prospect's Apollo person id). Skipping only
+            # people who already have a confirmed contact id -- rather than
+            # a blunt "total count is short, redo everyone" check -- is
+            # what makes a retry after a partial failure recreate only the
+            # ones that actually failed, and is also the exact signal Phase
+            # 2 below uses to know a prospect is eligible to become a Lead.
+            for person in campaign.selected_prospects:
+                person_id = person.get("id")
+                if not person_id or person_id in campaign.apollo_contact_map:
+                    continue
+                try:
+                    contact_resp = await self.apollo.create_contact(
+                        {
+                            "first_name": person.get("first_name"),
+                            "last_name": person.get("last_name_obfuscated"),
+                            "email": person.get("email"),
+                            "organization_name": (person.get("organization") or {}).get("name"),
+                            "title": person.get("title"),
+                            "label_names": [campaign.plan.campaign_name],
+                        }
+                    )
+                    cid = contact_resp.get("contact", {}).get("id") or contact_resp.get("id")
+                    if cid:
+                        campaign.apollo_contact_map[person_id] = cid
+                except Exception as e:
+                    msg = f"Contact creation failed for {person_id}: {e}"
+                    logger.warning(msg)
+                    campaign.errors.append(msg)
+                    campaign.logs.append(msg)
+            campaign.logs.append(
+                f"Contacts created: {len(campaign.apollo_contact_map)}/{len(campaign.selected_prospects)}"
+            )
+
+            # Leads -- Phase 2: for every prospect that DOES have a
+            # confirmed Apollo contact (from this call or an earlier one),
+            # ensure a durable Lead and this campaign's membership exist.
+            # This is the ONLY place a selected prospect becomes a Lead --
+            # never merely for appearing in a search/ranking result, and
+            # never for a prospect whose contact creation failed above (no
+            # cid was ever recorded for them, so they're skipped here,
+            # which is exactly what prevents an orphan Lead). Pure local
+            # reads/writes, no Apollo calls -- safe and cheap to re-run for
+            # every person on every build() call rather than needing its
+            # own "already done" gate; ensure_lead()/add() are themselves
+            # idempotent, so this also heals a prior partial failure here
+            # (e.g. the process died between Phase 1 and Phase 2 last time).
+            for person in campaign.selected_prospects:
+                person_id = person.get("id")
+                cid = campaign.apollo_contact_map.get(person_id) if person_id else None
+                if not cid:
+                    continue
+                try:
+                    lead = await self.lead_service.ensure_lead(person, cid)
+                    await self.lead_service.add_to_campaign(
+                        campaign.campaign_id,
+                        lead.lead_id,
+                        claude_score=person.get("claude_score"),
+                        claude_reason=person.get("claude_reason"),
+                    )
+                except Exception as e:
+                    msg = f"Lead sync failed for contact {cid}: {e}"
+                    logger.warning(msg)
+                    campaign.errors.append(msg)
+                    campaign.logs.append(msg)
+
+            # Sequence -- idempotent: skip if already created.
+            if not campaign.apollo_sequence_id:
+                try:
+                    seq_resp = await self.apollo.create_sequence(campaign.plan.campaign_name)
+                    campaign.apollo_sequence_id = (
+                        seq_resp.get("emailer_campaign", {}).get("id") or seq_resp.get("id")
+                    )
+                    campaign.logs.append(f"Sequence created: {campaign.apollo_sequence_id}")
+                except Exception as e:
+                    msg = f"Sequence creation failed: {e}"
+                    logger.error(msg)
+                    campaign.errors.append(msg)
+                    campaign.logs.append(msg)
+                    campaign.status = CampaignStatus.FAILED
+                    await self.store.save(campaign)
+                    return campaign
+
+            # Steps -- uses the EXACT stored plan.sequence, never regenerated.
+            # Re-sending the same steps on a retry is safe (Apollo replaces the
+            # full emailer_steps array on each PUT), so no separate guard needed.
+            if campaign.plan.sequence:
+                try:
+                    await self.apollo.add_sequence_steps(
+                        campaign.apollo_sequence_id,
+                        [step.model_dump() for step in campaign.plan.sequence],
+                    )
+                    campaign.logs.append(f"Added {len(campaign.plan.sequence)} email steps")
+                except Exception as e:
+                    msg = f"Adding sequence steps failed: {e}"
+                    logger.warning(msg)
+                    campaign.errors.append(msg)
+                    campaign.logs.append(msg)
+
+            # Enrollment -- idempotent: skip if already enrolled.
+            if campaign.apollo_contact_ids and campaign.contacts_enrolled == 0:
+                mailbox_id = settings.default_sender_mailbox_id
+                if not mailbox_id:
+                    try:
+                        accounts_resp = await self.apollo.list_email_accounts()
+                        accounts = accounts_resp.get("email_accounts", [])
+                        if accounts:
+                            mailbox_id = accounts[0].get("id")
+                    except Exception as e:
+                        logger.warning(f"Could not list Apollo email accounts: {e}")
+
+                if mailbox_id:
+                    try:
+                        await self.apollo.enroll_contacts(
+                            campaign.apollo_sequence_id, campaign.apollo_contact_ids, mailbox_id
+                        )
+                        campaign.contacts_enrolled = len(campaign.apollo_contact_ids)
+                        campaign.logs.append(f"Enrolled {campaign.contacts_enrolled} contacts")
+                    except Exception as e:
+                        msg = f"Enrollment failed: {e}"
+                        logger.error(msg)
+                        campaign.errors.append(msg)
+                        campaign.logs.append(msg)
+                else:
+                    msg = (
+                        "Enrollment skipped: no sender mailbox available -- set "
+                        "DEFAULT_SENDER_MAILBOX_ID or connect an email account in Apollo"
+                    )
+                    campaign.errors.append(msg)
+                    campaign.logs.append(msg)
+
+            if auto_launch and not campaign.activated:
+                try:
+                    await self.apollo.activate_sequence(campaign.apollo_sequence_id)
+                    campaign.activated = True
+                    campaign.logs.append("Sequence activated")
+                except Exception as e:
+                    msg = f"Activation failed: {e}"
+                    logger.error(msg)
+                    campaign.errors.append(msg)
+                    campaign.logs.append(msg)
+
+            # Reaching this point means list + sequence creation succeeded --
+            # the two hard failure points above already returned early with
+            # FAILED otherwise. Soft failures (a few contacts, enrollment)
+            # are recorded in errors/logs but don't demote overall status --
+            # note we do NOT gate this on `campaign.errors` being empty, since
+            # that list is append-only across retries and would wrongly show
+            # FAILED for a retry that fixed everything but left old entries.
+            # ACTIVE (not BUILT) if auto_launch already confirmed activation
+            # above -- otherwise this line would silently stomp that back to
+            # BUILT despite Apollo having actually gone live moments earlier.
+            campaign.status = CampaignStatus.ACTIVE if campaign.activated else CampaignStatus.BUILT
+            await self.store.save(campaign)
+            return campaign
+
+    async def mark_ready(self, campaign_id: str) -> Campaign:
+        """
+        The explicit human-approval gate between "mechanically built" and
+        "allowed to activate" -- app-side only, never set automatically by
+        build() or anywhere else. Idempotent: already-READY is a no-op.
+        """
+        async with self._locks[campaign_id]:
+            campaign = await self._require_campaign(campaign_id)
+            if campaign.status == CampaignStatus.READY:
+                return campaign
+            if campaign.status != CampaignStatus.BUILT:
+                raise ValueError(
+                    f"Campaign {campaign_id} must be built before it can be marked ready "
+                    f"(current status: {campaign.status.value})"
+                )
+            campaign.status = CampaignStatus.READY
+            campaign.logs.append("Marked ready for activation")
+            await self.store.save(campaign)
+            return campaign
+
+    async def activate(self, campaign_id: str) -> Campaign:
+        """
+        Loads the Campaign, calls Apollo, and ONLY on a successful Apollo
+        response updates + saves local state -- if activate_sequence
+        raises, nothing here is mutated or saved, so the store keeps
+        representing confirmed Apollo state, never intended state. No
+        try/except around the Apollo call: an exception is meant to
+        propagate to the caller (mapped to an HTTP error at the route
+        layer) precisely so a failure can never be silently absorbed into
+        a state change. Idempotent: already-ACTIVE is a no-op that makes
+        no Apollo call at all.
+        """
+        async with self._locks[campaign_id]:
+            campaign = await self._require_campaign(campaign_id)
+            if campaign.status == CampaignStatus.ACTIVE:
+                return campaign
+            if campaign.status not in (CampaignStatus.READY, CampaignStatus.PAUSED):
+                raise ValueError(
+                    f"Campaign {campaign_id} must be marked ready (or currently paused) "
+                    f"before it can be activated (current status: {campaign.status.value})"
+                )
+            if not campaign.apollo_sequence_id:
+                raise ValueError(f"Campaign {campaign_id} has no Apollo sequence to activate")
+
+            await self.apollo.activate_sequence(campaign.apollo_sequence_id)
+
+            campaign.activated = True
+            campaign.status = CampaignStatus.ACTIVE
+            campaign.logs.append("Sequence activated")
+            await self.store.save(campaign)
+            return campaign
+
+    async def pause(self, campaign_id: str) -> Campaign:
+        """Mirrors activate() exactly, via Apollo's deactivate_sequence (/abort)."""
+        async with self._locks[campaign_id]:
+            campaign = await self._require_campaign(campaign_id)
+            if campaign.status == CampaignStatus.PAUSED:
+                return campaign
+            if campaign.status != CampaignStatus.ACTIVE:
+                raise ValueError(
+                    f"Campaign {campaign_id} must be active before it can be paused "
+                    f"(current status: {campaign.status.value})"
+                )
+            if not campaign.apollo_sequence_id:
+                raise ValueError(f"Campaign {campaign_id} has no Apollo sequence to pause")
+
+            await self.apollo.deactivate_sequence(campaign.apollo_sequence_id)
+
+            campaign.activated = False
+            campaign.status = CampaignStatus.PAUSED
+            campaign.logs.append("Sequence paused")
+            await self.store.save(campaign)
+            return campaign
