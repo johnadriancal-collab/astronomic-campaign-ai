@@ -26,9 +26,25 @@ class ClaudeClient:
         max_tokens: int = 2000,
         temperature: float = 0.4,
     ) -> dict:
+        """Calls Claude and returns just the parsed JSON (existing callers)."""
+        parsed, _usage = await self.generate_json_with_usage(
+            system_prompt, user_prompt, max_retries, max_tokens, temperature
+        )
+        return parsed
+
+    async def generate_json_with_usage(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_retries: int = 3,
+        max_tokens: int = 2000,
+        temperature: float = 0.4,
+    ) -> tuple[dict, dict]:
         """
-        Calls Claude with a system + user prompt and parses the response as
-        JSON. Retries on transient HTTP errors or malformed JSON.
+        Same as generate_json, but also returns Anthropic's `usage` object
+        (input_tokens/output_tokens) -- needed for cost/latency reporting
+        (see prospect_ranker.py). Retries on transient HTTP errors or
+        malformed JSON.
         """
         last_error: Exception | None = None
 
@@ -57,7 +73,7 @@ class ClaudeClient:
                         for block in data.get("content", [])
                         if block.get("type") == "text"
                     ).strip()
-                    return self._parse_json(text)
+                    return self._parse_json(text), data.get("usage", {})
                 except (httpx.HTTPError, ValueError) as e:
                     last_error = e
                     logger.warning(f"Claude generation attempt {attempt} failed: {e}")
