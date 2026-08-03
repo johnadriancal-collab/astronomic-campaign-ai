@@ -2,14 +2,14 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Megaphone, Users } from "lucide-react";
+import { AlertTriangle, Loader2, Megaphone, RefreshCw, Users } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CampaignStatusBadge } from "@/components/campaign-status-badge";
-import { ApiError, listCampaigns, type Campaign } from "@/lib/api";
+import { ApiError, listCampaigns, syncCampaigns, type Campaign } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 function formatDate(iso: string): string {
@@ -23,39 +23,88 @@ function formatDate(iso: string): string {
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<Campaign[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  async function loadCampaigns(): Promise<void> {
+    try {
+      const data = await listCampaigns();
+      setCampaigns(data);
+      setError(null);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? `Couldn't load campaigns (${err.status}): ${err.message}`
+          : "Couldn't reach the backend to load campaigns."
+      );
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      setError(null);
+      // Render whatever's already stored immediately -- sync is
+      // non-blocking, same pattern as every other "Sync now" in this app.
+      // A failed sync leaves the page showing last-known-good data rather
+      // than blocking or blanking the view.
+      await loadCampaigns();
+      if (cancelled) return;
+
+      setSyncing(true);
       try {
-        const data = await listCampaigns();
-        if (!cancelled) setCampaigns(data);
+        await syncCampaigns();
+        if (!cancelled) await loadCampaigns();
       } catch (err) {
         if (!cancelled) {
-          setError(
+          setSyncError(
             err instanceof ApiError
-              ? `Couldn't load campaigns (${err.status}): ${err.message}`
-              : "Couldn't reach the backend to load campaigns."
+              ? `Couldn't sync with Apollo (${err.status}) -- showing last known data.`
+              : "Couldn't reach the backend to sync -- showing last known data."
           );
         }
+      } finally {
+        if (!cancelled) setSyncing(false);
       }
     })();
 
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
-      <div className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Campaigns</h1>
-        <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-          Every campaign created in Campaign Builder, loaded from the persistent campaign store.
-        </p>
+      <div className="mb-8 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Campaigns</h1>
+          <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+            Every campaign, whether built here or already running in your sending account.
+          </p>
+        </div>
+        <div className="mt-1.5 flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
+          {syncing ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Syncing…
+            </>
+          ) : (
+            <>
+              <RefreshCw className="h-3.5 w-3.5" />
+              Synced
+            </>
+          )}
+        </div>
       </div>
+
+      {syncError && (
+        <Alert variant="destructive" className="mb-4">
+          <AlertTriangle />
+          <AlertTitle>Sync failed</AlertTitle>
+          <AlertDescription>{syncError}</AlertDescription>
+        </Alert>
+      )}
 
       {error && (
         <Alert variant="destructive">

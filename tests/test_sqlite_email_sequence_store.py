@@ -76,6 +76,27 @@ async def test_get_by_campaign_id(sequence_store):
 
 
 @pytest.mark.asyncio
+async def test_get_by_apollo_sequence_id(sequence_store):
+    await sequence_store.create(make_sequence("s1", "c1", "apollo-1"))
+
+    found = await sequence_store.get_by_apollo_sequence_id("apollo-1")
+    assert found is not None
+    assert found.email_sequence_id == "s1"
+    assert await sequence_store.get_by_apollo_sequence_id("does-not-exist") is None
+
+
+@pytest.mark.asyncio
+async def test_list_all(sequence_store):
+    assert await sequence_store.list_all() == []
+
+    await sequence_store.create(make_sequence("s1", "c1", "apollo-1"))
+    await sequence_store.create(make_sequence("s2", "c2", "apollo-2"))
+
+    all_sequences = await sequence_store.list_all()
+    assert {s.email_sequence_id for s in all_sequences} == {"s1", "s2"}
+
+
+@pytest.mark.asyncio
 async def test_duplicate_campaign_id_raises(sequence_store):
     await sequence_store.create(make_sequence("s1", "c1", "apollo-1"))
     with pytest.raises(ValueError):

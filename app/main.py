@@ -18,6 +18,7 @@ Endpoints:
     POST /campaign/{campaign_id}/messages/fixtures             - generate local test-fixture messages (no Apollo call)
     GET  /campaign/{campaign_id}/messages/{message_id}/events        - a message's synced open/click events
     POST /campaign/{campaign_id}/messages/{message_id}/sync-events   - explicit manual event sync for one message
+    POST /sync/campaigns             - discovers/updates/archives campaigns from Apollo's current sequence list
 
 Campaign routes themselves live in app/api/campaign.py (see
 docs/ARCHITECTURE.md) -- this module only owns app-level concerns: the
@@ -36,6 +37,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.campaign import router as campaign_router
 from app.api.leads import router as leads_router
+from app.api.sync import router as sync_router
 from app.config import settings
 from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
 from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
@@ -45,6 +47,7 @@ from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenc
 from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStore
 from app.repositories.sqlite_lead_store import SQLiteLeadStore
 from app.services.campaign_service import CampaignService
+from app.services.campaign_sync_service import CampaignSyncService
 from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.lead_service import LeadService
@@ -86,6 +89,11 @@ async def lifespan(app: FastAPI):
         lead_store=lead_store,
         campaign_lead_store=campaign_lead_store,
     )
+    app.state.campaign_sync_service = CampaignSyncService(
+        campaign_store=campaign_store,
+        sequence_store=email_sequence_store,
+        step_store=email_sequence_step_store,
+    )
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -99,6 +107,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
 app.include_router(campaign_router)
 app.include_router(leads_router)
+app.include_router(sync_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">

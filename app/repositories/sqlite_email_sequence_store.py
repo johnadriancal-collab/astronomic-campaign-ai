@@ -98,6 +98,22 @@ class SQLiteEmailSequenceStore(EmailSequenceStore):
             return None
         return EmailSequence.model_validate_json(row["data"])
 
+    async def list_all(self) -> list[EmailSequence]:
+        cursor = await self._connection.execute("SELECT data FROM email_sequences")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [EmailSequence.model_validate_json(row["data"]) for row in rows]
+
+    async def get_by_apollo_sequence_id(self, apollo_sequence_id: str) -> EmailSequence | None:
+        cursor = await self._connection.execute(
+            "SELECT data FROM email_sequences WHERE apollo_sequence_id = ?", (apollo_sequence_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        if row is None:
+            return None
+        return EmailSequence.model_validate_json(row["data"])
+
     async def save(self, sequence: EmailSequence) -> None:
         now = datetime.now(timezone.utc).isoformat()
         cursor = await self._connection.execute(

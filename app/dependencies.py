@@ -10,6 +10,7 @@ import-time singleton.
 from fastapi import Request
 
 from app.services.campaign_service import CampaignService
+from app.services.campaign_sync_service import CampaignSyncService
 from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.lead_service import LeadService
@@ -17,6 +18,10 @@ from app.services.lead_service import LeadService
 
 async def get_campaign_service(request: Request) -> CampaignService:
     return request.app.state.campaign_service
+
+
+async def get_campaign_sync_service(request: Request) -> CampaignSyncService:
+    return request.app.state.campaign_sync_service
 
 
 async def get_lead_service(request: Request) -> LeadService:

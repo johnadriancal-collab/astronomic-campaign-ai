@@ -28,8 +28,20 @@ class EmailSequenceStore(ABC):
         """The primary lookup -- EmailSequence is 1:1 with Campaign today."""
 
     @abstractmethod
+    async def get_by_apollo_sequence_id(self, apollo_sequence_id: str) -> EmailSequence | None:
+        """
+        The sync dedup lookup -- CampaignSyncService uses this before
+        creating a new record, mirroring LeadStore.get_by_apollo_contact_id.
+        apollo_sequence_id is already UNIQUE at the storage layer.
+        """
+
+    @abstractmethod
     async def save(self, sequence: EmailSequence) -> None:
         """Persist mutations to an existing sequence."""
+
+    @abstractmethod
+    async def list_all(self) -> list[EmailSequence]:
+        """Every stored sequence -- CampaignSyncService's reconciliation pass needs the full set."""
 
 
 class MemoryEmailSequenceStore(EmailSequenceStore):
@@ -54,7 +66,16 @@ class MemoryEmailSequenceStore(EmailSequenceStore):
                 return sequence
         return None
 
+    async def get_by_apollo_sequence_id(self, apollo_sequence_id: str) -> EmailSequence | None:
+        for sequence in self._sequences.values():
+            if sequence.apollo_sequence_id == apollo_sequence_id:
+                return sequence
+        return None
+
     async def save(self, sequence: EmailSequence) -> None:
         if sequence.email_sequence_id not in self._sequences:
             raise EmailSequenceNotFoundError(sequence.email_sequence_id)
         self._sequences[sequence.email_sequence_id] = sequence
+
+    async def list_all(self) -> list[EmailSequence]:
+        return list(self._sequences.values())

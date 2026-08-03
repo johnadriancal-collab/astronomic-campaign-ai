@@ -29,7 +29,7 @@ from app.dependencies import (
 )
 from app.models.campaign import BuildRequest, Campaign, PreviewRequest, SearchRequest
 from app.models.email_message import EmailMessageEvent, EmailMessageWithEventCounts
-from app.models.email_sequence import EmailSequenceWithSteps
+from app.models.email_sequence import EmailSequenceStatus, EmailSequenceWithSteps
 from app.models.lead import CampaignLeadView
 from app.repositories.campaign_store import CampaignNotFoundError
 from app.repositories.email_message_store import EmailMessageNotFoundError
@@ -42,15 +42,33 @@ router = APIRouter(prefix="/campaign", tags=["campaign"])
 
 
 @router.get("", response_model=list[Campaign])
-async def list_campaigns(service: CampaignService = Depends(get_campaign_service)):
+async def list_campaigns(
+    include_archived: bool = False,
+    service: CampaignService = Depends(get_campaign_service),
+    sequence_sync_service: EmailSequenceSyncService = Depends(get_email_sequence_sync_service),
+):
     """
     Lists every stored campaign, newest first -- for Campaign Manager's
     Campaigns view. Read-only: loads from CampaignStore only, never calls
     Claude or Apollo. Registered ahead of GET /{campaign_id} below so it
     can't be shadowed by that route (not that it could collide anyway --
     this path has no additional segment for {campaign_id} to capture).
+
+    Archived campaigns (their EmailSequence.status == ARCHIVED, set by
+    CampaignSyncService's reconciliation pass) are hidden by default --
+    never deleted, just not shown unless include_archived=true. This
+    applies regardless of a campaign's source: a NATIVE campaign whose
+    Apollo sequence gets archived is hidden here too, same as a SYNCED one.
     """
     campaigns = await service.store.list()
+    if not include_archived:
+        visible = []
+        for campaign in campaigns:
+            sequence = await sequence_sync_service.store.get_by_campaign_id(campaign.campaign_id)
+            if sequence is not None and sequence.status == EmailSequenceStatus.ARCHIVED:
+                continue
+            visible.append(campaign)
+        campaigns = visible
     return sorted(campaigns, key=lambda c: c.created_at, reverse=True)
 
 

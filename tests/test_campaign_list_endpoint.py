@@ -13,10 +13,14 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.campaign import router as campaign_router
-from app.dependencies import get_campaign_service
+from app.dependencies import get_campaign_service, get_email_sequence_sync_service
 from app.models.campaign import Campaign, CampaignPlan, Filters
+from app.models.email_sequence import EmailSequence, EmailSequenceStatus
 from app.repositories.campaign_store import MemoryCampaignStore
+from app.repositories.email_sequence_step_store import MemoryEmailSequenceStepStore
+from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.services.campaign_service import CampaignService
+from app.services.email_sequence_sync_service import EmailSequenceSyncService
 
 
 def make_campaign(campaign_id: str, created_at: str) -> Campaign:
@@ -42,16 +46,22 @@ def test_client():
     fake_ranker = AsyncMock()
     service = CampaignService(agent=fake_agent, apollo=fake_apollo, ranker=fake_ranker, store=store)
 
+    sequence_store = MemoryEmailSequenceStore()
+    sequence_sync_service = EmailSequenceSyncService(
+        campaign_store=store, store=sequence_store, step_store=MemoryEmailSequenceStepStore(), apollo=fake_apollo
+    )
+
     app = FastAPI()
     app.include_router(campaign_router)
     app.dependency_overrides[get_campaign_service] = lambda: service
+    app.dependency_overrides[get_email_sequence_sync_service] = lambda: sequence_sync_service
 
     with TestClient(app) as client:
-        yield client, store, fake_agent, fake_apollo, fake_ranker
+        yield client, store, fake_agent, fake_apollo, fake_ranker, sequence_store
 
 
 def test_list_empty_returns_empty_array(test_client):
-    client, _store, _agent, _apollo, _ranker = test_client
+    client, _store, _agent, _apollo, _ranker, _seq_store = test_client
 
     resp = client.get("/campaign")
 
@@ -61,7 +71,7 @@ def test_list_empty_returns_empty_array(test_client):
 
 @pytest.mark.asyncio
 async def test_list_returns_all_campaigns_sorted_newest_first(test_client):
-    client, store, _agent, _apollo, _ranker = test_client
+    client, store, _agent, _apollo, _ranker, _seq_store = test_client
 
     await store.create(make_campaign("oldest", "2026-01-01T00:00:00Z"))
     await store.create(make_campaign("middle", "2026-06-01T00:00:00Z"))
@@ -76,7 +86,7 @@ async def test_list_returns_all_campaigns_sorted_newest_first(test_client):
 
 @pytest.mark.asyncio
 async def test_list_includes_the_fields_the_manager_ui_needs(test_client):
-    client, store, _agent, _apollo, _ranker = test_client
+    client, store, _agent, _apollo, _ranker, _seq_store = test_client
 
     campaign = make_campaign("c1", "2026-07-01T00:00:00Z")
     campaign.total_matches = 160
@@ -96,13 +106,40 @@ async def test_list_includes_the_fields_the_manager_ui_needs(test_client):
     assert body["created_at"].startswith("2026-07-01")
 
 
+@pytest.mark.asyncio
+async def test_list_hides_archived_by_default_but_include_archived_shows_it(test_client):
+    client, store, _agent, _apollo, _ranker, seq_store = test_client
+
+    await store.create(make_campaign("visible", "2026-07-01T00:00:00Z"))
+    await store.create(make_campaign("archived", "2026-07-02T00:00:00Z"))
+    now = datetime.now(timezone.utc)
+    await seq_store.create(
+        EmailSequence(
+            email_sequence_id="seq-1",
+            campaign_id="archived",
+            apollo_sequence_id="apollo-seq-1",
+            name="Archived one",
+            status=EmailSequenceStatus.ARCHIVED,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+    default_resp = client.get("/campaign")
+    assert [c["campaign_id"] for c in default_resp.json()] == ["visible"]
+
+    included_resp = client.get("/campaign?include_archived=true")
+    ids = {c["campaign_id"] for c in included_resp.json()}
+    assert ids == {"visible", "archived"}
+
+
 def test_list_never_calls_claude_or_apollo(test_client):
     """
     Listing is read-only against the store -- it must never touch Claude
     (agent/ranker) or Apollo, preserving the plan/ranking determinism
     guarantees the rest of the pipeline relies on.
     """
-    client, _store, fake_agent, fake_apollo, fake_ranker = test_client
+    client, _store, fake_agent, fake_apollo, fake_ranker, _seq_store = test_client
 
     client.get("/campaign")
 

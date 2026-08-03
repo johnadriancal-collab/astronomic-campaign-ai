@@ -63,11 +63,19 @@ export interface BuildReport {
   errors: string[];
 }
 
+/**
+ * Internal sync bookkeeping only -- never rendered anywhere. A Campaign
+ * is a Campaign regardless of this value; it exists purely so
+ * CampaignSyncService knows which records it owns and may overwrite.
+ */
+export type CampaignSource = "native" | "synced";
+
 export interface Campaign {
   campaign_id: string;
   original_prompt: string;
   created_at: string;
   status: CampaignStatus;
+  source: CampaignSource;
   plan: CampaignPlan;
 
   desired_prospect_count: number;
@@ -157,12 +165,36 @@ export function pauseCampaign(campaignId: string): Promise<Campaign> {
  * Apollo search. Same read-only guarantee as GET /campaign/{id} already had
  * for Builder's polling use.
  */
-export function listCampaigns(): Promise<Campaign[]> {
-  return request<Campaign[]>("/campaign");
+export function listCampaigns(includeArchived = false): Promise<Campaign[]> {
+  const query = includeArchived ? "?include_archived=true" : "";
+  return request<Campaign[]>(`/campaign${query}`);
 }
 
 export function getCampaign(campaignId: string): Promise<Campaign> {
   return request<Campaign>(`/campaign/${campaignId}`);
+}
+
+/**
+ * The result of one campaign sync run -- for visibility/debugging, not
+ * stored anywhere. See app/models/campaign_sync.py.
+ */
+export interface CampaignSyncReport {
+  found: number;
+  created: number;
+  updated: number;
+  archived: number;
+  unchanged: number;
+  duration_ms: number;
+}
+
+/**
+ * Discovers new Apollo sequences (each becomes a Campaign), refreshes
+ * already-synced ones, and archives any that disappeared from Apollo.
+ * Never automatic/scheduled -- the campaigns list page triggers this on
+ * mount, non-blocking, same pattern as every other "Sync now" in this app.
+ */
+export function syncCampaigns(): Promise<CampaignSyncReport> {
+  return post<CampaignSyncReport>("/sync/campaigns", {});
 }
 
 /**

@@ -49,6 +49,25 @@ class CampaignPlan(BaseModel):
     launch: bool = False
 
 
+class CampaignSource(str, Enum):
+    """
+    Internal sync bookkeeping ONLY -- never rendered in the UI. A Campaign
+    is always ours regardless of this value; it exists purely so
+    CampaignSyncService knows which records it owns and may overwrite.
+
+    Deliberately generic, not provider-named: NATIVE means "created
+    directly inside our application" (via AI Builder today, potentially
+    other creation paths later), SYNCED means "brought in by
+    CampaignSyncService from an external system" (Apollo today,
+    potentially another provider later). Neither value hardcodes "Apollo"
+    or "Builder" so this doesn't need to change shape as the sync engine
+    grows (push, reconcile, multi-provider).
+    """
+
+    NATIVE = "native"
+    SYNCED = "synced"
+
+
 class CampaignStatus(str, Enum):
     DRAFT = "draft"  # plan generated, not yet searched
     SEARCHED = "searched"  # prospects retrieved + ranked
@@ -69,6 +88,7 @@ class Campaign(BaseModel):
     original_prompt: str
     created_at: datetime
     status: CampaignStatus = CampaignStatus.DRAFT
+    source: CampaignSource = CampaignSource.NATIVE
 
     plan: CampaignPlan
 
