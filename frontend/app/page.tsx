@@ -2,9 +2,10 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Loader2, Sparkles } from "lucide-react";
+import { ArrowRight, Loader2, Sparkles, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { previewCampaign, ApiError } from "@/lib/api";
 import { useCampaignStore } from "@/lib/store";
@@ -17,8 +18,9 @@ const EXAMPLE_PROMPTS = [
 
 export default function Home() {
   const router = useRouter();
-  const setPrompt = useCampaignStore((s) => s.setPrompt);
-  const setPlan = useCampaignStore((s) => s.setPlan);
+  const setCampaign = useCampaignStore((s) => s.setCampaign);
+  const desiredProspectCount = useCampaignStore((s) => s.desiredProspectCount);
+  const setDesiredProspectCount = useCampaignStore((s) => s.setDesiredProspectCount);
 
   const [value, setValue] = useState("");
   const [loading, setLoading] = useState(false);
@@ -29,9 +31,10 @@ export default function Home() {
     setLoading(true);
     setError(null);
     try {
-      const plan = await previewCampaign(value.trim());
-      setPrompt(value.trim());
-      setPlan(plan);
+      // The ONLY Claude plan-generation call in the whole flow -- every
+      // later stage reuses this campaign_id instead of regenerating.
+      const campaign = await previewCampaign(value.trim(), desiredProspectCount);
+      setCampaign(campaign);
       router.push("/results");
     } catch (err) {
       setError(
@@ -79,7 +82,25 @@ export default function Home() {
               className="resize-none border-none bg-transparent p-2 text-base shadow-none focus-visible:ring-0 md:text-base"
             />
             <div className="flex items-center justify-between px-2 pb-1 pt-2">
-              <span className="text-xs text-muted-foreground">⌘ + Enter to generate</span>
+              <div className="flex items-center gap-3">
+                <span className="text-xs text-muted-foreground">⌘ + Enter to generate</span>
+                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Users className="h-3 w-3" />
+                  Target prospects
+                  <Input
+                    type="number"
+                    min={5}
+                    max={200}
+                    value={desiredProspectCount}
+                    disabled={loading}
+                    onChange={(e) => {
+                      const n = parseInt(e.target.value, 10);
+                      setDesiredProspectCount(Number.isFinite(n) ? n : 25);
+                    }}
+                    className="h-6 w-16 rounded-md border-border/60 bg-secondary/40 px-2 text-xs"
+                  />
+                </label>
+              </div>
               <Button onClick={handleGenerate} disabled={!value.trim() || loading} size="sm" className="gap-1.5">
                 {loading ? (
                   <>
