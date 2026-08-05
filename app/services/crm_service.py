@@ -32,6 +32,7 @@ from app.models.crm import (
     CrmCustomFieldDefinition,
     CrmImportRowStatus,
     CustomFieldType,
+    derive_investor_mode,
     normalize_email,
     normalize_linkedin_url,
     normalize_name_company,
@@ -115,6 +116,9 @@ class CrmService:
         if existing is not None:
             raise ValueError(f"A CRM contact already exists with this identifier: {existing.crm_contact_id}")
 
+        if not fields.get("thesis_investor_mode_manual_override", False):
+            fields = {**fields, "thesis_investor_mode": derive_investor_mode(fields.get("custom_fields", {}).get("investor_type"))}
+
         now = datetime.now(timezone.utc)
         contact = CrmContact(crm_contact_id=str(uuid.uuid4()), created_at=now, updated_at=now, **fields)
         await self.contact_store.create(contact)
@@ -134,10 +138,26 @@ class CrmService:
         does client-side -- this makes that safety guaranteed at the
         service layer too, not just a property of how the UI happens to
         submit its state today.
+
+        thesis_investor_mode gets the same treatment as custom_fields, for
+        the same reason: while thesis_investor_mode_manual_override is
+        False (the default), this method recomputes thesis_investor_mode
+        from the *effective* (post-merge) custom_fields on every call --
+        regardless of whether the caller's patch even mentions
+        thesis_investor_mode or investor_type -- rather than trying to
+        detect "did the human just change this specific field," which the
+        frontend's full-object save makes impossible to tell apart from
+        "this field happened to already hold that value." Flipping
+        thesis_investor_mode_manual_override to True is the one explicit,
+        unambiguous way to make this method leave the field alone.
         """
         contact = await self._require_contact(crm_contact_id)
         if "custom_fields" in patch:
             patch = {**patch, "custom_fields": {**contact.custom_fields, **patch["custom_fields"]}}
+        manual_override = patch.get("thesis_investor_mode_manual_override", contact.thesis_investor_mode_manual_override)
+        if not manual_override:
+            effective_custom_fields = patch.get("custom_fields", contact.custom_fields)
+            patch = {**patch, "thesis_investor_mode": derive_investor_mode(effective_custom_fields.get("investor_type"))}
         updated = contact.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
         await self.contact_store.save(updated)
         return updated

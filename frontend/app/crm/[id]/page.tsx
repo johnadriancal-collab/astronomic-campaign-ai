@@ -283,17 +283,33 @@ export default function CrmContactDetailPage() {
                 <AccordionPanel className="space-y-4">
                   <TextField label="City/cities they live in or frequent" value={contact.thesis_cities ?? ""} onChange={(v) => set("thesis_cities", v)} />
                   <div className="space-y-1">
-                    <label className="text-xs font-medium text-muted-foreground">Invests privately or institutionally?</label>
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-xs font-medium text-muted-foreground">Invests privately or institutionally?</label>
+                      <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <input
+                          type="checkbox"
+                          checked={contact.thesis_investor_mode_manual_override}
+                          onChange={(e) => set("thesis_investor_mode_manual_override", e.target.checked)}
+                        />
+                        Manually override
+                      </label>
+                    </div>
                     <select
                       value={contact.thesis_investor_mode ?? ""}
                       onChange={(e) => set("thesis_investor_mode", e.target.value)}
-                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+                      disabled={!contact.thesis_investor_mode_manual_override}
+                      className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                     >
                       <option value="">-- not set --</option>
                       {INVESTOR_MODE_OPTIONS.map((o) => (
                         <option key={o} value={o}>{o}</option>
                       ))}
                     </select>
+                    <p className="text-xs text-muted-foreground">
+                      {contact.thesis_investor_mode_manual_override
+                        ? "Manual override is on -- this value will not change automatically."
+                        : "Auto-derived from Investor Type. Check \"Manually override\" to set this by hand."}
+                    </p>
                   </div>
                   <label className="flex items-center gap-2 text-sm font-medium">
                     <input

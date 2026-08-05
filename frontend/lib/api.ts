@@ -453,6 +453,7 @@ export interface CrmContact {
 
   thesis_cities: string | null;
   thesis_investor_mode: string | null;
+  thesis_investor_mode_manual_override: boolean;
 
   thesis_private_asset_types: string[];
   thesis_private_asset_types_other: string | null;

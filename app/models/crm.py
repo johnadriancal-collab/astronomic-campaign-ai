@@ -166,6 +166,51 @@ DEMOGRAPHIC_PREFERENCE_OPTIONS = [
 
 INVESTOR_MODE_OPTIONS = ["Privately", "Institutionally", "Both"]
 
+# The custom field "Investor Type" (field_key="investor_type") is Astronomic's
+# investor archetype -- distinct from this Investor Thesis Q6 mode -- but each
+# archetype implies a private-vs-institutional signal, which is what
+# derive_investor_mode() below turns into thesis_investor_mode automatically.
+PRIVATE_INVESTOR_TYPES = frozenset(
+    {
+        "Angel Investor",
+        "I sponsor deals that I find",
+        "Invest with group of Angels",
+        "Participate in syndicated investments",
+        "Private Investor",
+    }
+)
+INSTITUTIONAL_INVESTOR_TYPES = frozenset(
+    {
+        "Family Office",
+        "Fund LP",
+        "Institutional Investor",
+        "Private Equity",
+        "Venture Capital",
+    }
+)
+
+
+def derive_investor_mode(investor_type: list[str] | None) -> str | None:
+    """
+    thesis_investor_mode's automated value, derived from the "Investor Type"
+    custom field. Called by CrmService on every create/update where
+    thesis_investor_mode_manual_override is False -- see CrmContact's
+    thesis_investor_mode_manual_override docstring for why that flag exists
+    and how it interacts with this function. Returns None (leaves the field
+    unset) when investor_type carries no private/institutional signal at
+    all -- never guesses.
+    """
+    types = set(investor_type or [])
+    is_private = bool(types & PRIVATE_INVESTOR_TYPES)
+    is_institutional = bool(types & INSTITUTIONAL_INVESTOR_TYPES)
+    if is_private and is_institutional:
+        return "Both"
+    if is_private:
+        return "Privately"
+    if is_institutional:
+        return "Institutionally"
+    return None
+
 
 def normalize_email(email: str | None) -> str | None:
     return email.strip().lower() or None if email else None
@@ -206,7 +251,7 @@ EXTERNAL_FIELD_NAMES = frozenset(
 
 THESIS_FIELD_NAMES = frozenset(
     {
-        "thesis_cities", "thesis_investor_mode",
+        "thesis_cities", "thesis_investor_mode", "thesis_investor_mode_manual_override",
         "thesis_private_asset_types", "thesis_private_asset_types_other",
         "thesis_private_business_models", "thesis_private_business_models_other",
         "thesis_private_industries", "thesis_private_industries_other",
@@ -266,6 +311,10 @@ class CrmContact(BaseModel):
     # Q1-4 are first_name/last_name/email/linkedin_url above) ---
     thesis_cities: str | None = None  # Q5, free text as answered (not split/parsed)
     thesis_investor_mode: str | None = None  # Q6: one of INVESTOR_MODE_OPTIONS
+    thesis_investor_mode_manual_override: bool = False  # False (default) = CrmService
+    # keeps this auto-derived from custom_fields["investor_type"] on every create/update
+    # (see crm_service.derive_investor_mode) -- a human can flip this to True via the UI
+    # to pick Privately/Institutionally/Both by hand and have the automation leave it alone.
 
     thesis_private_asset_types: list[str] = Field(default_factory=list)  # Q7
     thesis_private_asset_types_other: str | None = None

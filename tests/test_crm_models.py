@@ -13,11 +13,57 @@ from app.models.crm import (
     CrmContact,
     CrmCustomFieldDefinition,
     CustomFieldType,
+    derive_investor_mode,
 )
 
 
 def test_investor_mode_options_match_the_real_form_exactly():
     assert INVESTOR_MODE_OPTIONS == ["Privately", "Institutionally", "Both"]
+
+
+# --- derive_investor_mode() ---
+
+
+def test_derive_investor_mode_private_only():
+    assert derive_investor_mode(["Angel Investor"]) == "Privately"
+
+
+def test_derive_investor_mode_institutional_only():
+    assert derive_investor_mode(["Venture Capital"]) == "Institutionally"
+
+
+def test_derive_investor_mode_both():
+    assert derive_investor_mode(["Angel Investor", "Family Office"]) == "Both"
+
+
+def test_derive_investor_mode_neither():
+    assert derive_investor_mode(["Lawyer"]) is None
+
+
+def test_derive_investor_mode_empty_or_none_is_neither():
+    assert derive_investor_mode([]) is None
+    assert derive_investor_mode(None) is None
+
+
+def test_derive_investor_mode_multiple_private_types_still_privately():
+    assert derive_investor_mode(
+        ["Angel Investor", "Private Investor", "Invest with group of Angels"]
+    ) == "Privately"
+
+
+def test_derive_investor_mode_multiple_institutional_types_still_institutionally():
+    assert derive_investor_mode(["Family Office", "Fund LP", "Venture Capital"]) == "Institutionally"
+
+
+def test_derive_investor_mode_mixed_multiple_types_is_both():
+    assert derive_investor_mode(
+        ["Angel Investor", "I sponsor deals that I find", "Family Office", "Institutional Investor"]
+    ) == "Both"
+
+
+def test_crm_contact_defaults_to_not_manually_overridden():
+    contact = CrmContact(crm_contact_id="1", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
+    assert contact.thesis_investor_mode_manual_override is False
 
 
 def test_check_size_options_cover_full_range_from_the_real_form():

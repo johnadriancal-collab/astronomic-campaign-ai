@@ -65,6 +65,74 @@ async def test_manual_edit_can_clear_a_field_directly(service):
     assert updated.company == ""
 
 
+# --- thesis_investor_mode automation (derived from investor_type) ---
+
+
+@pytest.mark.asyncio
+async def test_create_contact_auto_derives_investor_mode_from_investor_type(service):
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}})
+    assert contact.thesis_investor_mode == "Privately"
+    assert contact.thesis_investor_mode_manual_override is False
+
+
+@pytest.mark.asyncio
+async def test_create_contact_with_no_investor_type_leaves_mode_unset(service):
+    contact = await service.create_contact({"first_name": "Ada"})
+    assert contact.thesis_investor_mode is None
+
+
+@pytest.mark.asyncio
+async def test_update_contact_recalculates_mode_when_investor_type_changes(service):
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}})
+    assert contact.thesis_investor_mode == "Privately"
+
+    updated = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"investor_type": ["Angel Investor", "Venture Capital"]}}
+    )
+    assert updated.thesis_investor_mode == "Both"
+
+
+@pytest.mark.asyncio
+async def test_update_contact_removes_mode_when_last_private_type_removed(service):
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}})
+    assert contact.thesis_investor_mode == "Privately"
+
+    updated = await service.update_contact(contact.crm_contact_id, {"custom_fields": {"investor_type": []}})
+    assert updated.thesis_investor_mode is None
+
+
+@pytest.mark.asyncio
+async def test_manual_override_prevents_automatic_recalculation(service):
+    """A human's explicit Privately/Institutionally/Both choice survives an Investor Type change
+    once thesis_investor_mode_manual_override is True -- the whole point of the flag."""
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}})
+    assert contact.thesis_investor_mode == "Privately"
+
+    overridden = await service.update_contact(
+        contact.crm_contact_id,
+        {"thesis_investor_mode_manual_override": True, "thesis_investor_mode": "Institutionally"},
+    )
+    assert overridden.thesis_investor_mode == "Institutionally"
+
+    # Investor Type changes again -- automation must NOT touch the manually-set value.
+    unchanged = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"investor_type": ["Angel Investor", "Family Office"]}}
+    )
+    assert unchanged.thesis_investor_mode == "Institutionally"
+    assert unchanged.thesis_investor_mode_manual_override is True
+
+
+@pytest.mark.asyncio
+async def test_turning_override_back_off_resumes_automation(service):
+    contact = await service.create_contact(
+        {"custom_fields": {"investor_type": ["Angel Investor"]}, "thesis_investor_mode_manual_override": True}
+    )
+    resumed = await service.update_contact(
+        contact.crm_contact_id, {"thesis_investor_mode_manual_override": False}
+    )
+    assert resumed.thesis_investor_mode == "Privately"
+
+
 @pytest.mark.asyncio
 async def test_archive_is_soft_delete(service):
     contact = await service.create_contact({"first_name": "Ada"})
@@ -94,8 +162,15 @@ async def test_list_contacts_hides_archived_by_default(service):
 
 @pytest.mark.asyncio
 async def test_list_contacts_filters_by_city_and_investor_mode(service):
-    await service.create_contact({"first_name": "A", "city": "Austin", "thesis_investor_mode": "Privately"})
-    await service.create_contact({"first_name": "B", "city": "Denver", "thesis_investor_mode": "Both"})
+    # thesis_investor_mode_manual_override=True is required here: with automation on
+    # (the default), thesis_investor_mode is derived from investor_type and a direct
+    # value would otherwise be overwritten -- see the automation tests above.
+    await service.create_contact(
+        {"first_name": "A", "city": "Austin", "thesis_investor_mode": "Privately", "thesis_investor_mode_manual_override": True}
+    )
+    await service.create_contact(
+        {"first_name": "B", "city": "Denver", "thesis_investor_mode": "Both", "thesis_investor_mode_manual_override": True}
+    )
 
     results = await service.list_contacts(city="Austin")
     assert [c.first_name for c in results.items] == ["A"]
