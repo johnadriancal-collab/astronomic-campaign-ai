@@ -209,7 +209,7 @@ export function CampaignDetailView({ campaignId }: { campaignId: string }) {
           {/* Overview */}
           <div>
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">
                 {campaign.plan.campaign_name}
               </h1>
               <CampaignStatusBadge status={campaign.status} />

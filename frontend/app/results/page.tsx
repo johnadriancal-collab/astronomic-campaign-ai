@@ -31,7 +31,12 @@ export default function ResultsPage() {
   }, [campaign, router]);
 
   useEffect(() => {
-    if (!campaign || campaign.status !== "draft" || searchLoading) return;
+    // Also resumes a campaign left mid-pipeline (status "searching"/"ranking")
+    // by an earlier crashed/interrupted attempt -- the backend's pipeline
+    // engine picks up at exactly the step that didn't finish, re-running
+    // only that one, never redoing a search that already succeeded.
+    const resumable = ["draft", "searching", "ranking"];
+    if (!campaign || !resumable.includes(campaign.status) || searchLoading) return;
     let cancelled = false;
 
     (async () => {
@@ -44,9 +49,10 @@ export default function ResultsPage() {
         if (!cancelled) setCampaign(updated);
       } catch (err) {
         if (!cancelled) {
-          setSearchError(
-            err instanceof ApiError ? `Apollo search failed (${err.status}): ${err.message}` : "Couldn't reach Apollo search."
-          );
+          // No hardcoded "Apollo search failed" prefix -- the backend now
+          // attributes the message to whichever step actually failed
+          // (search or ranking), so it's already accurate on its own.
+          setSearchError(err instanceof ApiError ? err.message : "Couldn't reach the backend to search.");
         }
       } finally {
         if (!cancelled) setSearchLoading(false);
@@ -135,7 +141,7 @@ export default function ResultsPage() {
         <div className="min-w-0 space-y-8">
           <div className="animate-in fade-in slide-in-from-bottom-2 duration-500">
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{campaign.plan.campaign_name}</h1>
+              <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">{campaign.plan.campaign_name}</h1>
               {searchLoading ? (
                 <Skeleton className="h-6 w-48 rounded-full" />
               ) : campaign.total_matches !== null ? (

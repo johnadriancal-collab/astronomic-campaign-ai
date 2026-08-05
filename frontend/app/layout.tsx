@@ -1,17 +1,28 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { IBM_Plex_Mono, IBM_Plex_Sans, IBM_Plex_Serif } from "next/font/google";
 import { BackendStatus } from "@/components/backend-status";
 import { SiteHeader } from "@/components/site-header";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+// Same three families astronomic.com itself uses -- IBM Plex Sans for
+// body/nav/buttons, IBM Plex Serif for major page titles only, IBM Plex
+// Mono for small mono-detail text (IDs, etc.) that already used font-mono.
+const plexSans = IBM_Plex_Sans({
+  variable: "--font-plex-sans",
   subsets: ["latin"],
+  weight: ["400", "500", "600"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const plexSerif = IBM_Plex_Serif({
+  variable: "--font-plex-serif",
   subsets: ["latin"],
+  weight: ["400", "500"],
+});
+
+const plexMono = IBM_Plex_Mono({
+  variable: "--font-plex-mono",
+  subsets: ["latin"],
+  weight: ["400", "500"],
 });
 
 export const metadata: Metadata = {
@@ -27,7 +38,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`dark ${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${plexSans.variable} ${plexSerif.variable} ${plexMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-background text-foreground">
         <SiteHeader />

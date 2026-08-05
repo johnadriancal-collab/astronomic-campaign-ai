@@ -290,7 +290,7 @@ export default function CrmContactDetailPage() {
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2">
-            <h1 className="text-2xl font-semibold tracking-tight">{name}</h1>
+            <h1 className="font-serif text-2xl font-medium tracking-tight">{name}</h1>
             {contact.archived && <Badge variant="outline">Archived</Badge>}
           </div>
           <p className="mt-1 text-sm text-muted-foreground">

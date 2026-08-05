@@ -11,7 +11,7 @@ export interface Stage {
 }
 
 function StageIcon({ status }: { status: StageStatus }) {
-  if (status === "done") return <CheckCircle2 className="h-4 w-4 text-emerald-400" />;
+  if (status === "done") return <CheckCircle2 className="h-4 w-4 text-emerald-600" />;
   if (status === "active") return <Loader2 className="h-4 w-4 animate-spin text-primary" />;
   if (status === "error") return <XCircle className="h-4 w-4 text-destructive" />;
   return <Circle className="h-4 w-4 text-muted-foreground/40" />;

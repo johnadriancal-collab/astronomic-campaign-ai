@@ -70,7 +70,7 @@ export default function Home() {
             </Link>
           </div>
 
-          <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
+          <h1 className="text-balance font-serif text-4xl font-medium tracking-tight sm:text-5xl">
             Describe your campaign.
             <br />
             <span className="text-muted-foreground">Claude drafts it.</span>
@@ -82,7 +82,7 @@ export default function Home() {
         </div>
 
         <div className="animate-in fade-in slide-in-from-bottom-4 duration-700 [animation-delay:100ms]">
-          <div className="rounded-2xl border border-border/60 bg-card/80 p-3 shadow-2xl shadow-black/20 backdrop-blur-sm transition-shadow focus-within:shadow-primary/10">
+          <div className="rounded-lg border border-border bg-card p-3 shadow-sm transition-colors focus-within:border-primary/50">
             <Textarea
               value={value}
               onChange={(e) => setValue(e.target.value)}

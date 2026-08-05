@@ -46,7 +46,7 @@ export default function ManagerOverviewPage() {
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
       <div className="mb-8 animate-in fade-in slide-in-from-bottom-2 duration-500">
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Campaign Manager</h1>
+        <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">Campaign Manager</h1>
         <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
           Campaigns built in Campaign Builder are managed here after launch — leads, sequences,
           replies, and performance in one place. Each section below is being built out next.

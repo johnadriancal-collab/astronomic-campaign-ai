@@ -195,7 +195,7 @@ export default function CrmCustomFieldsPage() {
     <div className="mx-auto max-w-3xl px-6 py-10">
       <div className="mb-6 flex items-start justify-between gap-4">
         <div>
-          <h1 className="mb-2 text-2xl font-semibold tracking-tight">Custom fields</h1>
+          <h1 className="mb-2 font-serif text-2xl font-medium tracking-tight">Custom fields</h1>
           <p className="text-sm text-muted-foreground">
             Add fields to track on CRM contacts without any code changes -- dietary preference, favorite sports team, dinner
             attendance, referral source, whatever you need. Deactivating a field hides it without deleting data already

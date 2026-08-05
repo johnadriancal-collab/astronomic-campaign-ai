@@ -23,18 +23,18 @@ export function BackendStatus() {
   }, []);
 
   return (
-    <div className="fixed bottom-3 left-3 z-40 flex items-center gap-1.5 whitespace-nowrap rounded-full border border-border/40 bg-background/80 px-2 py-1 text-[11px] text-muted-foreground backdrop-blur-md">
+    <div className="fixed bottom-3 left-3 z-40 flex items-center gap-1.5 whitespace-nowrap text-[11px] text-muted-foreground/70">
       <span
         className={
           "h-1.5 w-1.5 shrink-0 rounded-full transition-colors " +
           (health === "ok"
-            ? "bg-emerald-400"
+            ? "bg-emerald-600"
             : health === "down"
-            ? "bg-red-400"
+            ? "bg-destructive"
             : "bg-muted-foreground/40 animate-pulse")
         }
       />
-      <span>{health === "ok" ? "Backend connected" : health === "down" ? "Backend unreachable" : "Connecting…"}</span>
+      <span>{health === "ok" ? "Connected" : health === "down" ? "Unreachable" : "Connecting…"}</span>
     </div>
   );
 }

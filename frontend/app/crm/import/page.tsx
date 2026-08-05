@@ -98,7 +98,7 @@ export default function CrmImportPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-6 py-10">
-      <h1 className="mb-2 text-2xl font-semibold tracking-tight">Import CSV</h1>
+      <h1 className="mb-2 font-serif text-2xl font-medium tracking-tight">Import CSV</h1>
       <p className="mb-6 text-sm text-muted-foreground">
         Upload &rarr; review mappings &amp; duplicates &rarr; commit. Nothing is written to the CRM until you commit.
       </p>

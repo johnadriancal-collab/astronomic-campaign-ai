@@ -20,19 +20,15 @@ export function SiteHeader() {
   const pathname = usePathname();
 
   return (
-    <header className="sticky top-0 z-40 border-b border-border/60 bg-background/80 backdrop-blur-md">
-      <div className="mx-auto flex h-14 max-w-5xl items-center gap-6 px-4 sm:px-6">
+    <header className="sticky top-0 z-40 border-b border-border bg-background/96 backdrop-blur-md">
+      <div className="mx-auto flex h-16 max-w-5xl items-center gap-8 px-4 sm:px-6">
         <Link href="/" className="flex shrink-0 items-center">
-          <Image
-            src="/astronomic-logo.png"
-            alt="Astronomic"
-            width={761}
-            height={140}
-            priority
-            className="h-6 w-auto brightness-0 invert"
-          />
+          {/* Original dark-navy artwork, unfiltered -- on this light header
+              it reads the same way the mark does on astronomic.com's own
+              scrolled (white) header state. */}
+          <Image src="/astronomic-logo.png" alt="Astronomic" width={761} height={140} priority className="h-5 w-auto" />
         </Link>
-        <nav className="hidden items-center gap-1 sm:flex">
+        <nav className="hidden items-center gap-6 sm:flex">
           {TOP_LEVEL_AREAS.map((area) => {
             const active = isAreaActive(pathname, area.href);
             return (
@@ -40,8 +36,8 @@ export function SiteHeader() {
                 key={area.href}
                 href={area.href}
                 className={cn(
-                  "rounded-md px-2.5 py-1 text-sm transition-colors",
-                  active ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
+                  "border-b-2 border-transparent py-1 text-sm font-medium transition-colors",
+                  active ? "border-primary text-foreground" : "text-muted-foreground hover:text-foreground"
                 )}
               >
                 {area.label}

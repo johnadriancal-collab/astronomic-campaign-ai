@@ -53,7 +53,7 @@ export default function NewCrmContactPage() {
         All contacts
       </button>
 
-      <h1 className="mb-2 text-2xl font-semibold tracking-tight">New CRM contact</h1>
+      <h1 className="mb-2 font-serif text-2xl font-medium tracking-tight">New CRM contact</h1>
       <p className="mb-6 text-sm text-muted-foreground">
         Investor Thesis fields and custom fields can be filled in on the contact&apos;s page after creation.
       </p>

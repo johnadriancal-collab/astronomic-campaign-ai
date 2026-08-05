@@ -21,7 +21,7 @@ export function ManagerPlaceholder({ icon: Icon, title, description, detail }: M
         <Icon className="h-5 w-5" />
       </div>
       <div className="mb-3 flex items-center justify-center gap-2">
-        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+        <h1 className="font-serif text-xl font-medium tracking-tight">{title}</h1>
         <Badge variant="outline" className="rounded-full font-normal text-muted-foreground">
           Coming soon
         </Badge>

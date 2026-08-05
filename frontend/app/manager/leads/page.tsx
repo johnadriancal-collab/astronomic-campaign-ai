@@ -53,7 +53,7 @@ export default function LeadsPage() {
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
       <div className="mb-8">
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Leads</h1>
+        <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">Leads</h1>
         <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
           Prospects that became durable leads once a campaign built their Apollo contact.
         </p>

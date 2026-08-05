@@ -84,7 +84,7 @@ export function LeadDetailView({ leadId }: { leadId: string }) {
         <div className="space-y-8">
           <div>
             <div className="flex flex-wrap items-center gap-3">
-              <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">{leadName(lead)}</h1>
+              <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">{leadName(lead)}</h1>
               <Badge variant="outline" className="rounded-full font-normal">
                 {lead.status}
               </Badge>
