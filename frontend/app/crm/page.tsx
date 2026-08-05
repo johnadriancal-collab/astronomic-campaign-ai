@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ApiError, listCrmContacts, type CrmContact } from "@/lib/api";
+import { compareContactsByName } from "@/lib/sort-contacts";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -21,8 +22,13 @@ interface Filters {
 }
 
 export default function CrmContactsPage() {
-  const [contacts, setContacts] = useState<CrmContact[] | null>(null);
-  const [total, setTotal] = useState(0);
+  // Holds EVERY contact matching the current search/filters, already
+  // sorted A-Z -- not just one page. Pagination below is a pure client-side
+  // slice of this array, which is what makes "page 1 is the true first
+  // alphabetical contacts" possible: the backend has no sort of its own,
+  // and it slices to one page before any sort could apply, so sorting has
+  // to happen here, across the whole filtered set, before slicing.
+  const [allContacts, setAllContacts] = useState<CrmContact[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
   const [city, setCity] = useState("");
@@ -30,17 +36,23 @@ export default function CrmContactsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
 
-  async function load(filters: Filters, targetPage: number, targetPageSize: number) {
+  async function load(filters: Filters) {
     try {
-      const data = await listCrmContacts({
+      const params = {
         q: filters.q || undefined,
         city: filters.city || undefined,
         investor_mode: filters.investorMode || undefined,
-        page: targetPage,
-        page_size: targetPageSize,
-      });
-      setContacts(data.items);
-      setTotal(data.total);
+      };
+      // Two-step fetch, no hard-coded ceiling: first ask for just the
+      // count (page_size: 1 keeps that call cheap), then re-fetch with
+      // page_size set to the EXACT total so every matching contact comes
+      // back in one page, however large the CRM grows.
+      const probe = await listCrmContacts({ ...params, page: 1, page_size: 1 });
+      const data =
+        probe.total > probe.items.length
+          ? await listCrmContacts({ ...params, page: 1, page_size: probe.total })
+          : probe;
+      setAllContacts([...data.items].sort(compareContactsByName));
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? `Couldn't load contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
@@ -48,19 +60,19 @@ export default function CrmContactsPage() {
   }
 
   useEffect(() => {
-    load({ q: "", city: "", investorMode: "" }, 1, 50);
+    load({ q: "", city: "", investorMode: "" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function runSearch() {
     setPage(1);
-    load({ q, city, investorMode }, 1, pageSize);
+    load({ q, city, investorMode });
   }
 
   function applyInvestorMode(value: string) {
     setInvestorMode(value);
     setPage(1);
-    load({ q, city, investorMode: value }, 1, pageSize);
+    load({ q, city, investorMode: value });
   }
 
   function clearFilters() {
@@ -68,20 +80,20 @@ export default function CrmContactsPage() {
     setCity("");
     setInvestorMode("");
     setPage(1);
-    load({ q: "", city: "", investorMode: "" }, 1, pageSize);
+    load({ q: "", city: "", investorMode: "" });
   }
 
   function goToPage(nextPage: number) {
-    setPage(nextPage);
-    load({ q, city, investorMode }, nextPage, pageSize);
+    setPage(nextPage); // no network call -- just re-slicing the already-sorted array below
   }
 
   function changePageSize(nextPageSize: number) {
     setPageSize(nextPageSize);
     setPage(1);
-    load({ q, city, investorMode }, 1, nextPageSize);
   }
 
+  const total = allContacts?.length ?? 0;
+  const contacts = allContacts ? allContacts.slice((page - 1) * pageSize, (page - 1) * pageSize + pageSize) : null;
   const hasActiveFilters = Boolean(q || city || investorMode);
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1;

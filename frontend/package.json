@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test lib/tag-multi-select.test.ts"
+    "test": "node --test lib/tag-multi-select.test.ts lib/sort-contacts.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
