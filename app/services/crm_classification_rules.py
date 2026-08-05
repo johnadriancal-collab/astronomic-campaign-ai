@@ -13,15 +13,23 @@ derives. Rule output is applied AFTER column mapping in
 crm_import_service.py and always wins for the fields it touches, so a bad
 column_mapping can never override it again.
 
-To add a future rule (Investor Type standardization, Role standardization,
-Check Size standardization, etc.): write one function with the same
-signature as classify_industry() below and add it to CLASSIFICATION_RULES.
-No other change to the import pipeline is required.
+Every rule has the signature `(raw_row, context) -> dict`. `context` is a
+per-BATCH (not per-row) dict of reference data a rule needs but that would
+be wasteful/wrong to look up on every row -- e.g. classify_role's live
+approved-options set, fetched from the CrmCustomFieldDefinition once per
+import and passed to every row. Rules that need no reference data (e.g.
+classify_industry) just ignore the second argument. See
+CrmImportService.preview() for where `context` is built.
+
+To add a future rule (Check Size standardization, etc.): write one
+function with this same signature and add it to CLASSIFICATION_RULES. If
+it needs reference data, extend `build_classification_context()` too. No
+other change to the import pipeline is required.
 """
 
 from typing import Any, Callable
 
-Classifier = Callable[[dict[str, str]], dict[str, Any]]
+Classifier = Callable[[dict[str, str], dict[str, Any]], dict[str, Any]]
 
 
 def _normalize_header(header: str) -> str:
@@ -58,7 +66,7 @@ def _ordered_dedup(*token_lists: list[str]) -> list[str]:
     return merged
 
 
-def classify_industry(raw_row: dict[str, str]) -> dict[str, Any]:
+def classify_industry(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
     """
     industry <- CSV `Industry` only (the real Apollo/LinkedIn company
     industry). Never Main Industry/Sub-industry -- those are investment-
@@ -85,15 +93,67 @@ def classify_industry(raw_row: dict[str, str]) -> dict[str, Any]:
     return result
 
 
+def classify_investor_mode(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    investor_type (custom field) <- CSV `Investor type`, comma-split and
+    trimmed, stored exactly as given -- never reinterpreted, renamed, or
+    filtered against a fixed list.
+
+    thesis_investor_mode ("Invests privately or institutionally?") <-
+    derive_investor_mode(investor_type), the SAME function that powers the
+    manual create/update automation (imported directly, not reimplemented)
+    so a CSV-imported contact and a manually-entered contact are always
+    classified identically. Left unset (never guessed) when investor_type
+    carries no private/institutional signal.
+    """
+    from app.models.crm import derive_investor_mode  # local import avoids a hard import-time dependency for callers that only need classify_industry/classify_role
+
+    tokens = _split_tokens(_find_column(raw_row, "Investor type", "Investor Type"))
+    if not tokens:
+        return {}
+
+    result: dict[str, Any] = {"custom:investor_type": tokens}
+    mode = derive_investor_mode(tokens)
+    if mode:
+        result["thesis_investor_mode"] = mode
+    return result
+
+
+def classify_role(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    role (custom field) <- CSV `Role`, comma-split and trimmed, kept ONLY
+    if it exactly matches the live approved Role taxonomy (context
+    ["role_options"], fetched from the CrmCustomFieldDefinition -- see
+    build_classification_context() -- never hardcoded here). Unsupported
+    tags (job titles like "VP", "Director", "President" that merely sound
+    role-adjacent) are dropped, never mapped to the nearest approved value.
+    """
+    approved = context.get("role_options") or set()
+    tokens = _split_tokens(_find_column(raw_row, "Role"))
+    kept = [t for t in tokens if t in approved]
+    return {"custom:role": kept} if kept else {}
+
+
 # Registry of independent classification rules. Each is applied to every
 # imported row, in order; later rules win on key collision (none currently
 # collide). Add new rules here -- see module docstring.
-CLASSIFICATION_RULES: list[Classifier] = [classify_industry]
+CLASSIFICATION_RULES: list[Classifier] = [classify_industry, classify_investor_mode, classify_role]
 
 
-def apply_classification_rules(raw_row: dict[str, str]) -> dict[str, Any]:
+async def build_classification_context(custom_field_store: Any) -> dict[str, Any]:
+    """
+    Reference data every rule in CLASSIFICATION_RULES needs, computed ONCE
+    per import batch (not per row) and passed to every rule call. Add a key
+    here when a new rule needs live reference data (e.g. a fixed options
+    list) rather than deriving it fresh per row.
+    """
+    role_field = await custom_field_store.get_by_field_key("role")
+    return {"role_options": set(role_field.options) if role_field else set()}
+
+
+def apply_classification_rules(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
     """Runs every registered rule against the raw row and merges their output."""
     result: dict[str, Any] = {}
     for rule in CLASSIFICATION_RULES:
-        result.update(rule(raw_row))
+        result.update(rule(raw_row, context))
     return result

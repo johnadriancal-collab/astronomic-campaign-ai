@@ -7,7 +7,7 @@ report.
 
 import pytest
 
-from app.models.crm import CrmImportBatchStatus, CrmImportRowStatus
+from app.models.crm import CrmImportBatchStatus, CrmImportRowStatus, CustomFieldType
 from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
 from app.services.crm_import_service import CrmImportService, suggest_mapping
 from app.services.crm_service import CrmService
@@ -314,3 +314,99 @@ async def test_update_decision_overwrites_industry_but_never_overwrites_existing
     updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
     assert updated.industry == "New Apollo Industry"  # external field: overwritten
     assert updated.custom_fields["investment_industry"] == ["Existing Value"]  # custom field: protected
+
+
+# --- Classification rules (Investor Type -> mode, Role) ---
+#
+# These confirm the rules run through the REAL preview()/commit() pipeline,
+# not just as standalone function calls -- the actual permanent behavior
+# for every future upload.
+
+
+@pytest.mark.asyncio
+async def test_future_upload_derives_investor_mode_from_investor_type(import_service):
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Investor type\nnova@example.com,\"Angel Investor, Venture Capital\"\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})  # Investor type deliberately left unmapped
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["investor_type"] == ["Angel Investor", "Venture Capital"]
+    assert contact.thesis_investor_mode == "Both"
+    assert contact.thesis_investor_mode_manual_override is False
+
+
+@pytest.mark.asyncio
+async def test_future_upload_leaves_investor_mode_unset_when_no_signal(import_service):
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Investor type\nnova@example.com,Hedge Fund\n"))
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["investor_type"] == ["Hedge Fund"]  # never reinterpreted
+    assert contact.thesis_investor_mode is None  # never guessed
+
+
+@pytest.mark.asyncio
+async def test_manual_override_blocks_investor_mode_from_a_future_import(import_service):
+    """An existing contact with manual_override=True must keep their manually
+    chosen mode even when a later CSV upload carries Investor Type data."""
+    existing = await import_service.crm_service.create_contact({"email": "known@example.com"})
+    existing = await import_service.crm_service.update_contact(
+        existing.crm_contact_id,
+        {"thesis_investor_mode": "Institutionally", "thesis_investor_mode_manual_override": True},
+    )
+
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Investor type\nknown@example.com,Angel Investor\n"))
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.thesis_investor_mode == "Institutionally"  # untouched -- manual override respected
+
+
+@pytest.mark.asyncio
+async def test_future_upload_filters_role_to_the_live_approved_taxonomy(import_service):
+    await import_service.crm_service.create_custom_field(
+        field_key="role", label="Role", field_type=CustomFieldType.MULTI_SELECT,
+        options=["Investor", "Founder", "CEO"],
+    )
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Role\nnova@example.com,\"Investor, Founder, VP, President\"\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["role"] == ["Investor", "Founder"]  # VP/President dropped, nothing invented
+
+
+@pytest.mark.asyncio
+async def test_role_with_nothing_approved_leaves_the_field_unset(import_service):
+    await import_service.crm_service.create_custom_field(
+        field_key="role", label="Role", field_type=CustomFieldType.MULTI_SELECT,
+        options=["Investor", "Founder", "CEO"],
+    )
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Role\nnova@example.com,\"VP, Director\"\n"))
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert "role" not in contact.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_role_rule_works_even_when_role_field_does_not_exist_yet(import_service):
+    """No role custom field defined at all -- must not error, must not
+    invent the field, just leaves it unset."""
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Role\nnova@example.com,Investor\n"))
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert "role" not in contact.custom_fields

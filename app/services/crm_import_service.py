@@ -29,7 +29,7 @@ from app.models.crm import (
     normalize_name_company,
 )
 from app.repositories.crm_import_batch_store import CrmImportBatchStore
-from app.services.crm_classification_rules import apply_classification_rules
+from app.services.crm_classification_rules import apply_classification_rules, build_classification_context
 from app.services.crm_service import CUSTOM_FIELD_PREFIX, CrmService
 
 LIST_FIELD_NAMES = frozenset(
@@ -154,7 +154,9 @@ class CrmImportService:
             return raw_value.lower() in ("yes", "true", "1")
         return raw_value
 
-    async def _apply_mapping(self, raw_row: dict[str, str], column_mapping: dict[str, str]) -> dict[str, Any]:
+    async def _apply_mapping(
+        self, raw_row: dict[str, str], column_mapping: dict[str, str], classification_context: dict[str, Any]
+    ) -> dict[str, Any]:
         mapped: dict[str, Any] = {}
         for csv_header, target_field in column_mapping.items():
             if not target_field:
@@ -167,7 +169,7 @@ class CrmImportService:
         # is what makes them apply automatically to every future upload
         # regardless of whatever mapping the human chose. See
         # crm_classification_rules.py.
-        mapped.update(apply_classification_rules(raw_row))
+        mapped.update(apply_classification_rules(raw_row, classification_context))
         mapped["source_snapshot"] = dict(raw_row)
         return mapped
 
@@ -188,6 +190,10 @@ class CrmImportService:
         batch = await self._require_batch(import_batch_id)
         batch.column_mapping = column_mapping
 
+        # Reference data classification rules need (e.g. classify_role's
+        # live approved-options set) -- fetched ONCE per batch, not per row.
+        classification_context = await build_classification_context(self.crm_service.custom_field_store)
+
         seen_confident: dict[str, int] = {}
         seen_fallback: dict[str, int] = {}
         previews: list[CrmImportRowPreview] = []
@@ -195,7 +201,7 @@ class CrmImportService:
 
         for row_index, raw_row in enumerate(batch.rows):
             try:
-                mapped = await self._apply_mapping(raw_row, column_mapping)
+                mapped = await self._apply_mapping(raw_row, column_mapping, classification_context)
             except Exception as e:  # malformed row under this mapping -- isolated, doesn't abort the batch
                 previews.append(
                     CrmImportRowPreview(row_index=row_index, mapped_fields={}, status=CrmImportRowStatus.ERROR, error=str(e))
