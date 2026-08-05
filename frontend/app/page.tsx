@@ -1,12 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Loader2, LayoutDashboard, Sparkles, Users } from "lucide-react";
+import { ArrowRight, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { previewCampaign, ApiError } from "@/lib/api";
 import { useCampaignStore } from "@/lib/store";
@@ -17,7 +15,6 @@ export default function Home() {
   const router = useRouter();
   const setCampaign = useCampaignStore((s) => s.setCampaign);
   const desiredProspectCount = useCampaignStore((s) => s.desiredProspectCount);
-  const setDesiredProspectCount = useCampaignStore((s) => s.setDesiredProspectCount);
 
   const [value, setValue] = useState("");
   const [loading, setLoading] = useState(false);
@@ -52,20 +49,6 @@ export default function Home() {
             ASTRONOMIC INTELLIGENCE
           </span>
 
-          <div className="mb-6 inline-flex items-center gap-1 rounded-full border border-border/60 bg-secondary/30 p-1 text-sm">
-            <span className="flex items-center gap-1.5 rounded-full bg-primary/15 px-3 py-1.5 font-medium text-primary">
-              <Sparkles className="h-3.5 w-3.5" />
-              Build Campaign
-            </span>
-            <Link
-              href="/manager/campaigns"
-              className="flex items-center gap-1.5 rounded-full px-3 py-1.5 text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
-            >
-              <LayoutDashboard className="h-3.5 w-3.5" />
-              Campaign Manager
-            </Link>
-          </div>
-
           <h1 className="text-balance font-serif text-4xl font-medium tracking-tight sm:text-5xl">
             What can Astro do for you?
           </h1>
@@ -92,25 +75,7 @@ export default function Home() {
               className="resize-none border-none bg-transparent p-2 text-base shadow-none focus-visible:ring-0 md:text-base"
             />
             <div className="flex items-center justify-between px-2 pb-1 pt-2">
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">⌘ + Enter to generate</span>
-                <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <Users className="h-3 w-3" />
-                  Target prospects
-                  <Input
-                    type="number"
-                    min={5}
-                    max={200}
-                    value={desiredProspectCount}
-                    disabled={loading}
-                    onChange={(e) => {
-                      const n = parseInt(e.target.value, 10);
-                      setDesiredProspectCount(Number.isFinite(n) ? n : 25);
-                    }}
-                    className="h-6 w-16 rounded-md border-border/60 bg-secondary/40 px-2 text-xs"
-                  />
-                </label>
-              </div>
+              <span className="text-xs text-muted-foreground">⌘ + Enter to generate</span>
               <Button onClick={handleGenerate} disabled={!value.trim() || loading} size="sm" className="gap-1.5">
                 {loading ? (
                   <>
@@ -119,7 +84,7 @@ export default function Home() {
                   </>
                 ) : (
                   <>
-                    Generate Campaign
+                    Ask Astro
                     <ArrowRight className="h-4 w-4" />
                   </>
                 )}
