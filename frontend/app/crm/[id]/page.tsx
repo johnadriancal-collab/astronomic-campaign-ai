@@ -21,6 +21,7 @@ import {
   type CrmCustomFieldDefinition,
 } from "@/lib/api";
 import { INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
+import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
 
 const CORE_TEXT_FIELDS: [keyof CrmContact, string][] = [
   ["first_name", "First name"],
@@ -111,6 +112,14 @@ function MultiSelect({
   function toggle(option: string) {
     onChange(selected.includes(option) ? selected.filter((v) => v !== option) : [...selected, option]);
   }
+
+  // No predefined options -- an open-ended field (e.g. Investment Industry).
+  // A checkbox grid over zero options would render nothing even though
+  // `selected` holds real stored values, so this is a tag editor instead.
+  if (options.length === 0) {
+    return <TagMultiSelect label={label} selected={selected} onChange={onChange} />;
+  }
+
   return (
     <div className="space-y-1.5">
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
@@ -126,6 +135,67 @@ function MultiSelect({
             <span>{option}</span>
           </label>
         ))}
+      </div>
+    </div>
+  );
+}
+
+function TagMultiSelect({
+  label,
+  selected,
+  onChange,
+}: {
+  label: string;
+  selected: string[];
+  onChange: (values: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+
+  function commitDraft() {
+    onChange(addTagValue(selected, draft));
+    setDraft("");
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      {selected.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {selected.map((value) => (
+            <span
+              key={value}
+              className="inline-flex items-center gap-1.5 rounded-full border border-input bg-muted px-2.5 py-0.5 text-xs"
+            >
+              {value}
+              <button
+                type="button"
+                aria-label={`Remove ${value}`}
+                className="text-muted-foreground hover:text-foreground"
+                onClick={() => onChange(removeTagValue(selected, value))}
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <input
+          type="text"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commitDraft();
+            }
+          }}
+          placeholder="Add a value..."
+          className="h-9 flex-1 rounded-md border border-input bg-transparent px-3 text-sm"
+        />
+        <Button type="button" variant="outline" onClick={commitDraft}>
+          Add
+        </Button>
       </div>
     </div>
   );
