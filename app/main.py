@@ -36,11 +36,15 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from app.api.campaign import router as campaign_router
+from app.api.crm import router as crm_router
 from app.api.leads import router as leads_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
 from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
+from app.repositories.sqlite_crm_contact_store import SQLiteCrmContactStore
+from app.repositories.sqlite_crm_custom_field_store import SQLiteCrmCustomFieldStore
+from app.repositories.sqlite_crm_import_batch_store import SQLiteCrmImportBatchStore
 from app.repositories.sqlite_email_message_event_store import SQLiteEmailMessageEventStore
 from app.repositories.sqlite_email_message_store import SQLiteEmailMessageStore
 from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenceStepStore
@@ -48,6 +52,8 @@ from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStor
 from app.repositories.sqlite_lead_store import SQLiteLeadStore
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
+from app.services.crm_import_service import CrmImportService
+from app.services.crm_service import CrmService
 from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.lead_service import LeadService
@@ -65,6 +71,9 @@ async def lifespan(app: FastAPI):
     email_sequence_step_store = SQLiteEmailSequenceStepStore(settings.database_path)
     email_message_store = SQLiteEmailMessageStore(settings.database_path)
     email_message_event_store = SQLiteEmailMessageEventStore(settings.database_path)
+    crm_contact_store = SQLiteCrmContactStore(settings.database_path)
+    crm_custom_field_store = SQLiteCrmCustomFieldStore(settings.database_path)
+    crm_import_batch_store = SQLiteCrmImportBatchStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -72,6 +81,9 @@ async def lifespan(app: FastAPI):
     await email_sequence_step_store.connect()
     await email_message_store.connect()
     await email_message_event_store.connect()
+    await crm_contact_store.connect()
+    await crm_custom_field_store.connect()
+    await crm_import_batch_store.connect()
 
     lead_service = LeadService(store=lead_store, campaign_lead_store=campaign_lead_store, campaign_store=campaign_store)
     app.state.lead_service = lead_service
@@ -94,6 +106,11 @@ async def lifespan(app: FastAPI):
         sequence_store=email_sequence_store,
         step_store=email_sequence_step_store,
     )
+
+    crm_service = CrmService(contact_store=crm_contact_store, custom_field_store=crm_custom_field_store)
+    app.state.crm_service = crm_service
+    app.state.crm_import_service = CrmImportService(crm_service=crm_service, batch_store=crm_import_batch_store)
+
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -102,12 +119,16 @@ async def lifespan(app: FastAPI):
     await email_sequence_step_store.close()
     await email_message_store.close()
     await email_message_event_store.close()
+    await crm_contact_store.close()
+    await crm_custom_field_store.close()
+    await crm_import_batch_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
 app.include_router(campaign_router)
 app.include_router(leads_router)
 app.include_router(sync_router)
+app.include_router(crm_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">

@@ -1,11 +1,23 @@
 "use client";
 
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
+import { cn } from "@/lib/utils";
 
 type Health = "checking" | "ok" | "down";
 
+const TOP_LEVEL_AREAS = [
+  { href: "/manager", label: "Campaign Manager" },
+  { href: "/crm", label: "CRM" },
+];
+
+function isAreaActive(pathname: string, href: string) {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
+
 export function SiteHeader() {
+  const pathname = usePathname();
   const [health, setHealth] = useState<Health>("checking");
 
   useEffect(() => {
@@ -36,12 +48,23 @@ export function SiteHeader() {
               <span className="hidden sm:inline">Astronomic Campaign AI</span>
             </span>
           </Link>
-          <Link
-            href="/manager/campaigns"
-            className="hidden text-sm text-muted-foreground transition-colors hover:text-foreground sm:inline"
-          >
-            Campaign Manager
-          </Link>
+          <nav className="hidden items-center gap-1 sm:flex">
+            {TOP_LEVEL_AREAS.map((area) => {
+              const active = isAreaActive(pathname, area.href);
+              return (
+                <Link
+                  key={area.href}
+                  href={area.href}
+                  className={cn(
+                    "rounded-md px-2.5 py-1 text-sm transition-colors",
+                    active ? "bg-secondary font-medium text-foreground" : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  {area.label}
+                </Link>
+              );
+            })}
+          </nav>
         </div>
         <div className="flex items-center gap-2 whitespace-nowrap text-xs text-muted-foreground">
           <span

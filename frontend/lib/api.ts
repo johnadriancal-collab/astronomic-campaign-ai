@@ -416,3 +416,232 @@ export function listMessageEvents(campaignId: string, messageId: string): Promis
 export function syncMessageEvents(campaignId: string, messageId: string): Promise<EmailMessageEvent[]> {
   return post<EmailMessageEvent[]>(`/campaign/${campaignId}/messages/${messageId}/sync-events`, {});
 }
+
+/* ------------------------------------------------------------------ */
+/* CRM -- a standalone area, no relationship to Campaign/Lead/EmailSequence */
+/* ------------------------------------------------------------------ */
+
+export interface CrmContact {
+  crm_contact_id: string;
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+
+  apollo_contact_id: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  email_status: string | null;
+  phone: string | null;
+  linkedin_url: string | null;
+  title: string | null;
+  company: string | null;
+  company_website: string | null;
+  city: string | null;
+  state: string | null;
+  country: string | null;
+  industry: string | null;
+  company_size: string | null;
+  revenue: string | null;
+  funding_stage: string | null;
+  funding_amount: string | null;
+  technologies: string[];
+  seniority: string | null;
+  department: string | null;
+  job_function: string | null;
+  source_snapshot: Record<string, unknown>;
+
+  thesis_cities: string | null;
+  thesis_investor_mode: string | null;
+
+  thesis_private_asset_types: string[];
+  thesis_private_asset_types_other: string | null;
+  thesis_private_business_models: string[];
+  thesis_private_business_models_other: string | null;
+  thesis_private_industries: string[];
+  thesis_private_industries_other: string | null;
+  thesis_private_check_sizes: string[];
+  thesis_private_check_sizes_other: string | null;
+  thesis_private_deal_stages: string[];
+  thesis_private_deal_stages_other: string | null;
+  thesis_private_meeting_preferences: string[];
+  thesis_private_meeting_preferences_other: string | null;
+  thesis_private_demographic_preferences: string[];
+  thesis_private_demographic_preferences_other: string | null;
+  thesis_private_other_criteria: string | null;
+
+  thesis_also_invests_institutionally: boolean | null;
+
+  thesis_institutional_asset_types: string[];
+  thesis_institutional_asset_types_other: string | null;
+  thesis_institutional_business_models: string[];
+  thesis_institutional_business_models_other: string | null;
+  thesis_institutional_industries: string[];
+  thesis_institutional_industries_other: string | null;
+  thesis_institutional_check_sizes: string[];
+  thesis_institutional_check_sizes_other: string | null;
+  thesis_institutional_deal_stages: string[];
+  thesis_institutional_deal_stages_other: string | null;
+  thesis_institutional_meeting_preferences: string[];
+  thesis_institutional_meeting_preferences_other: string | null;
+  thesis_institutional_demographic_preferences: string[];
+  thesis_institutional_demographic_preferences_other: string | null;
+  thesis_institutional_other_criteria: string | null;
+
+  thesis_dietary_preferences: string | null;
+  thesis_referral_emails: string | null;
+
+  custom_fields: Record<string, unknown>;
+}
+
+export type CustomFieldType = "text" | "long_text" | "number" | "date" | "boolean" | "single_select" | "multi_select";
+
+export interface CrmCustomFieldDefinition {
+  crm_custom_field_id: string;
+  field_key: string;
+  label: string;
+  description: string | null;
+  field_type: CustomFieldType;
+  options: string[];
+  required: boolean;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type CrmImportRowStatus = "new" | "existing" | "possible_duplicate" | "error";
+
+export interface CrmImportRowPreview {
+  row_index: number;
+  mapped_fields: Record<string, unknown>;
+  status: CrmImportRowStatus;
+  matched_contact_id: string | null;
+  matched_on: string | null;
+  error: string | null;
+}
+
+export type CrmImportBatchStatus = "uploaded" | "mapped" | "committed";
+
+export interface CrmImportBatch {
+  import_batch_id: string;
+  filename: string;
+  uploaded_at: string;
+  status: CrmImportBatchStatus;
+  headers: string[];
+  rows: Record<string, string>[];
+  row_count: number;
+  suggested_mapping: Record<string, string>;
+  column_mapping: Record<string, string> | null;
+  preview: CrmImportRowPreview[] | null;
+  new_count: number | null;
+  existing_count: number | null;
+  possible_duplicate_count: number | null;
+  error_count: number | null;
+}
+
+export interface CrmImportReport {
+  created: number;
+  updated: number;
+  skipped: number;
+  errors: number;
+}
+
+export interface CrmContactFilters {
+  q?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  company?: string;
+  industry?: string;
+  deal_stage?: string;
+  check_size?: string;
+  investor_mode?: string;
+  email_status?: string;
+  include_archived?: boolean;
+  page?: number;
+  page_size?: number;
+}
+
+export interface CrmContactPage {
+  items: CrmContact[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export function listCrmContacts(filters: CrmContactFilters = {}): Promise<CrmContactPage> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const query = params.toString();
+  return request<CrmContactPage>(`/crm/contacts${query ? `?${query}` : ""}`);
+}
+
+export function getCrmContact(crmContactId: string): Promise<CrmContact> {
+  return request<CrmContact>(`/crm/contacts/${crmContactId}`);
+}
+
+export function createCrmContact(fields: Record<string, unknown>): Promise<CrmContact> {
+  return post<CrmContact>("/crm/contacts", fields);
+}
+
+export function updateCrmContact(crmContactId: string, patch: Record<string, unknown>): Promise<CrmContact> {
+  return request<CrmContact>(`/crm/contacts/${crmContactId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function archiveCrmContact(crmContactId: string): Promise<CrmContact> {
+  return request<CrmContact>(`/crm/contacts/${crmContactId}`, { method: "DELETE" });
+}
+
+export function listCrmCustomFields(includeInactive = true): Promise<CrmCustomFieldDefinition[]> {
+  return request<CrmCustomFieldDefinition[]>(`/crm/custom-fields?include_inactive=${includeInactive}`);
+}
+
+export function createCrmCustomField(payload: {
+  field_key: string;
+  label: string;
+  field_type: CustomFieldType;
+  description?: string;
+  options?: string[];
+  required?: boolean;
+}): Promise<CrmCustomFieldDefinition> {
+  return post<CrmCustomFieldDefinition>("/crm/custom-fields", payload);
+}
+
+export function updateCrmCustomField(
+  crmCustomFieldId: string,
+  patch: Record<string, unknown>
+): Promise<CrmCustomFieldDefinition> {
+  return request<CrmCustomFieldDefinition>(`/crm/custom-fields/${crmCustomFieldId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function uploadCrmImport(file: File): Promise<CrmImportBatch> {
+  const formData = new FormData();
+  formData.append("file", file);
+  return request<CrmImportBatch>("/crm/import/upload", { method: "POST", body: formData });
+}
+
+export function getCrmImportBatch(importBatchId: string): Promise<CrmImportBatch> {
+  return request<CrmImportBatch>(`/crm/import/${importBatchId}`);
+}
+
+export function previewCrmImport(importBatchId: string, columnMapping: Record<string, string>): Promise<CrmImportBatch> {
+  return post<CrmImportBatch>(`/crm/import/${importBatchId}/preview`, { column_mapping: columnMapping });
+}
+
+export function commitCrmImport(importBatchId: string, decisions: Record<string, string>): Promise<CrmImportReport> {
+  return post<CrmImportReport>(`/crm/import/${importBatchId}/commit`, { decisions });
+}
+
+export function exportCrmBackup(): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>("/crm/backup/export");
+}

@@ -2,37 +2,20 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import {
-  ChartColumn,
-  Contact,
-  Inbox,
-  LayoutDashboard,
-  Mail,
-  Megaphone,
-  Plus,
-  Settings,
-  Sparkles,
-  Users,
-} from "lucide-react";
-import { buttonVariants } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import { Contact, LayoutDashboard, ListPlus, SlidersHorizontal, Sparkles, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const SECTIONS = [
-  { href: "/manager", label: "Overview", icon: LayoutDashboard, exact: true },
-  { href: "/manager/campaigns", label: "Campaigns", icon: Megaphone },
-  { href: "/manager/sequences", label: "Sequences / Emails", icon: Mail },
-  { href: "/manager/leads", label: "Leads", icon: Users },
-  { href: "/manager/inbox", label: "Inbox", icon: Inbox },
-  { href: "/manager/analytics", label: "Analytics", icon: ChartColumn },
-  { href: "/manager/settings", label: "Settings", icon: Settings },
+  { href: "/crm", label: "Contacts", icon: Users, exact: true },
+  { href: "/crm/import", label: "Import CSV", icon: ListPlus },
+  { href: "/crm/fields", label: "Custom Fields", icon: SlidersHorizontal },
 ];
 
 function isActive(pathname: string, href: string, exact?: boolean) {
   return exact ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
 }
 
-export function ManagerSidebar() {
+export function CrmSidebar() {
   const pathname = usePathname();
 
   return (
@@ -45,31 +28,24 @@ export function ManagerSidebar() {
           <Sparkles className="h-4 w-4" />
           Campaign Builder
         </Link>
-        <div className="flex items-center gap-2 rounded-lg bg-sidebar-accent px-3 py-2 text-sm font-medium text-sidebar-accent-foreground">
-          <LayoutDashboard className="h-4 w-4" />
-          Campaign Manager
-        </div>
         <Link
-          href="/crm"
+          href="/manager"
           className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         >
+          <LayoutDashboard className="h-4 w-4" />
+          Campaign Manager
+        </Link>
+        <div className="flex items-center gap-2 rounded-lg bg-sidebar-accent px-3 py-2 text-sm font-medium text-sidebar-accent-foreground">
           <Contact className="h-4 w-4" />
           CRM
-        </Link>
+        </div>
       </div>
 
       <div className="px-3">
-        <Separator className="bg-sidebar-border" />
+        <div className="h-px bg-sidebar-border" />
       </div>
 
-      <div className="p-3">
-        <Link href="/" className={cn(buttonVariants({ size: "sm" }), "w-full gap-1.5")}>
-          <Plus className="h-4 w-4" />
-          Create Campaign
-        </Link>
-      </div>
-
-      <nav className="flex flex-1 flex-col gap-0.5 px-3 pb-4">
+      <nav className="flex flex-1 flex-col gap-0.5 px-3 py-3">
         {SECTIONS.map((section) => {
           const active = isActive(pathname, section.href, section.exact);
           const Icon = section.icon;
