@@ -229,3 +229,88 @@ async def test_commit_marks_batch_committed(import_service):
 
     final = await import_service.get_batch(batch.import_batch_id)
     assert final.status == CrmImportBatchStatus.COMMITTED
+
+
+# --- Classification rules (Industry / Investment Industry) ---
+#
+# These simulate a FUTURE CSV upload -- the classification rule in
+# crm_classification_rules.py must fire automatically with no special
+# configuration, exactly as it will for every upload from now on.
+
+
+@pytest.mark.asyncio
+async def test_future_upload_derives_industry_and_investment_industry_with_new_unseen_values(import_service):
+    """A brand-new industry value never seen before must be accepted as-is,
+    with no predefined option list to reject it."""
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,Industry,Main Industry,Sub-industry\n"
+            "nova@example.com,Artisanal Cheese Production,Space Tourism,\"Zero-G Hospitality, Lunar Retail\"\n"
+        ),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})  # Industry columns deliberately left unmapped
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.industry == "Artisanal Cheese Production"
+    assert contact.custom_fields["investment_industry"] == ["Space Tourism", "Zero-G Hospitality", "Lunar Retail"]
+
+
+@pytest.mark.asyncio
+async def test_classification_rule_wins_even_if_column_mapping_wrongly_maps_main_industry_to_industry(import_service):
+    """Regression guard: the original bug was Main Industry's values landing in
+    the core `industry` field. Even if a human's column_mapping repeats that
+    mistake, the classification rule must overwrite it with the real Industry
+    column value."""
+    batch = await import_service.upload(
+        "p.csv",
+        csv_bytes("Email,Industry,Main Industry\nada@example.com,Consumer Electronics,Healthcare\n"),
+    )
+    await import_service.preview(
+        batch.import_batch_id, {"Email": "email", "Main Industry": "industry"}  # the mistake
+    )
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.industry == "Consumer Electronics"  # not "Healthcare"
+
+
+@pytest.mark.asyncio
+async def test_classification_rule_preserves_source_snapshot_unchanged(import_service):
+    batch = await import_service.upload(
+        "p.csv",
+        csv_bytes("Email,Industry,Main Industry,Sub-industry\nada@example.com,Fintech,Healthcare,Biotech\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.source_snapshot == {
+        "Email": "ada@example.com", "Industry": "Fintech", "Main Industry": "Healthcare", "Sub-industry": "Biotech",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_decision_overwrites_industry_but_never_overwrites_existing_investment_industry(import_service):
+    """industry is an external field (overwrite-if-non-empty). investment_industry
+    is a custom field (never auto-overwrite an existing value) -- an update
+    import must respect both rules simultaneously."""
+    existing = await import_service.crm_service.create_contact({"email": "known@example.com", "industry": "Old Value"})
+    existing = await import_service.crm_service.update_contact(
+        existing.crm_contact_id, {"custom_fields": {"investment_industry": ["Existing Value"]}}
+    )
+
+    batch = await import_service.upload(
+        "p.csv",
+        csv_bytes("Email,Industry,Main Industry\nknown@example.com,New Apollo Industry,New Investment Interest\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.industry == "New Apollo Industry"  # external field: overwritten
+    assert updated.custom_fields["investment_industry"] == ["Existing Value"]  # custom field: protected

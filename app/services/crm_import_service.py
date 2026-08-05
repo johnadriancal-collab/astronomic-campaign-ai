@@ -29,6 +29,7 @@ from app.models.crm import (
     normalize_name_company,
 )
 from app.repositories.crm_import_batch_store import CrmImportBatchStore
+from app.services.crm_classification_rules import apply_classification_rules
 from app.services.crm_service import CUSTOM_FIELD_PREFIX, CrmService
 
 LIST_FIELD_NAMES = frozenset(
@@ -161,6 +162,12 @@ class CrmImportService:
             value = await self._coerce_value(target_field, raw_row.get(csv_header, ""))
             if value is not None and value != []:
                 mapped[target_field] = value
+        # Classification rules read the raw row directly, independent of
+        # column_mapping, and always win for the fields they touch -- this
+        # is what makes them apply automatically to every future upload
+        # regardless of whatever mapping the human chose. See
+        # crm_classification_rules.py.
+        mapped.update(apply_classification_rules(raw_row))
         mapped["source_snapshot"] = dict(raw_row)
         return mapped
 
