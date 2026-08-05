@@ -11,11 +11,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { previewCampaign, ApiError } from "@/lib/api";
 import { useCampaignStore } from "@/lib/store";
 
-const EXAMPLE_PROMPTS = [
-  "Create an investor dinner campaign for FlexRadio. Location: San Francisco. Audience: early-stage technology investors. Sequence: 4 emails. Tone: professional, conversational, not salesy. Delay: 3 days between emails.",
-  "Outreach to Series A fintech founders in New York for a private roundtable dinner. 3-email sequence, warm and curious tone, 4 days apart.",
-  "Invite early-stage AI investors in Austin to a founder demo night. Friendly but credible tone, 4 emails spaced 2 days apart.",
-];
+const EXAMPLE_PROMPTS = ["Create a campaign", "Find investors", "Check a prospect", "Analyze campaign"];
 
 export default function Home() {
   const router = useRouter();
@@ -53,7 +49,7 @@ export default function Home() {
         <div className="mb-8 flex flex-col items-center text-center animate-in fade-in slide-in-from-bottom-2 duration-700">
           <span className="mb-4 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-secondary/60 px-3 py-1 text-xs text-muted-foreground">
             <Sparkles className="h-3 w-3 text-primary" />
-            Claude + Apollo outreach automation
+            ASTRONOMIC INTELLIGENCE
           </span>
 
           <div className="mb-6 inline-flex items-center gap-1 rounded-full border border-border/60 bg-secondary/30 p-1 text-sm">
@@ -71,13 +67,11 @@ export default function Home() {
           </div>
 
           <h1 className="text-balance font-serif text-4xl font-medium tracking-tight sm:text-5xl">
-            Describe your campaign.
-            <br />
-            <span className="text-muted-foreground">Claude drafts it.</span>
+            What can Astro do for you?
           </h1>
           <p className="mt-4 max-w-md text-balance text-sm text-muted-foreground sm:text-base">
-            Plain-English brief in, targeting filters and a full email sequence out —
-            reviewed before anything ever reaches Apollo.
+            Create campaigns, find prospects, analyze your CRM, check campaign performance, and
+            more.
           </p>
         </div>
 
@@ -92,7 +86,7 @@ export default function Home() {
                   handleGenerate();
                 }
               }}
-              placeholder="Create an investor dinner campaign for FlexRadio. Location: San Francisco. Audience: early-stage technology investors. Sequence: 4 emails..."
+              placeholder="Ask Astro anything..."
               disabled={loading}
               rows={5}
               className="resize-none border-none bg-transparent p-2 text-base shadow-none focus-visible:ring-0 md:text-base"
@@ -148,7 +142,7 @@ export default function Home() {
                   onClick={() => setValue(example)}
                   className="rounded-full border border-border/60 bg-secondary/40 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
                 >
-                  {example.slice(0, 46)}…
+                  {example}
                 </button>
               ))}
             </div>
@@ -160,7 +154,7 @@ export default function Home() {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
               </span>
-              Claude is drafting targeting filters and a 4-email sequence…
+              Astro is working on your campaign…
             </div>
           )}
         </div>

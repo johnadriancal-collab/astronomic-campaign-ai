@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
 const TOP_LEVEL_AREAS = [
-  { href: "/", label: "AI Campaign Creator" },
+  { href: "/", label: "Astro AI" },
   { href: "/manager", label: "Campaign Manager" },
   { href: "/crm", label: "CRM" },
 ];
