@@ -40,6 +40,17 @@ async def _seed_validated_single_selects(import_service):
         "engagement_stage", "Engagement Stage", CustomFieldType.SINGLE_SELECT,
         options=["Cold", "Interested", "Unresponsive", "Replied"],
     )
+    check_size_options = [
+        "$1k - $10k", "$10k - $25k", "$25k - $50k", "$50k - $100k", "$100k - $250k",
+        "$250k - $500k", "$500k - $1M", "$1M - $2M", "$2M - $5M", "$5M - $10M", "$10M+", "Other:",
+    ]
+    await crm.create_custom_field(
+        "check_size_personal", "Check Size (Personal)", CustomFieldType.MULTI_SELECT, options=check_size_options,
+    )
+    await crm.create_custom_field(
+        "check_size_institutional", "Check Size (Institutional)", CustomFieldType.MULTI_SELECT,
+        options=check_size_options,
+    )
 
 
 def csv_bytes(text: str) -> bytes:
@@ -513,6 +524,114 @@ async def test_future_csv_upload_populates_age_range_automatically(import_servic
 
 
 @pytest.mark.asyncio
+async def test_future_csv_upload_populates_check_size_personal_automatically(import_service):
+    """Check Size is deliberately left unmapped -- proves the classification rule
+    fires independent of column_mapping. Comma-space-separated multi-value cell,
+    the exact real Alex Pepe shape from the 2026-08-06 audit."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Check Size\nnova@example.com,\"$25k - $50k, $50k - $100k\"\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+
+
+@pytest.mark.asyncio
+async def test_check_size_institutional_populates_independently_from_personal(import_service):
+    """Real shape confirmed in the audit: personal and institutional check size are
+    genuinely distinct columns with different values -- institutional must never be
+    derived from or copied from personal, and vice versa."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,Check Size,Check Size (Institutional)\n"
+            "nova@example.com,\"$1k - $10k, $10k - $25k\",\"$500k - $1M, $1M - $2M\"\n"
+        ),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["check_size_personal"] == ["$1k - $10k", "$10k - $25k"]
+    assert contact.custom_fields["check_size_institutional"] == ["$500k - $1M", "$1M - $2M"]
+
+
+@pytest.mark.asyncio
+async def test_check_size_dollar_amount_with_thousands_comma_never_shredded_end_to_end(import_service):
+    """The critical parsing edge case, run through the real pipeline end to end:
+    "$5,000-$10,000" must survive as ONE unrecognized value (dropped, since it
+    matches no canonical bucket), never shredded by a naive split(",") into "$5"
+    and "000-$10,000". A genuine bucket in the same cell must still be captured."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Check Size\nnova@example.com,\"$5,000-$10,000, $25k - $50k\"\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["check_size_personal"] == ["$25k - $50k"]
+    assert contact.source_snapshot["Check Size"] == "$5,000-$10,000, $25k - $50k"  # original text never lost
+
+
+@pytest.mark.asyncio
+async def test_check_size_free_text_never_populates_the_field_but_survives_in_source_snapshot(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Check Size\nnova@example.com,Depends on Asset Allocation\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert "check_size_personal" not in contact.custom_fields
+    assert contact.source_snapshot["Check Size"] == "Depends on Asset Allocation"
+
+
+@pytest.mark.asyncio
+async def test_check_size_merges_with_existing_never_overwrites_populated_value(import_service):
+    """Same merge policy as Dinner Subscriptions/Dinners Attended: existing selections
+    are never replaced, only added to; formatting-only differences between the existing
+    canonical value and a re-normalized incoming value must not create a duplicate."""
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact({
+        "email": "known@example.com",
+        "custom_fields": {"check_size_personal": ["$25k - $50k"]},
+    })
+    batch = await import_service.upload(
+        "newer.csv",
+        # "$25k-$50k" (no spaces) is the SAME bucket as the existing "$25k - $50k" --
+        # must not duplicate it -- while "$50k - $100k" is genuinely new and merges in.
+        csv_bytes("Email,Check Size\nknown@example.com,\"$25k-$50k, $50k - $100k\"\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+
+
+@pytest.mark.asyncio
+async def test_check_size_blank_csv_cell_never_erases_existing_value(import_service):
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact(
+        {"email": "known@example.com", "custom_fields": {"check_size_personal": ["$25k - $50k"]}}
+    )
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Check Size\nknown@example.com,\n"))
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["check_size_personal"] == ["$25k - $50k"]
+
+
+@pytest.mark.asyncio
 async def test_future_csv_upload_populates_core_field_aliases_with_zero_manual_mapping(import_service):
     """The exact scenario the user described for Person Linkedin Url/Company Name
     for Emails/Secondary Email/Corporate Phone/Gender: a human just accepts
@@ -698,14 +817,14 @@ async def test_alex_pepe_end_to_end(import_service):
     configuration, using the same suggested mapping a human would just accept."""
     await _seed_validated_single_selects(import_service)
     row = (
-        "Email,Dinner Subscriptions,Dinners Attended,Chris Degree Connection,Age Range\n"
+        "Email,Dinner Subscriptions,Dinners Attended,Chris Degree Connection,Age Range,Check Size\n"
         "alexjpepe@gmail.com,"
         "\"Investor Dinners, Fireside Dinners, Biz Dev Dinners\","
         "\"Investor Dinners, Fireside Dinners, Savvy [2.25.2025] Austin, VacayMyWay [08.12.2025] Austin, "
         "Alpha Rose [08.13.2025] Austin, Biz Dev Dinners, Ensitech [11.13.2025] Austin, "
         "SharpsAI [12.04.2025] Austin, Civilization Fund [01.19.2026] Austin, Predict RX [03.10.2026] Austin, "
         "Submersive [04.30.2026] Austin\","
-        "1st degree,61-70\n"
+        "1st degree,61-70,\"$25k - $50k, $50k - $100k\"\n"
     )
     batch = await import_service.upload("future.csv", csv_bytes(row))
     mapping = suggest_mapping(batch.headers)
@@ -723,6 +842,7 @@ async def test_alex_pepe_end_to_end(import_service):
     ]
     assert alex.custom_fields["chris_degree_connection"] == "1st degree"
     assert alex.custom_fields["age_range"] == "61-70"
+    assert alex.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
 
 
 @pytest.mark.asyncio

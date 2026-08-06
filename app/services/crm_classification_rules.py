@@ -27,6 +27,7 @@ it needs reference data, extend `build_classification_context()` too. No
 other change to the import pipeline is required.
 """
 
+import re
 from typing import Any, Callable
 
 Classifier = Callable[[dict[str, str], dict[str, Any]], dict[str, Any]]
@@ -243,6 +244,99 @@ def classify_engagement_stage(raw_row: dict[str, str], context: dict[str, Any]) 
     return {"custom:engagement_stage": value} if value else {}
 
 
+_CHECK_SIZE_DASH_RE = re.compile(r"[‒–—−]")  # figure/en/em dash, minus sign -> hyphen
+
+
+def _split_check_size_tokens(value: str | None) -> list[str]:
+    """
+    Splits on a comma immediately followed by whitespace ONLY -- the
+    established multi-value delimiter for this column (every real
+    multi-selection found in the 2026-08-06 two-CSV audit uses ", " between
+    buckets, e.g. "$25k - $50k, $50k - $100k"). A comma with NO following
+    whitespace is a thousands separator glued inside one dollar amount
+    (e.g. "$5,000-$10,000", "$50,000-$200,000 avg.") and must never be
+    split on -- confirmed by scanning every comma in both real CSVs' Check
+    Size / Check Size (Institutional) columns: each one is either
+    immediately followed by a digit (thousands separator) or by whitespace
+    (value separator), with zero ambiguous cases. A naive `split(",")`
+    would shred "$5,000-$10,000" into "$5" and "000-$10,000".
+    """
+    if not value:
+        return []
+    return [t.strip() for t in re.split(r",\s+", value) if t.strip()]
+
+
+def _normalize_check_size_token(token: str, options: set[str]) -> str | None:
+    """
+    Maps a raw token to one of the field's live canonical bucket options
+    (e.g. "$25k - $50k") if -- and only if -- it's the same bucket modulo
+    harmless formatting noise: whitespace, hyphen/en-dash/em-dash variants,
+    and casing. Never guesses a bucket for a range that spans several
+    buckets ("$25k-$100k"), free text ("Depends on Asset Allocation", "up
+    to 50k"), or any other non-exact match -- same "never guess" principle
+    as _validate_single_select, generalized to a multi-select field with
+    much more variant-heavy real-world input.
+    """
+
+    def _key(s: str) -> str:
+        cleaned = _CHECK_SIZE_DASH_RE.sub("-", s.strip())
+        cleaned = re.sub(r"\s*-\s*", "-", cleaned)
+        return re.sub(r"\s+", "", cleaned).lower()
+
+    token_key = _key(token)
+    for option in options:
+        if token_key == _key(option):
+            return option
+    return None
+
+
+def classify_check_size(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    check_size_personal (custom field, multi_select) <- CSV `Check Size`.
+    check_size_institutional (custom field, multi_select) <- CSV `Check
+    Size (Institutional)`. These are two genuinely distinct columns in both
+    real CSVs (confirmed via the 2026-08-06 audit: of the rows in CSV B
+    where both columns are populated, the majority -- 64/119 -- have
+    DIFFERENT values, and 20 rows have an institutional value with no
+    personal value at all) -- never derive one from the other or copy one
+    into the other.
+
+    Each cell is comma-split on ", " only (see _split_check_size_tokens --
+    a bare comma with no following space is a thousands separator inside
+    one dollar amount, never a value delimiter) and every resulting token
+    is kept ONLY if it matches one of the field's live options modulo
+    whitespace/dash-variant/casing noise (see _normalize_check_size_token).
+    A token that doesn't match any live option -- "Depends on Asset
+    Allocation", "up to 50k", "$5,000-$10,000", a range spanning several
+    buckets like "$25k-$100k" -- is dropped from this structured field,
+    same "never guess a picklist value" rule already used for Chris Degree
+    Connection/Age Range/Gender/Engagement Stage. The original CSV text is
+    never lost regardless -- it always remains in source_snapshot, and
+    _apply_custom_field's list union-merge (crm_service.py) means a
+    recognized value here is added to, never replaces, whatever the
+    contact already has.
+    """
+    result: dict[str, Any] = {}
+
+    personal_options = context.get("check_size_personal_options") or set()
+    personal_tokens = _split_check_size_tokens(_find_column(raw_row, "Check Size"))
+    personal = _ordered_dedup(
+        [v for t in personal_tokens if (v := _normalize_check_size_token(t, personal_options))]
+    )
+    if personal:
+        result["custom:check_size_personal"] = personal
+
+    institutional_options = context.get("check_size_institutional_options") or set()
+    institutional_tokens = _split_check_size_tokens(_find_column(raw_row, "Check Size (Institutional)"))
+    institutional = _ordered_dedup(
+        [v for t in institutional_tokens if (v := _normalize_check_size_token(t, institutional_options))]
+    )
+    if institutional:
+        result["custom:check_size_institutional"] = institutional
+
+    return result
+
+
 # Registry of independent classification rules. Each is applied to every
 # imported row, in order; later rules win on key collision (none currently
 # collide). Add new rules here -- see module docstring.
@@ -256,6 +350,7 @@ CLASSIFICATION_RULES: list[Classifier] = [
     classify_age_range,
     classify_gender,
     classify_engagement_stage,
+    classify_check_size,
 ]
 
 
@@ -278,6 +373,8 @@ async def build_classification_context(custom_field_store: Any) -> dict[str, Any
         "age_range_options": await _options("age_range"),
         "gender_options": await _options("gender"),
         "engagement_stage_options": await _options("engagement_stage"),
+        "check_size_personal_options": await _options("check_size_personal"),
+        "check_size_institutional_options": await _options("check_size_institutional"),
     }
 
 

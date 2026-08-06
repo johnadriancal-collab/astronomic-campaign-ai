@@ -13,6 +13,7 @@ from app.services.crm_classification_rules import (
     apply_classification_rules,
     build_classification_context,
     classify_age_range,
+    classify_check_size,
     classify_chris_degree_connection,
     classify_dinner_subscriptions,
     classify_dinners_attended,
@@ -424,6 +425,149 @@ def test_engagement_stage_never_reads_funding_stage_column():
     assert result == {}
 
 
+# --- classify_check_size ---
+#
+# check_size_personal <- CSV `Check Size`, check_size_institutional <- CSV
+# `Check Size (Institutional)`. Confirmed via the 2026-08-06 two-CSV audit
+# that these are genuinely distinct columns (64/119 rows where both are
+# populated in the real "Contacts 2 (ITF).csv" have DIFFERENT values, 20
+# rows have an institutional value with no personal value at all) -- so
+# they are two independent rules' worth of behavior, never derived from
+# each other. Both fields are multi_select with the same 11 canonical
+# bucket options in production.
+
+CHECK_SIZE_OPTIONS = {
+    "$1k - $10k", "$10k - $25k", "$25k - $50k", "$50k - $100k", "$100k - $250k",
+    "$250k - $500k", "$500k - $1M", "$1M - $2M", "$2M - $5M", "$5M - $10M", "$10M+",
+}
+CHECK_SIZE_CONTEXT = {
+    "check_size_personal_options": CHECK_SIZE_OPTIONS,
+    "check_size_institutional_options": CHECK_SIZE_OPTIONS,
+}
+
+
+def test_check_size_personal_single_clean_bucket_passes_through():
+    row = {"Check Size": "$25k - $50k"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_personal"] == ["$25k - $50k"]
+    assert "custom:check_size_institutional" not in result
+
+
+def test_check_size_personal_multiple_buckets_comma_space_split():
+    # The exact real Alex Pepe case from the 2026-08-06 audit.
+    row = {"Check Size": "$25k - $50k, $50k - $100k"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+
+
+def test_check_size_institutional_reads_its_own_column_only():
+    row = {"Check Size (Institutional)": "$1M - $2M, $2M - $5M"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_institutional"] == ["$1M - $2M", "$2M - $5M"]
+    assert "custom:check_size_personal" not in result
+
+
+def test_check_size_personal_and_institutional_are_independent_never_copied():
+    # Real shape from the audit: a contact with DIFFERENT populated values
+    # in both columns -- institutional must never be derived from personal.
+    row = {"Check Size": "$1k - $10k, $10k - $25k", "Check Size (Institutional)": "$500k - $1M, $1M - $2M"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_personal"] == ["$1k - $10k", "$10k - $25k"]
+    assert result["custom:check_size_institutional"] == ["$500k - $1M", "$1M - $2M"]
+
+
+def test_check_size_normalizes_hyphen_variants():
+    for dash in ["-", "–", "—", "−"]:  # hyphen, en dash, em dash, minus sign
+        row = {"Check Size": f"$25k {dash} $50k"}
+        result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+        assert result["custom:check_size_personal"] == ["$25k - $50k"], f"dash variant {dash!r} failed"
+
+
+def test_check_size_normalizes_whitespace_variants():
+    for raw in ["$25k-$50k", "$25k - $50k", "$25k  -  $50k", " $25k-$50k "]:
+        row = {"Check Size": raw}
+        result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+        assert result["custom:check_size_personal"] == ["$25k - $50k"], f"whitespace variant {raw!r} failed"
+
+
+def test_check_size_normalizes_casing():
+    row = {"Check Size": "$25K - $50K"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_personal"] == ["$25k - $50k"]
+
+
+def test_check_size_dollar_amount_with_thousands_comma_is_not_split():
+    # The critical edge case: a single value like "$5,000-$10,000" must
+    # NOT be shredded by a naive split(",") into "$5" and "000-$10,000".
+    # It doesn't match any of the 11 canonical buckets, so it's correctly
+    # dropped -- but it must be evaluated as ONE token, not several.
+    row = {"Check Size": "$5,000-$10,000"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result == {}
+
+
+def test_check_size_thousands_comma_alongside_a_real_multi_value_list():
+    # A mix: one thousands-separated free-text value plus a genuine
+    # multi-select list, comma-space-separated as usual. Confirms the
+    # ", " split isn't fooled by a bare "," elsewhere in the cell.
+    row = {"Check Size": "$50,000-$200,000 avg., $25k - $50k, $50k - $100k"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+
+
+def test_check_size_free_text_never_guessed_into_a_bucket():
+    for raw in ["Depends on Asset Allocation", "up to 50k", "It depends", "NA", "TBD", "Varies", "Open"]:
+        row = {"Check Size": raw}
+        result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+        assert result == {}, f"free text {raw!r} must never be guessed into a bucket"
+
+
+def test_check_size_range_spanning_multiple_buckets_never_guessed():
+    # "$25k-$100k" spans two real buckets ($25k-$50k and $50k-$100k) --
+    # must be dropped, never mapped to either (or both).
+    row = {"Check Size": "$25k-$100k"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result == {}
+
+
+def test_check_size_long_free_text_tail_after_real_buckets_is_dropped_not_merged():
+    # Real shape from the audit (Oliver Carmack): several genuine buckets
+    # followed by a long free-text sentence in the same cell.
+    row = {
+        "Check Size": (
+            "$25k - $50k, $50k - $100k, $100k - $250k, "
+            "We tend to concentrate our investments as a firm into ticket sizes $100M plus"
+        )
+    }
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_personal"] == ["$25k - $50k", "$50k - $100k", "$100k - $250k"]
+
+
+def test_check_size_deduplicates_repeated_bucket():
+    row = {"Check Size": "$25k - $50k, $25k-$50k, $50k - $100k"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result["custom:check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+
+
+def test_check_size_missing_columns_produce_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+    assert result == {}
+
+
+def test_check_size_no_context_options_drops_everything():
+    row = {"Check Size": "$25k - $50k"}
+    result = classify_check_size(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_check_size_every_defined_option_passes():
+    for option in CHECK_SIZE_OPTIONS:
+        row = {"Check Size": option}
+        result = classify_check_size(row, CHECK_SIZE_CONTEXT)
+        assert result["custom:check_size_personal"] == [option]
+
+
 # --- registry / integration ---
 
 
@@ -440,9 +584,12 @@ def test_apply_classification_rules_runs_the_full_registry():
         "Age Range": "31-40",
         "Gender": "Male",
         "Stage": "Interested",
+        "Check Size": "$25k - $50k",
+        "Check Size (Institutional)": "$1M - $2M",
     }
     full_context = {
         **ROLE_CONTEXT, **CHRIS_DEGREE_CONTEXT, **AGE_RANGE_CONTEXT, **GENDER_CONTEXT, **ENGAGEMENT_STAGE_CONTEXT,
+        **CHECK_SIZE_CONTEXT,
     }
     result = apply_classification_rules(row, full_context)
     assert result["industry"] == "Consumer Electronics"
@@ -456,6 +603,8 @@ def test_apply_classification_rules_runs_the_full_registry():
     assert result["custom:age_range"] == "31-40"
     assert result["custom:gender"] == "Male"
     assert result["custom:engagement_stage"] == "Interested"
+    assert result["custom:check_size_personal"] == ["$25k - $50k"]
+    assert result["custom:check_size_institutional"] == ["$1M - $2M"]
     assert "funding_stage" not in result  # the exact collision this fix prevents
 
 
@@ -471,6 +620,8 @@ async def test_build_classification_context_fetches_live_options_for_every_valid
         "age_range": FakeField(["18-22", "23-30"]),
         "gender": FakeField(["Male", "Female"]),
         "engagement_stage": FakeField(["Cold", "Interested", "Unresponsive"]),
+        "check_size_personal": FakeField(["$1k - $10k", "$10k - $25k"]),
+        "check_size_institutional": FakeField(["$500k - $1M", "$1M - $2M"]),
     }
 
     class FakeCustomFieldStore:
@@ -483,6 +634,8 @@ async def test_build_classification_context_fetches_live_options_for_every_valid
     assert context["age_range_options"] == {"18-22", "23-30"}
     assert context["gender_options"] == {"Male", "Female"}
     assert context["engagement_stage_options"] == {"Cold", "Interested", "Unresponsive"}
+    assert context["check_size_personal_options"] == {"$1k - $10k", "$10k - $25k"}
+    assert context["check_size_institutional_options"] == {"$500k - $1M", "$1M - $2M"}
 
 
 @pytest.mark.asyncio
@@ -497,3 +650,5 @@ async def test_build_classification_context_handles_missing_fields():
     assert context["age_range_options"] == set()
     assert context["gender_options"] == set()
     assert context["engagement_stage_options"] == set()
+    assert context["check_size_personal_options"] == set()
+    assert context["check_size_institutional_options"] == set()
