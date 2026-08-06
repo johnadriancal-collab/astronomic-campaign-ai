@@ -279,6 +279,27 @@ async def test_classification_rule_wins_even_if_column_mapping_wrongly_maps_main
 
 
 @pytest.mark.asyncio
+async def test_future_csv_upload_normalizes_dinner_subscriptions_automatically(import_service):
+    """The exact scenario the user described: a future CSV containing legacy
+    wording must be normalized on import with zero manual configuration --
+    Dinner Subscriptions is deliberately left unmapped to prove the
+    classification rule fires independent of column_mapping."""
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,Dinner Subscriptions\n"
+            "nova@example.com,\"Investor Dinners, Sigma Librae Dinners, Retreats\"\n"
+        ),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})  # column deliberately left unmapped
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners"]
+
+
+@pytest.mark.asyncio
 async def test_classification_rule_preserves_source_snapshot_unchanged(import_service):
     batch = await import_service.upload(
         "p.csv",

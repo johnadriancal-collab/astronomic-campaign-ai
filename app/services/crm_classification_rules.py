@@ -134,10 +134,36 @@ def classify_role(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str,
     return {"custom:role": kept} if kept else {}
 
 
+def classify_dinner_subscriptions(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    dinner_subscriptions (custom field) <- CSV `Dinner Subscriptions`,
+    comma-split and trimmed, then run through
+    normalize_dinner_subscriptions() -- the SAME function that powers the
+    one-time contact-value migration (imported directly, not reimplemented)
+    so a freshly-imported contact and a migrated contact always end up with
+    identical normalized values. This is what makes legacy wording (e.g.
+    "Sigma Librae Dinners", "Retreats") get collapsed/dropped automatically
+    on every future upload, regardless of whether the human maps this
+    column at all -- see module docstring.
+    """
+    from app.models.crm import normalize_dinner_subscriptions  # local import, same rationale as classify_investor_mode
+
+    tokens = _split_tokens(_find_column(raw_row, "Dinner Subscriptions", "Dinner Subscription"))
+    if not tokens:
+        return {}
+    normalized = normalize_dinner_subscriptions(tokens)
+    return {"custom:dinner_subscriptions": normalized} if normalized else {}
+
+
 # Registry of independent classification rules. Each is applied to every
 # imported row, in order; later rules win on key collision (none currently
 # collide). Add new rules here -- see module docstring.
-CLASSIFICATION_RULES: list[Classifier] = [classify_industry, classify_investor_mode, classify_role]
+CLASSIFICATION_RULES: list[Classifier] = [
+    classify_industry,
+    classify_investor_mode,
+    classify_role,
+    classify_dinner_subscriptions,
+]
 
 
 async def build_classification_context(custom_field_store: Any) -> dict[str, Any]:

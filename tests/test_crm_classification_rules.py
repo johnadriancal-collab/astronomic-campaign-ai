@@ -12,6 +12,7 @@ import pytest
 from app.services.crm_classification_rules import (
     apply_classification_rules,
     build_classification_context,
+    classify_dinner_subscriptions,
     classify_industry,
     classify_investor_mode,
     classify_role,
@@ -171,6 +172,54 @@ def test_role_never_falls_back_to_options_missing_from_context():
     assert result == {}
 
 
+# --- classify_dinner_subscriptions ---
+
+
+def test_dinner_subscriptions_final_values_pass_through_unchanged():
+    row = {"Dinner Subscriptions": "Investor Dinners, Fireside Dinners"}
+    result = classify_dinner_subscriptions(row, NO_CONTEXT)
+    assert result["custom:dinner_subscriptions"] == ["Investor Dinners", "Fireside Dinners"]
+
+
+def test_dinner_subscriptions_legacy_value_collapses_and_dedupes():
+    # User's own example: legacy Sigma Librae Dinners maps to Founder Dinners,
+    # and the delete-only Retreats disappears -- nothing else survives it.
+    row = {"Dinner Subscriptions": "Investor Dinners, Sigma Librae Dinners, Retreats"}
+    result = classify_dinner_subscriptions(row, NO_CONTEXT)
+    assert result["custom:dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners"]
+
+
+def test_dinner_subscriptions_legacy_mansion_dinners_maps_to_investor_dinners():
+    # User's other own example.
+    row = {"Dinner Subscriptions": "Mansion dinners with matching founders/investors, Fireside Dinners"}
+    result = classify_dinner_subscriptions(row, NO_CONTEXT)
+    assert result["custom:dinner_subscriptions"] == ["Investor Dinners", "Fireside Dinners"]
+
+
+def test_dinner_subscriptions_delete_only_produces_no_key():
+    row = {"Dinner Subscriptions": "Retreats, Parent dinners, Astronomic General Subscriber"}
+    result = classify_dinner_subscriptions(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_dinner_subscriptions_unrecognized_value_is_preserved_not_discarded():
+    row = {"Dinner Subscriptions": "Investor Dinners, Some Brand New Dinner Series"}
+    result = classify_dinner_subscriptions(row, NO_CONTEXT)
+    assert result["custom:dinner_subscriptions"] == ["Investor Dinners", "Some Brand New Dinner Series"]
+
+
+def test_dinner_subscriptions_missing_column_produces_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_dinner_subscriptions(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_dinner_subscriptions_header_variant_singular_matched():
+    row = {"Dinner Subscription": "Investor Dinners"}
+    result = classify_dinner_subscriptions(row, NO_CONTEXT)
+    assert result["custom:dinner_subscriptions"] == ["Investor Dinners"]
+
+
 # --- registry / integration ---
 
 
@@ -181,6 +230,7 @@ def test_apply_classification_rules_runs_the_full_registry():
         "Sub-industry": "Biotech",
         "Investor type": "Angel Investor",
         "Role": "Investor, VP",
+        "Dinner Subscriptions": "Investor Dinners, Sigma Librae Dinners, Retreats",
     }
     result = apply_classification_rules(row, ROLE_CONTEXT)
     assert result["industry"] == "Consumer Electronics"
@@ -188,6 +238,7 @@ def test_apply_classification_rules_runs_the_full_registry():
     assert result["custom:investor_type"] == ["Angel Investor"]
     assert result["thesis_investor_mode"] == "Privately"
     assert result["custom:role"] == ["Investor"]  # VP dropped
+    assert result["custom:dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners"]  # normalized, Retreats dropped
 
 
 @pytest.mark.asyncio

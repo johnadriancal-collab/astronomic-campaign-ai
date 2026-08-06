@@ -47,6 +47,16 @@ re-run:
     OWN `source_snapshot`, never from the corrupted value. Touches only
     `custom_fields`/`updated_at`; leaves single-value contacts alone.
 
+    migrate_all_dinner_subscriptions() -- rewrites Dinner Subscriptions'
+    raw comma-joined free text into the normalized multi-select list, via
+    normalize_dinner_subscriptions() (app/models/crm.py) -- the same
+    function the CSV-import classification rule uses, so migrated and
+    freshly-imported contacts always agree. Idempotent: a contact whose
+    value is already a list is left alone. Legacy wording collapses into
+    its mapped final option (deduped against anything already present);
+    delete-only values are dropped, removing the key entirely if nothing
+    valid remains.
+
 Old single-value fields with no explicit "(Institutional)" counterpart
 default to the PRIVATE thesis variant, mirroring "Check Size" (no suffix)
 vs "Check Size (Institutional)" already being two distinct fields.
@@ -55,7 +65,13 @@ vs "Check Size (Institutional)" already being two distinct fields.
 from datetime import datetime, timezone
 from typing import Any
 
-from app.models.crm import CrmContact, CrmImportBatch, CustomFieldType
+from app.models.crm import (
+    CrmContact,
+    CrmImportBatch,
+    CustomFieldType,
+    DINNER_SUBSCRIPTION_OPTIONS,
+    normalize_dinner_subscriptions,
+)
 from app.repositories.crm_contact_store import CrmContactStore
 from app.services.crm_service import CrmService
 
@@ -86,7 +102,7 @@ LEGACY_FIELD_SEEDS: list[tuple[str, str, CustomFieldType, str | None, list[str]]
      "Finer-grained than the core `industry` field.", []),
     ("do_not_invest_in", "Do Not Invest In", CustomFieldType.LONG_TEXT,
      "Explicit exclusions -- the Thesis Form only captures what they DO invest in.", []),
-    ("dinner_subscriptions", "Dinner Subscriptions", CustomFieldType.TEXT, None, []),
+    ("dinner_subscriptions", "Dinner Subscriptions", CustomFieldType.MULTI_SELECT, None, DINNER_SUBSCRIPTION_OPTIONS),
     ("dinners_attended", "Dinners Attended", CustomFieldType.MULTI_SELECT,
      "Not a stable closed set -- every new dinner adds a value. Options need manual upkeep over time.",
      ["Investor Dinners", "Fireside Dinners", "Founder Dinners", "Biz Dev Dinners",
@@ -129,6 +145,7 @@ CUSTOM_FIELD_CORRECTIONS: dict[str, tuple[CustomFieldType, list[str]]] = {
     "accredited_status": (CustomFieldType.SINGLE_SELECT, ["Yes", "No"]),
     "age_range": (CustomFieldType.SINGLE_SELECT,
                   ["18-22", "23-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81+", "Retired", "Deceased"]),
+    "dinner_subscriptions": (CustomFieldType.MULTI_SELECT, DINNER_SUBSCRIPTION_OPTIONS),
     "investor_type": (CustomFieldType.MULTI_SELECT, [
         "Angel Investor", "Family Office", "Fund LP", "I sponsor deals that I find", "Institutional Investor",
         "Invest with group of Angels", "Participate in syndicated investments", "Private Equity",
@@ -357,14 +374,63 @@ async def migrate_all_contacts(contact_store: CrmContactStore) -> dict[str, int]
     return {"contacts_scanned": len(contacts), "contacts_updated": contacts_updated, "fields_migrated": fields_migrated}
 
 
+def migrate_contact_dinner_subscriptions(contact: CrmContact) -> tuple[CrmContact, bool]:
+    """
+    Pure function -- does not save. Dinner Subscriptions started as free
+    text (comma-joined when a contact had more than one subscription);
+    this rewrites that raw string into the normalized multi-select list via
+    normalize_dinner_subscriptions() (the SAME function the CSV-import
+    classification rule uses -- see crm_classification_rules.py -- so a
+    migrated contact and a freshly-imported one always agree). Idempotent:
+    a contact whose value is already a list (already migrated, or created
+    fresh under the new field type) is left untouched -- the isinstance
+    check IS the "already migrated" signal, no separate flag needed. If
+    every token a contact had was delete-only, the key is removed entirely
+    (matching _apply_mapping's own convention of never storing an empty
+    list) rather than left as `[]`.
+    """
+    raw = contact.custom_fields.get("dinner_subscriptions")
+    if not isinstance(raw, str) or not raw.strip():
+        return contact, False
+
+    tokens = [t.strip() for t in raw.split(",") if t.strip()]
+    normalized = normalize_dinner_subscriptions(tokens)
+
+    new_custom_fields = dict(contact.custom_fields)
+    if normalized:
+        new_custom_fields["dinner_subscriptions"] = normalized
+    else:
+        del new_custom_fields["dinner_subscriptions"]
+
+    updated = contact.model_copy(
+        update={"custom_fields": new_custom_fields, "updated_at": datetime.now(timezone.utc)}
+    )
+    return updated, True
+
+
+async def migrate_all_dinner_subscriptions(contact_store: CrmContactStore) -> dict[str, int]:
+    contacts = await contact_store.list()
+    contacts_updated = 0
+
+    for contact in contacts:
+        updated, changed = migrate_contact_dinner_subscriptions(contact)
+        if changed:
+            await contact_store.save(updated)
+            contacts_updated += 1
+
+    return {"dinner_subscriptions_contacts_scanned": len(contacts), "dinner_subscriptions_contacts_updated": contacts_updated}
+
+
 async def reconcile_legacy_fields(crm_service: CrmService) -> dict[str, Any]:
     """The single entry point: seed new definitions, correct previously-guessed ones,
-    then migrate any values already sitting under the old keys. Safe to call any number
-    of times."""
+    migrate any values already sitting under the old keys, then normalize Dinner
+    Subscriptions' free-text values into the multi-select representation. Safe to
+    call any number of times."""
     seed_report = await seed_legacy_custom_fields(crm_service)
     corrected = await apply_custom_field_corrections(crm_service)
     migrate_report = await migrate_all_contacts(crm_service.contact_store)
-    return {**seed_report, "corrected": corrected, **migrate_report}
+    dinner_subscriptions_report = await migrate_all_dinner_subscriptions(crm_service.contact_store)
+    return {**seed_report, "corrected": corrected, **migrate_report, **dinner_subscriptions_report}
 
 
 def _translate_comma_joined_column(raw_value: str, legacy_map: dict[str, str]) -> str:

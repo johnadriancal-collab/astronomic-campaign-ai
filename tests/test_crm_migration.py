@@ -17,6 +17,8 @@ from app.services.crm_migration import (
     _retokenize_known_phrases,
     apply_custom_field_corrections,
     migrate_all_contacts,
+    migrate_all_dinner_subscriptions,
+    migrate_contact_dinner_subscriptions,
     migrate_contact_legacy_fields,
     reconcile_legacy_fields,
     repair_all_contacts_comma_delimited_fields,
@@ -213,6 +215,22 @@ async def test_corrections_fix_age_range_to_single_select_with_options(service):
 
 
 @pytest.mark.asyncio
+async def test_corrections_fix_dinner_subscriptions_to_multi_select_with_14_options(service):
+    await seed_legacy_custom_fields(service)
+    corrected = await apply_custom_field_corrections(service)
+    assert "dinner_subscriptions" in corrected
+
+    field = await service.custom_field_store.get_by_field_key("dinner_subscriptions")
+    assert field.field_type == CustomFieldType.MULTI_SELECT
+    assert field.options == [
+        "Investor Dinners", "Investor Dinners Unsubscribe", "Founder Dinners", "Founder Dinners Unsubscribe",
+        "Newsletter", "Newsletter Unsubscribe", "Donor Dinners", "Donor Dinners Unsubscribe",
+        "Unsubscribe (Do not Email)", "Not actively Investing", "Biz Dev Dinners", "Biz Dev Dinners Unsubscribe",
+        "Fireside Dinners", "Fireside Dinners Unsubscribe",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_corrections_fix_investor_type_to_multi_select_with_real_vocab(service):
     await seed_legacy_custom_fields(service)
     await apply_custom_field_corrections(service)
@@ -246,6 +264,147 @@ async def test_reconcile_legacy_fields_applies_corrections_too(service):
     report = await reconcile_legacy_fields(service)
     assert "investor_type" in report["corrected"]
     field = await service.custom_field_store.get_by_field_key("dinners_attended")
+    assert field.field_type == CustomFieldType.MULTI_SELECT
+
+
+# --- Dinner Subscriptions value migration (text -> multi-select) ---
+
+
+def test_dinner_subscriptions_final_value_unchanged_by_migration():
+    contact = make_contact(custom_fields={"dinner_subscriptions": "Investor Dinners, Fireside Dinners"})
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is True
+    assert updated.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Fireside Dinners"]
+
+
+def test_dinner_subscriptions_legacy_value_maps_to_correct_final_value():
+    contact = make_contact(custom_fields={"dinner_subscriptions": "Sigma Librae Dinners"})
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is True
+    assert updated.custom_fields["dinner_subscriptions"] == ["Founder Dinners"]
+
+
+def test_dinner_subscriptions_multiple_legacy_values_combined():
+    contact = make_contact(
+        custom_fields={
+            "dinner_subscriptions": (
+                "Investor Dinners, Exodus Dinners, Founder Dinners, "
+                "Couples dinners with matching founder/investor couples, Biz Dev Dinners"
+            )
+        }
+    )
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is True
+    # Exodus Dinners -> Founder Dinners (already present, deduped); Couples... -> Investor Dinners (already present)
+    assert updated.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners", "Biz Dev Dinners"]
+
+
+def test_dinner_subscriptions_duplicate_resulting_values_are_deduplicated():
+    contact = make_contact(
+        custom_fields={"dinner_subscriptions": "Regulus Dinners, Sigma Librae Dinners, Exodus Dinners"}
+    )
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is True
+    assert updated.custom_fields["dinner_subscriptions"] == ["Founder Dinners"]  # all three collapse into one, once
+
+
+def test_dinner_subscriptions_delete_only_value_removes_the_key_entirely():
+    contact = make_contact(
+        custom_fields={"dinner_subscriptions": "Retreats, Parent dinners, Astronomic General Subscriber"}
+    )
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is True
+    assert "dinner_subscriptions" not in updated.custom_fields  # empty/not-set, not an empty list
+
+
+def test_dinner_subscriptions_mixed_valid_legacy_and_deleted_values():
+    contact = make_contact(
+        custom_fields={
+            "dinner_subscriptions": (
+                "Investor Dinners, Exodus Dinners, Founder Dinners, "
+                "Couples dinners with matching founder/investor couples, "
+                "Mansion dinners with matching founders/investors, Parent dinners, Retreats, Biz Dev Dinners"
+            )
+        }
+    )
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is True
+    assert updated.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners", "Biz Dev Dinners"]
+
+
+def test_dinner_subscriptions_unrecognized_value_preserved_not_discarded():
+    contact = make_contact(custom_fields={"dinner_subscriptions": "Investor Dinners, Some Future Dinner Series"})
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is True
+    assert updated.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Some Future Dinner Series"]
+
+
+def test_dinner_subscriptions_already_migrated_list_value_is_a_noop():
+    """Idempotency signal: a list value means it's already been migrated (or was
+    created fresh under the new multi_select type) -- must not be touched again."""
+    contact = make_contact(custom_fields={"dinner_subscriptions": ["Investor Dinners", "Founder Dinners"]})
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is False
+    assert updated is contact
+    assert updated.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners"]
+
+
+def test_dinner_subscriptions_missing_value_is_a_noop():
+    contact = make_contact(custom_fields={})
+    updated, changed = migrate_contact_dinner_subscriptions(contact)
+    assert changed is False
+    assert "dinner_subscriptions" not in updated.custom_fields
+
+
+def test_dinner_subscriptions_never_touches_other_custom_fields():
+    contact = make_contact(
+        custom_fields={"dinner_subscriptions": "Retreats", "gender": "Female", "notes": "some notes"}
+    )
+    updated, _ = migrate_contact_dinner_subscriptions(contact)
+    assert updated.custom_fields["gender"] == "Female"
+    assert updated.custom_fields["notes"] == "some notes"
+    assert "dinner_subscriptions" not in updated.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_migrate_all_dinner_subscriptions_only_saves_contacts_that_changed(service):
+    a = await service.create_contact({"first_name": "Ada"})  # no dinner_subscriptions at all
+    b = await service.create_contact(
+        {"first_name": "Grace", "custom_fields": {"dinner_subscriptions": "Investor Dinners, Retreats"}}
+    )
+    c = await service.create_contact(
+        {"first_name": "Hedy", "custom_fields": {"dinner_subscriptions": ["Founder Dinners"]}}  # already migrated
+    )
+
+    report = await migrate_all_dinner_subscriptions(service.contact_store)
+    assert report == {"dinner_subscriptions_contacts_scanned": 3, "dinner_subscriptions_contacts_updated": 1}
+
+    assert "dinner_subscriptions" not in (await service.get_contact(a.crm_contact_id)).custom_fields
+    assert (await service.get_contact(b.crm_contact_id)).custom_fields["dinner_subscriptions"] == ["Investor Dinners"]
+    assert (await service.get_contact(c.crm_contact_id)).custom_fields["dinner_subscriptions"] == ["Founder Dinners"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_all_dinner_subscriptions_is_idempotent(service):
+    await service.create_contact(
+        {"custom_fields": {"dinner_subscriptions": "Investor Dinners, Sigma Librae Dinners"}}
+    )
+    first = await migrate_all_dinner_subscriptions(service.contact_store)
+    second = await migrate_all_dinner_subscriptions(service.contact_store)
+    assert first["dinner_subscriptions_contacts_updated"] == 1
+    assert second["dinner_subscriptions_contacts_updated"] == 0  # already a list -- no-op the second time
+
+
+@pytest.mark.asyncio
+async def test_reconcile_legacy_fields_also_normalizes_dinner_subscriptions(service):
+    await service.create_contact(
+        {"custom_fields": {"dinner_subscriptions": "Mansion dinners with matching founders/investors"}}
+    )
+    report = await reconcile_legacy_fields(service)
+    assert "dinner_subscriptions" in report["corrected"]
+    assert report["dinner_subscriptions_contacts_updated"] == 1
+
+    field = await service.custom_field_store.get_by_field_key("dinner_subscriptions")
     assert field.field_type == CustomFieldType.MULTI_SELECT
 
 

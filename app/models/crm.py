@@ -212,6 +212,83 @@ def derive_investor_mode(investor_type: list[str] | None) -> str | None:
     return None
 
 
+# The custom field "Dinner Subscriptions" (field_key="dinner_subscriptions") started
+# as free text, so real contacts and future CSVs carry a mix of the 14 final options
+# below plus retired legacy wording. normalize_dinner_subscriptions() is the single
+# source of truth for collapsing that legacy wording down to the closed set -- reused
+# by the one-time contact-value migration (crm_migration.py) AND by the CSV-import
+# classification rule (crm_classification_rules.py), so a manually-fixed contact, a
+# migrated contact, and a freshly-imported contact are always normalized identically.
+DINNER_SUBSCRIPTION_OPTIONS = [
+    "Investor Dinners",
+    "Investor Dinners Unsubscribe",
+    "Founder Dinners",
+    "Founder Dinners Unsubscribe",
+    "Newsletter",
+    "Newsletter Unsubscribe",
+    "Donor Dinners",
+    "Donor Dinners Unsubscribe",
+    "Unsubscribe (Do not Email)",
+    "Not actively Investing",
+    "Biz Dev Dinners",
+    "Biz Dev Dinners Unsubscribe",
+    "Fireside Dinners",
+    "Fireside Dinners Unsubscribe",
+]
+
+# Legacy value -> the one final option it collapses into. Verified against every
+# unique token that actually appears in the real production export (2026-08-06 audit) --
+# nothing here is guessed.
+DINNER_SUBSCRIPTION_LEGACY_MAP = {
+    "Mansion dinners with matching founders/investors": "Investor Dinners",
+    "Couples dinners with matching founder/investor couples": "Investor Dinners",
+    "I own a 5k+ sqft house and would host private dinners at my home": "Investor Dinners",
+    "Matching with global/international investors/founders in other capital cities around the world": (
+        "Investor Dinners"
+    ),
+    "Regulus Dinners": "Founder Dinners",
+    "Sigma Librae Dinners": "Founder Dinners",
+    "Exodus Dinners": "Founder Dinners",
+    "CD Newsletter Unsubscribe": "Newsletter Unsubscribe",
+}
+
+# Legacy values that carry no forward-looking signal at all -- dropped, never mapped.
+DINNER_SUBSCRIPTION_DELETE_VALUES = frozenset(
+    {
+        "Astronomic General Subscriber",
+        "Parent dinners",
+        "Retreats",
+    }
+)
+
+
+def normalize_dinner_subscriptions(tokens: list[str]) -> list[str]:
+    """
+    Collapses a list of raw Dinner Subscriptions tokens (already comma-split
+    and trimmed by the caller) down to the closed 14-option set: drops
+    DINNER_SUBSCRIPTION_DELETE_VALUES entries, rewrites
+    DINNER_SUBSCRIPTION_LEGACY_MAP entries to their final option, leaves
+    already-final values untouched, and deduplicates while preserving first-
+    seen order -- so a contact with both "Investor Dinners" and the legacy
+    "Mansion dinners..." (which also maps to Investor Dinners) ends up with
+    that option once, not twice. A token that matches none of the above
+    (not a final option, not a legacy mapping, not a delete value) is
+    preserved verbatim rather than silently dropped -- same convention as
+    _translate_comma_joined_column's legacy-token handling elsewhere in this
+    codebase -- so an unexpected future value stays visible instead of
+    disappearing.
+    """
+    result: list[str] = []
+    for raw in tokens:
+        token = raw.strip()
+        if not token or token in DINNER_SUBSCRIPTION_DELETE_VALUES:
+            continue
+        mapped = DINNER_SUBSCRIPTION_LEGACY_MAP.get(token, token)
+        if mapped not in result:
+            result.append(mapped)
+    return result
+
+
 def normalize_email(email: str | None) -> str | None:
     return email.strip().lower() or None if email else None
 
