@@ -84,6 +84,24 @@ def test_list_contacts_pagination_params(test_client):
     assert body["page_size"] == 2
 
 
+def test_export_fields_route_returns_schema_metadata_not_contact_data(test_client):
+    """The route must be reachable at a fixed path ahead of /contacts/{id} (i.e.
+    "export-fields" is never swallowed as a contact id) and must return field
+    metadata only -- no contact data, confirming it stays a schema-only endpoint."""
+    resp = test_client.get("/crm/contacts/export-fields")
+    assert resp.status_code == 200
+    body = resp.json()
+    keys = {f["key"] for f in body}
+    assert "first_name" in keys
+    assert "email" in keys
+    assert "source_snapshot" not in keys
+    assert "custom_fields" not in keys
+    by_key = {f["key"]: f["kind"] for f in body}
+    assert by_key["technologies"] == "list"
+    assert by_key["archived"] == "boolean"
+    assert by_key["email"] == "scalar"
+
+
 def test_custom_field_create_and_list(test_client):
     resp = test_client.post(
         "/crm/custom-fields",

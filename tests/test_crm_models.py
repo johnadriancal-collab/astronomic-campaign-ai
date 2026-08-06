@@ -14,6 +14,7 @@ from app.models.crm import (
     CrmCustomFieldDefinition,
     CustomFieldType,
     derive_investor_mode,
+    get_contact_export_fields,
 )
 
 
@@ -117,6 +118,57 @@ def test_no_custom_fields_are_pre_seeded():
     import asyncio
 
     assert asyncio.run(store.list()) == []
+
+
+# --- get_contact_export_fields() (dynamic CSV export schema) ---
+
+
+def test_export_fields_excludes_source_snapshot_and_custom_fields():
+    keys = {f.key for f in get_contact_export_fields()}
+    assert "source_snapshot" not in keys
+    assert "custom_fields" not in keys
+
+
+def test_export_fields_covers_every_other_model_field():
+    """The whole point of computing this via introspection: every declared
+    CrmContact field (minus the two deliberate exclusions) must show up,
+    with no manual list to fall out of sync."""
+    expected = set(CrmContact.model_fields.keys()) - {"source_snapshot", "custom_fields"}
+    assert {f.key for f in get_contact_export_fields()} == expected
+
+
+def test_export_fields_classifies_plain_list_fields_as_list():
+    """Regression check: list[str] fields (no `| None` wrapper) must not be
+    mistaken for an Optional-wrapped scalar and collapsed to their item type."""
+    by_key = {f.key: f.kind for f in get_contact_export_fields()}
+    assert by_key["technologies"] == "list"
+    assert by_key["thesis_private_check_sizes"] == "list"
+    assert by_key["thesis_private_asset_types"] == "list"
+
+
+def test_export_fields_classifies_optional_list_fields_as_list():
+    by_key = {f.key: f.kind for f in get_contact_export_fields()}
+    # thesis_institutional_* fields are also plain list[str] with a default_factory,
+    # exercised separately from the private-section fields above.
+    assert by_key["thesis_institutional_industries"] == "list"
+
+
+def test_export_fields_classifies_booleans_regardless_of_optionality():
+    by_key = {f.key: f.kind for f in get_contact_export_fields()}
+    assert by_key["archived"] == "boolean"  # plain bool
+    assert by_key["thesis_also_invests_institutionally"] == "boolean"  # bool | None
+
+
+def test_export_fields_classifies_plain_and_optional_scalars():
+    by_key = {f.key: f.kind for f in get_contact_export_fields()}
+    assert by_key["crm_contact_id"] == "scalar"  # plain str
+    assert by_key["email"] == "scalar"  # str | None
+    assert by_key["created_at"] == "scalar"  # datetime
+
+
+def test_export_fields_preserves_model_declaration_order():
+    field_keys = [name for name in CrmContact.model_fields if name not in {"source_snapshot", "custom_fields"}]
+    assert [f.key for f in get_contact_export_fields()] == field_keys
 
 
 def test_custom_field_definition_supports_all_seven_required_types():

@@ -41,9 +41,10 @@ Three field groups, kept structurally distinct on purpose:
    the user creates through the CRM itself.
 """
 
+import types
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import Any, get_args, get_origin
 
 from pydantic import BaseModel, Field
 
@@ -441,6 +442,60 @@ class CrmContact(BaseModel):
 
     # --- Group 3: custom fields ---
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+
+
+class CrmContactExportField(BaseModel):
+    """One core/thesis column for the CRM contacts CSV export -- see
+    get_contact_export_fields() for how this list is computed."""
+
+    key: str
+    kind: str  # "scalar" | "list" | "boolean"
+
+
+def _export_field_kind(annotation: Any) -> str:
+    """Classifies a CrmContact field's type annotation for CSV export
+    formatting: multi-select/list fields get semicolon-joined, booleans
+    get true/false, everything else is stringified as-is. Checks for a
+    bare `list[...]` origin first, then unwraps `X | None` (every core
+    field is optional) and recurses -- get_args() on a plain `list[str]`
+    also returns a non-empty tuple (the item type), so unwrapping before
+    checking for `list` would wrongly collapse `list[str]` to `str`."""
+    origin = get_origin(annotation)
+    if origin is list:
+        return "list"
+    if origin is types.UnionType:
+        non_none = [a for a in get_args(annotation) if a is not type(None)]
+        if len(non_none) == 1:
+            return _export_field_kind(non_none[0])
+        return "scalar"
+    if annotation is bool:
+        return "boolean"
+    return "scalar"
+
+
+def get_contact_export_fields() -> list[CrmContactExportField]:
+    """
+    Every CORE/thesis field on CrmContact, in declaration order, computed
+    directly from the Pydantic model via introspection -- NOT a
+    hand-maintained list. A field added to CrmContact later is
+    automatically included here with zero changes to this function,
+    which is the whole point: this list backs the "export every CRM
+    field" CSV feature, and a hardcoded column list would silently go
+    stale the next time a field is added.
+
+    Excludes `source_snapshot` (the raw last-imported CSV row -- an
+    internal reference for auditing import behavior, not a stable field
+    with a consistent meaning across contacts, and not something the CRM
+    export should expose) and `custom_fields` (a dict container; its
+    members are separately enumerable via GET /crm/custom-fields, each
+    with its own real field_key/label/type).
+    """
+    excluded = {"source_snapshot", "custom_fields"}
+    return [
+        CrmContactExportField(key=name, kind=_export_field_kind(field.annotation))
+        for name, field in CrmContact.model_fields.items()
+        if name not in excluded
+    ]
 
 
 class CustomFieldType(str, Enum):

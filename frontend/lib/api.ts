@@ -583,6 +583,20 @@ export function getCrmContact(crmContactId: string): Promise<CrmContact> {
   return request<CrmContact>(`/crm/contacts/${crmContactId}`);
 }
 
+export type CrmContactExportFieldKind = "scalar" | "list" | "boolean";
+
+export interface CrmContactExportField {
+  key: string;
+  kind: CrmContactExportFieldKind;
+}
+
+// Core/thesis field list for the CSV export, computed server-side straight from the
+// CrmContact model -- never hand-maintained here, so a new backend field is picked up
+// automatically. Paired with listCrmCustomFields() for the custom-field columns.
+export function listCrmContactExportFields(): Promise<CrmContactExportField[]> {
+  return request<CrmContactExportField[]>("/crm/contacts/export-fields");
+}
+
 export function createCrmContact(fields: Record<string, unknown>): Promise<CrmContact> {
   return post<CrmContact>("/crm/contacts", fields);
 }

@@ -14,11 +14,13 @@ from pydantic import BaseModel
 from app.dependencies import get_crm_import_service, get_crm_service
 from app.models.crm import (
     CrmContact,
+    CrmContactExportField,
     CrmContactPage,
     CrmCustomFieldDefinition,
     CrmImportBatch,
     CrmImportReport,
     CustomFieldType,
+    get_contact_export_fields,
 )
 from app.services.crm_import_service import CrmImportBatchNotFound, CrmImportService
 from app.services.crm_migration import (
@@ -89,6 +91,20 @@ async def create_contact(fields: dict[str, Any] = Body(...), service: CrmService
         return await service.create_contact(fields)
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.get("/contacts/export-fields", response_model=list[CrmContactExportField])
+async def list_contact_export_fields():
+    """
+    Every core/thesis field on CrmContact, computed via introspection --
+    schema metadata only, never contact data. Backs the CRM contacts CSV
+    export feature's dynamic column list (paired with GET /custom-fields
+    for custom columns) so a field added to the model later is included
+    automatically, with no route/list to update by hand. Declared ahead
+    of GET /contacts/{crm_contact_id} so "export-fields" is never matched
+    as a contact id.
+    """
+    return get_contact_export_fields()
 
 
 @router.get("/contacts/{crm_contact_id}", response_model=CrmContact)

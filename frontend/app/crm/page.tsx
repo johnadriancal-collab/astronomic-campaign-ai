@@ -1,15 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, ChevronLeft, ChevronRight, Plus, Search, Users, X } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Download, Plus, Search, Users, X } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { ApiError, listCrmContacts, type CrmContact } from "@/lib/api";
+import {
+  ApiError,
+  listCrmContactExportFields,
+  listCrmContacts,
+  listCrmCustomFields,
+  type CrmContact,
+  type CrmContactExportField,
+  type CrmCustomFieldDefinition,
+} from "@/lib/api";
+import {
+  clearSelection,
+  isPageFullySelected,
+  isPagePartiallySelected,
+  selectAllMatching,
+  toggleOne,
+  toggleSelectAllOnPage,
+} from "@/lib/contact-selection";
+import { buildCsv, buildExportColumns, downloadCsv, exportFilename } from "@/lib/csv-export";
 import { compareContactsByName } from "@/lib/sort-contacts";
 import { cn } from "@/lib/utils";
 
@@ -36,6 +53,15 @@ export default function CrmContactsPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
 
+  // Selection is a plain Set<string> of crm_contact_id -- deliberately cleared
+  // inside load() (below), never inside goToPage/changePageSize, so it survives
+  // paging through the current result set but never carries over stale ids once
+  // the search/filter criteria (and therefore the result set) actually changes.
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [exportFields, setExportFields] = useState<CrmContactExportField[] | null>(null);
+  const [customFields, setCustomFields] = useState<CrmCustomFieldDefinition[] | null>(null);
+  const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
+
   async function load(filters: Filters) {
     try {
       const params = {
@@ -53,6 +79,7 @@ export default function CrmContactsPage() {
           ? await listCrmContacts({ ...params, page: 1, page_size: probe.total })
           : probe;
       setAllContacts([...data.items].sort(compareContactsByName));
+      setSelected(clearSelection());
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? `Couldn't load contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
@@ -61,6 +88,8 @@ export default function CrmContactsPage() {
 
   useEffect(() => {
     load({ q: "", city: "", investorMode: "" });
+    listCrmContactExportFields().then(setExportFields).catch(() => setExportFields([]));
+    listCrmCustomFields(false).then(setCustomFields).catch(() => setCustomFields([]));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -99,6 +128,40 @@ export default function CrmContactsPage() {
   const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
   const rangeEnd = Math.min(page * pageSize, total);
 
+  // "Matching results" = every id in allContacts -- already exactly the full filtered
+  // set (or the full CRM, when no filters are active) thanks to the fetch-everything
+  // load() above, so no separate backend call is needed to know what "all" means here.
+  const pageIds = contacts?.map((c) => c.crm_contact_id) ?? [];
+  const matchingIds = allContacts?.map((c) => c.crm_contact_id) ?? [];
+  const allSelectedOnPage = isPageFullySelected(selected, pageIds);
+  const somePartiallySelectedOnPage = isPagePartiallySelected(selected, pageIds);
+
+  useEffect(() => {
+    if (selectAllCheckboxRef.current) {
+      selectAllCheckboxRef.current.indeterminate = somePartiallySelectedOnPage;
+    }
+  }, [somePartiallySelectedOnPage]);
+
+  function toggleContact(id: string) {
+    setSelected((prev) => toggleOne(prev, id));
+  }
+
+  function toggleSelectPage() {
+    setSelected((prev) => toggleSelectAllOnPage(prev, pageIds));
+  }
+
+  function selectAllMatchingResults() {
+    setSelected(selectAllMatching(matchingIds));
+  }
+
+  function handleExport() {
+    if (!allContacts || !exportFields || !customFields || selected.size === 0) return;
+    const columns = buildExportColumns(exportFields, customFields);
+    const selectedContacts = allContacts.filter((c) => selected.has(c.crm_contact_id));
+    const csv = buildCsv(columns, selectedContacts);
+    downloadCsv(csv, exportFilename(new Date()));
+  }
+
   return (
     <div className="mx-auto max-w-5xl px-6 py-10">
       <div className="mb-8 flex items-start justify-between gap-4">
@@ -108,10 +171,21 @@ export default function CrmContactsPage() {
             Our own record of known prospects and relationships -- separate from Apollo, separate from Campaign Manager.
           </p>
         </div>
-        <Link href="/crm/new" className={cn(buttonVariants({ size: "sm" }), "gap-1.5 shrink-0")}>
-          <Plus className="h-4 w-4" />
-          New contact
-        </Link>
+        <div className="flex shrink-0 flex-col gap-2">
+          <Link href="/crm/new" className={cn(buttonVariants({ size: "sm" }), "gap-1.5")}>
+            <Plus className="h-4 w-4" />
+            New contact
+          </Link>
+          <button
+            type="button"
+            onClick={handleExport}
+            disabled={selected.size === 0}
+            className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1.5 disabled:cursor-not-allowed disabled:opacity-40")}
+          >
+            <Download className="h-4 w-4" />
+            Export{selected.size > 0 ? ` (${selected.size})` : ""}
+          </button>
+        </div>
       </div>
 
       <form
@@ -165,6 +239,43 @@ export default function CrmContactsPage() {
           </button>
         )}
       </div>
+
+      {!error && contacts !== null && contacts.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-4 rounded-lg border border-border/60 bg-secondary/20 px-3 py-2 text-sm">
+          <label className="flex cursor-pointer items-center gap-2">
+            <input
+              ref={selectAllCheckboxRef}
+              type="checkbox"
+              checked={allSelectedOnPage}
+              onChange={toggleSelectPage}
+              className="h-4 w-4 cursor-pointer rounded border-input accent-primary"
+            />
+            <span>Select all on this page ({pageIds.length})</span>
+          </label>
+
+          {totalPages > 1 && (
+            <button type="button" onClick={selectAllMatchingResults} className="text-primary hover:underline">
+              Select all {total} matching contact{total === 1 ? "" : "s"}
+            </button>
+          )}
+
+          {selected.size > 0 && (
+            <>
+              <span className="font-medium text-foreground">
+                {selected.size} contact{selected.size === 1 ? "" : "s"} selected
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelected(clearSelection())}
+                className="inline-flex items-center gap-1 text-muted-foreground hover:text-foreground"
+              >
+                <X className="h-3.5 w-3.5" />
+                Clear selection
+              </button>
+            </>
+          )}
+        </div>
+      )}
 
       {error && (
         <Alert variant="destructive" className="mb-4">
@@ -220,27 +331,36 @@ export default function CrmContactsPage() {
             const name = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
             const location = [contact.city, contact.state].filter(Boolean).join(", ");
             return (
-              <Link key={contact.crm_contact_id} href={`/crm/${contact.crm_contact_id}`}>
-                <Card className="h-full transition-colors hover:bg-secondary/40">
-                  <CardHeader>
-                    <div className="mb-1 flex items-start justify-between gap-2">
-                      <CardTitle className="leading-snug">{name}</CardTitle>
-                      {contact.thesis_investor_mode && (
-                        <Badge variant="outline" className="rounded-full border-border/60 font-normal text-muted-foreground">
-                          {contact.thesis_investor_mode}
-                        </Badge>
-                      )}
-                    </div>
-                    <p className="line-clamp-1 text-sm text-muted-foreground">
-                      {[contact.title, contact.company].filter(Boolean).join(" @ ") || "No title/company on file"}
-                    </p>
-                  </CardHeader>
-                  <CardContent className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-                    {location && <span>{location}</span>}
-                    {contact.email && <span className="truncate">{contact.email}</span>}
-                  </CardContent>
-                </Card>
-              </Link>
+              <div key={contact.crm_contact_id} className="relative">
+                <input
+                  type="checkbox"
+                  checked={selected.has(contact.crm_contact_id)}
+                  onChange={() => toggleContact(contact.crm_contact_id)}
+                  aria-label={`Select ${name}`}
+                  className="absolute left-3 top-3 z-10 h-4 w-4 cursor-pointer rounded border-input accent-primary"
+                />
+                <Link href={`/crm/${contact.crm_contact_id}`}>
+                  <Card className="h-full pl-9 transition-colors hover:bg-secondary/40">
+                    <CardHeader>
+                      <div className="mb-1 flex items-start justify-between gap-2">
+                        <CardTitle className="leading-snug">{name}</CardTitle>
+                        {contact.thesis_investor_mode && (
+                          <Badge variant="outline" className="rounded-full border-border/60 font-normal text-muted-foreground">
+                            {contact.thesis_investor_mode}
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="line-clamp-1 text-sm text-muted-foreground">
+                        {[contact.title, contact.company].filter(Boolean).join(" @ ") || "No title/company on file"}
+                      </p>
+                    </CardHeader>
+                    <CardContent className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                      {location && <span>{location}</span>}
+                      {contact.email && <span className="truncate">{contact.email}</span>}
+                    </CardContent>
+                  </Card>
+                </Link>
+              </div>
             );
           })}
         </div>
