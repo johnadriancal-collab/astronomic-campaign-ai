@@ -23,14 +23,18 @@ const CORE_FIELD_OPTIONS = [
   "revenue", "funding_stage", "funding_amount", "technologies", "seniority", "department", "job_function",
 ];
 
+// thesis_private_check_sizes / thesis_institutional_check_sizes deliberately excluded --
+// deprecated as of the 2026-08-06 Check Size consolidation. check_size_personal/
+// check_size_institutional (custom fields, already selectable via the custom-field
+// section of this same mapping UI) are now the sole canonical Check Size destinations.
 const THESIS_FIELD_OPTIONS = [
   "thesis_cities", "thesis_investor_mode", "thesis_dietary_preferences", "thesis_referral_emails",
   "thesis_private_asset_types", "thesis_private_business_models", "thesis_private_industries",
-  "thesis_private_check_sizes", "thesis_private_deal_stages", "thesis_private_meeting_preferences",
+  "thesis_private_deal_stages", "thesis_private_meeting_preferences",
   "thesis_private_demographic_preferences", "thesis_private_other_criteria",
   "thesis_also_invests_institutionally",
   "thesis_institutional_asset_types", "thesis_institutional_business_models", "thesis_institutional_industries",
-  "thesis_institutional_check_sizes", "thesis_institutional_deal_stages", "thesis_institutional_meeting_preferences",
+  "thesis_institutional_deal_stages", "thesis_institutional_meeting_preferences",
   "thesis_institutional_demographic_preferences", "thesis_institutional_other_criteria",
 ];
 

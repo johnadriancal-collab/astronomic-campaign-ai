@@ -72,13 +72,35 @@ function ThesisCriteriaField({
   field,
   labelSuffix,
   set,
+  setCustomField,
+  customFieldOptions,
 }: {
   contact: CrmContact;
   mode: "private" | "institutional";
   field: { key: string; label: string; options: string[] };
   labelSuffix?: string;
   set: <K extends keyof CrmContact>(key: K, value: CrmContact[K]) => void;
+  setCustomField?: (fieldKey: string, value: unknown) => void;
+  customFieldOptions?: string[];
 }) {
+  // 2026-08-06 Check Size consolidation: check_size_personal/check_size_institutional
+  // (custom fields) are the sole canonical destination -- reads/writes them directly
+  // instead of the deprecated thesis_{mode}_check_sizes fields. No separate free-text
+  // "Other" input here: "Other:" is already one of the custom field's own checkbox
+  // options, unlike every other criteria field which has a dedicated _other column.
+  if (field.key === "check_sizes" && setCustomField && customFieldOptions) {
+    const customKey = mode === "private" ? "check_size_personal" : "check_size_institutional";
+    const selected = (contact.custom_fields[customKey] as string[]) ?? [];
+    return (
+      <MultiSelect
+        label={`${field.label}${labelSuffix ?? ""}`}
+        options={customFieldOptions}
+        selected={selected}
+        onChange={(v) => setCustomField(customKey, v)}
+      />
+    );
+  }
+
   const key = `thesis_${mode}_${field.key}` as keyof CrmContact;
   const otherKey = `thesis_${mode}_${field.key}_other` as keyof CrmContact;
   return (
@@ -277,6 +299,19 @@ export default function CrmContactDetailPage() {
 
   const name = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
 
+  // 2026-08-06 Check Size consolidation: check_size_personal/check_size_institutional
+  // (custom fields) are the sole canonical Check Size destination -- the "Which size
+  // investments are you open to making?" checkbox group in the Investor Thesis
+  // section below reads/writes these directly instead of the deprecated
+  // thesis_private_check_sizes/thesis_institutional_check_sizes fields. Excluded
+  // from the generic "Custom fields" card below so there's exactly one Check Size
+  // control, not two.
+  const checkSizePersonalField = customFields.find((f) => f.field_key === "check_size_personal");
+  const checkSizeInstitutionalField = customFields.find((f) => f.field_key === "check_size_institutional");
+  const visibleCustomFields = customFields.filter(
+    (f) => f.field_key !== "check_size_personal" && f.field_key !== "check_size_institutional"
+  );
+
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
       <button
@@ -396,7 +431,15 @@ export default function CrmContactDetailPage() {
                 <AccordionTrigger>Private Investments</AccordionTrigger>
                 <AccordionPanel className="space-y-5">
                   {CRITERIA_FIELDS.map((field) => (
-                    <ThesisCriteriaField key={field.key} contact={contact} mode="private" field={field} set={set} />
+                    <ThesisCriteriaField
+                      key={field.key}
+                      contact={contact}
+                      mode="private"
+                      field={field}
+                      set={set}
+                      setCustomField={setCustomField}
+                      customFieldOptions={checkSizePersonalField?.options}
+                    />
                   ))}
                   <div className="space-y-1">
                     <label className="text-xs font-medium text-muted-foreground">Other criteria or feedback (private)</label>
@@ -409,7 +452,15 @@ export default function CrmContactDetailPage() {
                 <AccordionTrigger>Institutional Investments</AccordionTrigger>
                 <AccordionPanel className="space-y-5">
                   {CRITERIA_FIELDS.map((field) => (
-                    <ThesisCriteriaField key={field.key} contact={contact} mode="institutional" field={field} set={set} />
+                    <ThesisCriteriaField
+                      key={field.key}
+                      contact={contact}
+                      mode="institutional"
+                      field={field}
+                      set={set}
+                      setCustomField={setCustomField}
+                      customFieldOptions={checkSizeInstitutionalField?.options}
+                    />
                   ))}
                   <div className="space-y-1">
                     <label className="text-xs font-medium text-muted-foreground">Other criteria or feedback (institutional)</label>
@@ -448,13 +499,13 @@ export default function CrmContactDetailPage() {
           </CardContent>
         </Card>
 
-        {customFields.length > 0 && (
+        {visibleCustomFields.length > 0 && (
           <Card>
             <CardHeader>
               <CardTitle className="text-sm">Custom fields</CardTitle>
             </CardHeader>
             <CardContent className="grid gap-3 sm:grid-cols-2">
-              {customFields.map((field) => {
+              {visibleCustomFields.map((field) => {
                 const value = contact.custom_fields[field.field_key];
                 if (field.field_type === "boolean") {
                   return (

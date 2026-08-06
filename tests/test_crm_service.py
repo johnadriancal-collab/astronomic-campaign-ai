@@ -7,7 +7,7 @@ definitions, search/filter, and Investor Thesis field handling.
 
 import pytest
 
-from app.models.crm import CrmImportRowStatus, CustomFieldType
+from app.models.crm import CrmContact, CrmImportRowStatus, CustomFieldType
 from app.services.crm_service import CrmContactNotFound, CrmDuplicateFieldKeyError, CrmService
 
 
@@ -190,6 +190,40 @@ async def test_list_contacts_filters_by_thesis_industry_across_private_and_insti
 
     results = await service.list_contacts(industry="Fintech")
     assert {c.first_name for c in results.items} == {"B"}
+
+
+@pytest.mark.asyncio
+async def test_list_contacts_filters_by_check_size_across_personal_and_institutional(service):
+    """2026-08-06 Check Size consolidation: the check_size filter now reads
+    check_size_personal/check_size_institutional (custom fields, the canonical
+    destination), not the deprecated thesis_private_check_sizes/
+    thesis_institutional_check_sizes fields -- confirms the filter actually
+    finds contacts whose real data lives where CSV import and the UI put it."""
+    await service.create_contact({
+        "first_name": "A", "custom_fields": {"check_size_personal": ["$25k - $50k", "$50k - $100k"]},
+    })
+    await service.create_contact({
+        "first_name": "B", "custom_fields": {"check_size_institutional": ["$1M - $2M"]},
+    })
+    await service.create_contact({"first_name": "C", "custom_fields": {"check_size_personal": ["$10M+"]}})
+
+    results = await service.list_contacts(check_size="$25k - $50k")
+    assert {c.first_name for c in results.items} == {"A"}
+
+    results = await service.list_contacts(check_size="$1M - $2M")
+    assert {c.first_name for c in results.items} == {"B"}
+
+
+@pytest.mark.asyncio
+async def test_list_contacts_check_size_filter_never_matches_deprecated_thesis_fields():
+    """A value that exists ONLY in the deprecated thesis fields (never migrated
+    to the canonical custom field) must NOT match -- this filter deliberately
+    stopped reading thesis_private_check_sizes/thesis_institutional_check_sizes."""
+    service = CrmService()
+    await service.create_contact({"first_name": "Legacy", "thesis_private_check_sizes": ["$1M - $2M"]})
+
+    results = await service.list_contacts(check_size="$1M - $2M")
+    assert results.items == []
 
 
 @pytest.mark.asyncio
@@ -569,6 +603,34 @@ async def test_unknown_mapped_field_name_is_ignored_not_guessed_at(service):
     merged = service.apply_import_mapping(contact, {"totally_made_up_field": "value"}, is_new=False)
     assert not hasattr(merged, "totally_made_up_field")
     assert merged.first_name == "Ada"
+
+
+@pytest.mark.asyncio
+async def test_deprecated_check_size_thesis_fields_are_never_written_via_import_mapping(service):
+    """2026-08-06 Check Size consolidation: thesis_private_check_sizes/
+    thesis_institutional_check_sizes were removed from THESIS_FIELD_NAMES, so
+    apply_import_mapping() now refuses to write to them even if a mapped_fields
+    dict explicitly targets them directly (e.g. a hand-crafted column_mapping) --
+    the same "unmapped/unknown target -- ignored" path as a made-up field name."""
+    contact = await service.create_contact({"first_name": "Ada"})
+    merged = service.apply_import_mapping(
+        contact,
+        {"thesis_private_check_sizes": ["$1M - $2M"], "thesis_institutional_check_sizes": ["$10M+"]},
+        is_new=False,
+    )
+    assert merged.thesis_private_check_sizes == []
+    assert merged.thesis_institutional_check_sizes == []
+
+    # Even for a brand-new contact (is_new=True normally sets every mapped field
+    # directly, nothing to protect) -- these two remain unwritable, since the gate
+    # is "is this field name recognized at all," checked before the is_new branch.
+    created = service.apply_import_mapping(
+        CrmContact(crm_contact_id="c-new", created_at=contact.created_at, updated_at=contact.updated_at),
+        {"first_name": "Nova", "thesis_private_check_sizes": ["$1M - $2M"]},
+        is_new=True,
+    )
+    assert created.first_name == "Nova"
+    assert created.thesis_private_check_sizes == []
 
 
 # --- Regression: PATCH must merge custom_fields, never wipe siblings ---

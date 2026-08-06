@@ -226,7 +226,7 @@ class CrmService:
                 return False
             if deal_stage and not self._thesis_list_contains(c, "deal_stages", deal_stage):
                 return False
-            if check_size and not self._thesis_list_contains(c, "check_sizes", check_size):
+            if check_size and not self._check_size_contains(c, check_size):
                 return False
             if q:
                 haystack = self._searchable_text(c)
@@ -250,6 +250,24 @@ class CrmService:
         institutional_list = getattr(contact, f"thesis_institutional_{suffix}", [])
         value_lower = value.lower()
         return any(value_lower in v.lower() for v in [*private_list, *institutional_list])
+
+    @staticmethod
+    def _check_size_contains(contact: CrmContact, value: str) -> bool:
+        """
+        Check Size deliberately does NOT use _thesis_list_contains -- as of the
+        2026-08-06 Check Size consolidation, check_size_personal/
+        check_size_institutional (custom fields) are the sole canonical
+        destinations; thesis_private_check_sizes/thesis_institutional_check_sizes
+        are deprecated and contain zero data not already present in the custom
+        fields (confirmed by full production audit), so checking them here would
+        only risk this filter drifting out of sync with reality again. Matches a
+        contact if EITHER the personal or institutional custom field contains the
+        value, same "either context" semantics as _thesis_list_contains.
+        """
+        personal = contact.custom_fields.get("check_size_personal") or []
+        institutional = contact.custom_fields.get("check_size_institutional") or []
+        value_lower = value.lower()
+        return any(value_lower in v.lower() for v in [*personal, *institutional])
 
     # Every thesis field that's a list[str] of selections -- flattened into free-text
     # search so "SaaS" finds a contact whose thesis_private_industries contains

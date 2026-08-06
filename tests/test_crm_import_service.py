@@ -1374,3 +1374,32 @@ async def test_check_size_still_works_unchanged_alongside_new_phase1_phase2_fiel
     assert contact.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
     assert contact.thesis_private_deal_stages == ["Seed (product in market, early customers or pilots)"]
     assert contact.custom_fields["notes"] == "A note"
+    # 2026-08-06 Check Size consolidation: the deprecated thesis check-size fields
+    # must never be populated by CSV import, regardless of what got mapped/classified.
+    assert contact.thesis_private_check_sizes == []
+    assert contact.thesis_institutional_check_sizes == []
+
+
+@pytest.mark.asyncio
+async def test_check_size_import_never_touches_deprecated_thesis_fields_even_when_pre_populated(import_service):
+    """A contact that already has legacy data sitting in the deprecated thesis
+    check-size fields (from before the consolidation) must have that data left
+    exactly as-is by a fresh CSV import -- never deleted, never added to."""
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact({
+        "email": "known@example.com",
+        "thesis_private_check_sizes": ["$1M - $2M"],
+        "thesis_institutional_check_sizes": ["$10M+"],
+    })
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Check Size\nknown@example.com,\"$25k - $50k\"\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.thesis_private_check_sizes == ["$1M - $2M"]  # untouched, not deleted
+    assert updated.thesis_institutional_check_sizes == ["$10M+"]  # untouched, not deleted
+    assert updated.custom_fields["check_size_personal"] == ["$25k - $50k"]  # new data lands only here

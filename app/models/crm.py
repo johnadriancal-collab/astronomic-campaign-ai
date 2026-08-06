@@ -333,7 +333,13 @@ THESIS_FIELD_NAMES = frozenset(
         "thesis_private_asset_types", "thesis_private_asset_types_other",
         "thesis_private_business_models", "thesis_private_business_models_other",
         "thesis_private_industries", "thesis_private_industries_other",
-        "thesis_private_check_sizes", "thesis_private_check_sizes_other",
+        # thesis_private_check_sizes / thesis_private_check_sizes_other deliberately
+        # excluded -- deprecated as of the 2026-08-06 Check Size consolidation.
+        # check_size_personal (custom field) is now the sole canonical destination;
+        # excluding these from THESIS_FIELD_NAMES makes apply_import_mapping()
+        # refuse to write to them regardless of column_mapping, closing the import
+        # write path. The model fields themselves are NOT deleted -- existing data
+        # stays in place, untouched, for rollback safety.
         "thesis_private_deal_stages", "thesis_private_deal_stages_other",
         "thesis_private_meeting_preferences", "thesis_private_meeting_preferences_other",
         "thesis_private_demographic_preferences", "thesis_private_demographic_preferences_other",
@@ -342,7 +348,9 @@ THESIS_FIELD_NAMES = frozenset(
         "thesis_institutional_asset_types", "thesis_institutional_asset_types_other",
         "thesis_institutional_business_models", "thesis_institutional_business_models_other",
         "thesis_institutional_industries", "thesis_institutional_industries_other",
-        "thesis_institutional_check_sizes", "thesis_institutional_check_sizes_other",
+        # thesis_institutional_check_sizes / thesis_institutional_check_sizes_other --
+        # same deprecation as the private pair above; check_size_institutional
+        # (custom field) is now the sole canonical destination.
         "thesis_institutional_deal_stages", "thesis_institutional_deal_stages_other",
         "thesis_institutional_meeting_preferences", "thesis_institutional_meeting_preferences_other",
         "thesis_institutional_demographic_preferences", "thesis_institutional_demographic_preferences_other",

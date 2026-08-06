@@ -12,6 +12,7 @@ import pytest
 from app.models.crm import CrmContact, CrmImportBatch, CustomFieldType
 from app.services.crm_migration import (
     CUSTOM_FIELD_CORRECTIONS,
+    DIRECT_DUPLICATE_MIGRATIONS,
     FUNDING_STAGE_ENGAGEMENT_SHAPED_VALUES,
     HOW_EARLY_KNOWN_PHRASES,
     LEGACY_FIELD_SEEDS,
@@ -109,11 +110,36 @@ def test_dietary_restrictions_migrates_into_dietary_preferences_scalar_field():
     assert changed == ["dietary_restrictions"]
 
 
-def test_check_size_institutional_maps_to_institutional_not_private():
-    contact = make_contact(custom_fields={"check_size_institutional": "$1M - $2M"})
+def test_check_size_keys_removed_from_direct_duplicate_migrations():
+    """2026-08-06 Check Size consolidation: 'check_size_institutional' was a confirmed
+    root-cause bug -- that 'old key' string was IDENTICAL to today's live, active
+    check_size_institutional custom field, so every reconcile_legacy_fields() run
+    silently re-populated the now-deprecated thesis_institutional_check_sizes from it.
+    'check_size' (bare) never collided with a live key but is removed for the same
+    reason: neither deprecated thesis check-size field should ever be written to again."""
+    assert "check_size" not in DIRECT_DUPLICATE_MIGRATIONS
+    assert "check_size_institutional" not in DIRECT_DUPLICATE_MIGRATIONS
+
+
+def test_migrate_contact_legacy_fields_never_repopulates_deprecated_check_size_thesis_fields():
+    """The exact collision this fix closes: a contact whose check_size_personal/
+    check_size_institutional custom fields are populated (the real, current shape,
+    via the Check Size CSV-import feature) must NOT have that data copied into the
+    deprecated thesis_private_check_sizes/thesis_institutional_check_sizes fields."""
+    contact = make_contact(
+        custom_fields={
+            "check_size_personal": ["$25k - $50k", "$50k - $100k"],
+            "check_size_institutional": ["$1M - $2M"],
+        }
+    )
     migrated, changed = migrate_contact_legacy_fields(contact)
-    assert migrated.thesis_institutional_check_sizes == ["$1M - $2M"]
     assert migrated.thesis_private_check_sizes == []
+    assert migrated.thesis_institutional_check_sizes == []
+    assert "check_size_personal" not in changed
+    assert "check_size_institutional" not in changed
+    # Custom field values themselves are completely untouched.
+    assert migrated.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+    assert migrated.custom_fields["check_size_institutional"] == ["$1M - $2M"]
 
 
 def test_migration_never_overwrites_an_existing_thesis_value():
@@ -143,14 +169,12 @@ def test_migration_handles_multiple_direct_duplicates_on_one_contact():
     contact = make_contact(
         custom_fields={
             "deal_stage": "Seed (product in market, early customers or pilots)",
-            "check_size": "$25k - $50k",
             "founder_diversity_preference": "I'm open to investing in anyone",
         }
     )
     migrated, changed = migrate_contact_legacy_fields(contact)
-    assert set(changed) == {"deal_stage", "check_size", "founder_diversity_preference"}
+    assert set(changed) == {"deal_stage", "founder_diversity_preference"}
     assert migrated.thesis_private_deal_stages == ["Seed (product in market, early customers or pilots)"]
-    assert migrated.thesis_private_check_sizes == ["$25k - $50k"]
     assert migrated.thesis_private_demographic_preferences == ["I'm open to investing in anyone"]
 
 

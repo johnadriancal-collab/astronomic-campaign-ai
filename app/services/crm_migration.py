@@ -208,10 +208,23 @@ CUSTOM_FIELD_CORRECTIONS: dict[str, tuple[CustomFieldType, list[str]]] = {
 }
 
 # old custom_fields key -> (canonical CrmContact field, is_list_field)
+#
+# "check_size" and "check_size_institutional" were REMOVED here as of the 2026-08-06
+# Check Size consolidation. "check_size_institutional" is a confirmed root-cause bug,
+# not just a stale entry: that "old key" string is IDENTICAL to today's live, active
+# check_size_institutional custom field -- every time migrate_all_contacts() ran (via
+# reconcile_legacy_fields()), this entry silently copied the custom field's current
+# value into the now-deprecated thesis_institutional_check_sizes for any contact where
+# the thesis field was empty (mechanically proven: exactly the 3 contacts whose
+# check_size_institutional was populated before the Check Size CSV-import feature
+# existed match thesis_institutional_check_sizes verbatim; none of the 127 added by
+# that later backfill do, because reconcile_legacy_fields() hasn't run since). "check_size"
+# (bare, no "_personal" suffix) never collided with a live key -- no contact has ever
+# had that literal custom_fields key -- but is removed too for the same reason: both
+# check_size_personal and check_size_institutional are now the sole canonical Check
+# Size destinations, and neither deprecated thesis field should be written to again.
 DIRECT_DUPLICATE_MIGRATIONS: dict[str, tuple[str, bool]] = {
     "deal_stage": ("thesis_private_deal_stages", True),
-    "check_size": ("thesis_private_check_sizes", True),
-    "check_size_institutional": ("thesis_institutional_check_sizes", True),
     "investing_asset_types": ("thesis_private_asset_types", True),
     "investing_business_models": ("thesis_private_business_models", True),
     "founder_diversity_preference": ("thesis_private_demographic_preferences", True),
