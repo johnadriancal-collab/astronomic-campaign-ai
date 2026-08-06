@@ -200,6 +200,19 @@ async def test_corrections_fix_accredited_status_options(service):
 
 
 @pytest.mark.asyncio
+async def test_corrections_fix_age_range_to_single_select_with_options(service):
+    await seed_legacy_custom_fields(service)
+    corrected = await apply_custom_field_corrections(service)
+    assert "age_range" in corrected
+
+    field = await service.custom_field_store.get_by_field_key("age_range")
+    assert field.field_type == CustomFieldType.SINGLE_SELECT
+    assert field.options == [
+        "18-22", "23-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81+", "Retired", "Deceased",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_corrections_fix_investor_type_to_multi_select_with_real_vocab(service):
     await seed_legacy_custom_fields(service)
     await apply_custom_field_corrections(service)

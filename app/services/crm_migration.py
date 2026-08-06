@@ -13,7 +13,11 @@ re-run:
     seeded with a wrong guessed type/options BEFORE the real CSV was
     reviewed (Accredited Status, Investor Type, Dinners Attended, How
     Early Do You Invest?) to match what the real data actually contains.
-    Idempotent -- re-applying the same correction is a no-op.
+    Also carries later, non-legacy field-type corrections -- e.g. Age
+    Range's text-to-single_select change -- since the mechanism (look up
+    by field_key, patch field_type/options, leave contact rows alone) is
+    identical either way. Idempotent -- re-applying the same correction
+    is a no-op.
 
     migrate_all_contacts() -- for direct-duplicate fields (Deal Stage,
     Check Size, ...), copies any value already sitting under the OLD
@@ -58,7 +62,8 @@ from app.services.crm_service import CrmService
 # (field_key, label, field_type, description, options)
 LEGACY_FIELD_SEEDS: list[tuple[str, str, CustomFieldType, str | None, list[str]]] = [
     ("gender", "Gender", CustomFieldType.TEXT, None, []),
-    ("age_range", "Age Range", CustomFieldType.TEXT, None, []),
+    ("age_range", "Age Range", CustomFieldType.SINGLE_SELECT, None,
+     ["18-22", "23-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81+", "Retired", "Deceased"]),
     ("role", "Role", CustomFieldType.TEXT,
      "Their role/relationship within Astronomic -- distinct from job title.", []),
     ("accredited_status", "Accredited Status", CustomFieldType.SINGLE_SELECT, None,
@@ -122,6 +127,8 @@ LEGACY_FIELD_SEEDS: list[tuple[str, str, CustomFieldType, str | None, list[str]]
 # seeded with a wrong guess before the real CSV was available to check against.
 CUSTOM_FIELD_CORRECTIONS: dict[str, tuple[CustomFieldType, list[str]]] = {
     "accredited_status": (CustomFieldType.SINGLE_SELECT, ["Yes", "No"]),
+    "age_range": (CustomFieldType.SINGLE_SELECT,
+                  ["18-22", "23-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81+", "Retired", "Deceased"]),
     "investor_type": (CustomFieldType.MULTI_SELECT, [
         "Angel Investor", "Family Office", "Fund LP", "I sponsor deals that I find", "Institutional Investor",
         "Invest with group of Angels", "Participate in syndicated investments", "Private Equity",
