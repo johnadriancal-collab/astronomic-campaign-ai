@@ -344,6 +344,58 @@ async def test_classify_match_new_when_nothing_matches(service):
     assert matched_on is None
 
 
+@pytest.mark.asyncio
+async def test_classify_match_email_with_matching_name_is_existing(service):
+    james = await service.create_contact({"first_name": "James", "last_name": "Feldkamp", "email": "jfeldkamp@alarycapital.com"})
+    status, match, matched_on = await service.classify_match(
+        {"first_name": "James", "last_name": "Feldkamp", "email": "jfeldkamp@alarycapital.com"}
+    )
+    assert status == CrmImportRowStatus.EXISTING
+    assert match.crm_contact_id == james.crm_contact_id
+    assert matched_on == "email"
+
+
+@pytest.mark.asyncio
+async def test_classify_match_email_with_conflicting_name_is_possible_duplicate(service):
+    """The exact repeat-upload scenario: James Feldkamp already exists (created by an
+    earlier import). A LATER row -- from the same or a future CSV -- shares his email
+    but is actually a different person (Shawn Riely, per a real source-data error). This
+    must be flagged for human review, never silently merged into James's record."""
+    james = await service.create_contact({"first_name": "James", "last_name": "Feldkamp", "email": "jfeldkamp@alarycapital.com"})
+    status, match, matched_on = await service.classify_match(
+        {"first_name": "Shawn", "last_name": "Riely", "email": "jfeldkamp@alarycapital.com"}
+    )
+    assert status == CrmImportRowStatus.POSSIBLE_DUPLICATE
+    assert match.crm_contact_id == james.crm_contact_id
+    assert matched_on == "email_conflicting_identity"
+
+
+@pytest.mark.asyncio
+async def test_classify_match_email_with_partial_name_match_is_not_a_conflict(service):
+    """The Carlos Oviedo case: same first name, different last name. Treated as
+    the SAME identity (a plausible nickname/data-entry variant), not a conflict --
+    unlike Feldkamp/Riely where NEITHER name matches at all. The separate
+    never-overwrite-populated-field rule already protects his real last name
+    from being replaced by this row's."""
+    carlos = await service.create_contact({"first_name": "Carlos", "last_name": "Oviedo", "email": "carlos@carloscardenas.com"})
+    status, match, matched_on = await service.classify_match(
+        {"first_name": "Carlos", "last_name": "Cardenas", "email": "carlos@carloscardenas.com"}
+    )
+    assert status == CrmImportRowStatus.EXISTING
+    assert match.crm_contact_id == carlos.crm_contact_id
+    assert matched_on == "email"
+
+
+@pytest.mark.asyncio
+async def test_classify_match_email_match_with_no_name_on_either_side_is_still_existing(service):
+    """No name data to conflict on at all -- falls back to the ordinary EXISTING match."""
+    contact = await service.create_contact({"email": "known@example.com"})
+    status, match, matched_on = await service.classify_match({"email": "known@example.com"})
+    assert status == CrmImportRowStatus.EXISTING
+    assert match.crm_contact_id == contact.crm_contact_id
+    assert matched_on == "email"
+
+
 # --- Merge rules (apply_import_mapping) ---
 
 
@@ -356,10 +408,40 @@ async def test_new_contact_gets_every_non_empty_mapped_field(service):
 
 
 @pytest.mark.asyncio
-async def test_external_field_overwritten_when_incoming_non_empty(service):
-    contact = await service.create_contact({"company": "Old Co"})
+async def test_external_field_filled_in_when_currently_empty(service):
+    contact = await service.create_contact({"first_name": "Ada"})  # company unset
     merged = service.apply_import_mapping(contact, {"company": "New Co"}, is_new=False)
     assert merged.company == "New Co"
+
+
+@pytest.mark.asyncio
+async def test_external_field_never_overwritten_by_a_conflicting_non_empty_value(service):
+    """Changed behavior: a re-imported contact whose CSV row has a genuinely
+    different LinkedIn URL/Company/etc. than what's already on file must NOT
+    have that existing value silently replaced -- a source-data conflict is a
+    question for a human, not something import should resolve by picking a side."""
+    contact = await service.create_contact({"company": "Old Co"})
+    merged = service.apply_import_mapping(contact, {"company": "New Co"}, is_new=False)
+    assert merged.company == "Old Co"  # preserved, not overwritten
+
+
+@pytest.mark.asyncio
+async def test_carlos_oviedo_linkedin_and_company_conflict_preserved(service):
+    """The exact real-world case that triggered this change: Carlos Oviedo's
+    correct LinkedIn/Company must survive a newer CSV export whose row for his
+    email contains a different, likely-mismatched LinkedIn/Company."""
+    contact = await service.create_contact({
+        "email": "carlos@carloscardenas.com",
+        "linkedin_url": "http://www.linkedin.com/in/carlosoviedoc",
+        "company": "ISITA®",
+    })
+    merged = service.apply_import_mapping(
+        contact,
+        {"linkedin_url": "http://www.linkedin.com/in/carloscardenastx", "company": "Austin Wealth Management"},
+        is_new=False,
+    )
+    assert merged.linkedin_url == "http://www.linkedin.com/in/carlosoviedoc"
+    assert merged.company == "ISITA®"
 
 
 @pytest.mark.asyncio
@@ -400,6 +482,68 @@ async def test_custom_field_follows_the_same_never_overwrite_rule(service):
 
     merged = service.apply_import_mapping(contact, {"custom:fav_team": "Aggies"}, is_new=False)
     assert merged.custom_fields["fav_team"] == "Longhorns"  # preserved
+
+
+@pytest.mark.asyncio
+async def test_multi_select_custom_field_merges_instead_of_replacing(service):
+    """The Carlos Oviedo case: existing selections are never dropped, and new
+    incoming selections not already present are added -- union, not replace."""
+    contact = await service.create_contact({})
+    contact = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"dinner_subscriptions": ["Investor Dinners", "Founder Dinners", "Biz Dev Dinners"]}}
+    )
+
+    merged = service.apply_import_mapping(
+        contact, {"custom:dinner_subscriptions": ["Investor Dinners", "Founder Dinners", "Not actively Investing"]}, is_new=False
+    )
+    assert merged.custom_fields["dinner_subscriptions"] == [
+        "Investor Dinners", "Founder Dinners", "Biz Dev Dinners", "Not actively Investing",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_multi_select_custom_field_merge_deduplicates_exact_repeats(service):
+    contact = await service.create_contact({})
+    contact = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"dinners_attended": ["Investor Dinners", "Fireside Dinners"]}}
+    )
+    merged = service.apply_import_mapping(
+        contact, {"custom:dinners_attended": ["Investor Dinners", "Fireside Dinners"]}, is_new=False
+    )
+    assert merged.custom_fields["dinners_attended"] == ["Investor Dinners", "Fireside Dinners"]  # no duplicates added
+
+
+@pytest.mark.asyncio
+async def test_multi_select_custom_field_merge_fills_from_empty(service):
+    """No existing value at all -- incoming list is simply set, same as before."""
+    contact = await service.create_contact({})
+    merged = service.apply_import_mapping(contact, {"custom:dinners_attended": ["Investor Dinners"]}, is_new=False)
+    assert merged.custom_fields["dinners_attended"] == ["Investor Dinners"]
+
+
+@pytest.mark.asyncio
+async def test_multi_select_custom_field_never_removes_existing_values(service):
+    """Even if the incoming list is a STRICT SUBSET of the existing one (e.g. an
+    older/incomplete CSV re-imported after a richer one), nothing already stored is
+    ever dropped -- merge is purely additive."""
+    contact = await service.create_contact({})
+    contact = await service.update_contact(
+        contact.crm_contact_id,
+        {"custom_fields": {"dinner_subscriptions": ["Investor Dinners", "Founder Dinners", "Fireside Dinners"]}},
+    )
+    merged = service.apply_import_mapping(contact, {"custom:dinner_subscriptions": ["Investor Dinners"]}, is_new=False)
+    assert merged.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners", "Fireside Dinners"]
+
+
+@pytest.mark.asyncio
+async def test_single_select_custom_field_blank_incoming_never_erases_existing_value(service):
+    """Chris Degree Connection / Age Range / Gender-style fields: a blank CSV cell
+    must never erase an existing non-empty value -- classification rules never emit
+    a key at all for a blank cell, but this guards the merge layer directly too."""
+    contact = await service.create_contact({})
+    contact = await service.update_contact(contact.crm_contact_id, {"custom_fields": {"age_range": "31-40"}})
+    merged = service.apply_import_mapping(contact, {"custom:age_range": ""}, is_new=False)
+    assert merged.custom_fields["age_range"] == "31-40"
 
 
 @pytest.mark.asyncio

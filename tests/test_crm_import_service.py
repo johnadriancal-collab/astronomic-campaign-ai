@@ -19,6 +19,29 @@ def import_service():
     return CrmImportService(crm_service=crm, batch_store=MemoryCrmImportBatchStore())
 
 
+async def _seed_validated_single_selects(import_service):
+    """Creates the three validated single-select custom fields with their real
+    production options -- mirrors production state, where these fields already
+    exist before any CSV is ever uploaded. Called directly (not a fixture) since
+    this suite has no pytest-asyncio config for async fixtures."""
+    crm = import_service.crm_service
+    await crm.create_custom_field(
+        "chris_degree_connection", "Chris Degree Connection", CustomFieldType.SINGLE_SELECT,
+        options=["1st degree", "2nd degree", "3rd degree", "N/A"],
+    )
+    await crm.create_custom_field(
+        "age_range", "Age Range", CustomFieldType.SINGLE_SELECT,
+        options=["18-22", "23-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81+", "Retired", "Deceased"],
+    )
+    await crm.create_custom_field(
+        "gender", "Gender", CustomFieldType.SINGLE_SELECT, options=["Male", "Female"],
+    )
+    await crm.create_custom_field(
+        "engagement_stage", "Engagement Stage", CustomFieldType.SINGLE_SELECT,
+        options=["Cold", "Interested", "Unresponsive", "Replied"],
+    )
+
+
 def csv_bytes(text: str) -> bytes:
     return text.encode("utf-8")
 
@@ -128,6 +151,112 @@ async def test_preview_within_file_fallback_tier_is_possible_duplicate(import_se
 
 
 @pytest.mark.asyncio
+async def test_preview_within_file_same_email_different_name_is_flagged_not_merged(import_service):
+    """Real 2026-08-06 two-CSV audit case: two rows share one email but are two
+    different real people (a source-data error -- one row's Email column holds
+    someone else's address). Must NOT be auto-merged into a single contact --
+    downgraded to POSSIBLE_DUPLICATE (always human-reviewed, defaults to skip)."""
+    batch = await import_service.upload(
+        "p.csv",
+        csv_bytes(
+            "First Name,Last Name,Email\n"
+            "James,Feldkamp,jfeldkamp@alarycapital.com\n"
+            "Shawn,Riely,jfeldkamp@alarycapital.com\n"
+        ),
+    )
+    previewed = await import_service.preview(
+        batch.import_batch_id, {"First Name": "first_name", "Last Name": "last_name", "Email": "email"}
+    )
+    assert previewed.preview[0].status == CrmImportRowStatus.NEW
+    assert previewed.preview[1].status == CrmImportRowStatus.POSSIBLE_DUPLICATE
+    assert previewed.preview[1].matched_on == "within_file_row_0_conflicting_identity"
+    assert previewed.new_count == 1
+    assert previewed.possible_duplicate_count == 1
+
+
+@pytest.mark.asyncio
+async def test_commit_same_email_different_name_conflict_defaults_to_skip_preserving_first(import_service):
+    batch = await import_service.upload(
+        "p.csv",
+        csv_bytes(
+            "First Name,Last Name,Email\n"
+            "James,Feldkamp,jfeldkamp@alarycapital.com\n"
+            "Shawn,Riely,jfeldkamp@alarycapital.com\n"
+        ),
+    )
+    await import_service.preview(
+        batch.import_batch_id, {"First Name": "first_name", "Last Name": "last_name", "Email": "email"}
+    )
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    assert report.skipped == 1
+    contacts = (await import_service.crm_service.list_contacts()).items
+    assert len(contacts) == 1
+    assert contacts[0].first_name == "James"  # the self-consistent identity survives; Shawn's row is skipped, not merged in
+    assert contacts[0].last_name == "Feldkamp"
+
+
+@pytest.mark.asyncio
+async def test_repeat_upload_of_same_conflicting_email_never_merges_into_existing_contact(import_service):
+    """The gap a first pass at this fix missed: within-file dedup alone only
+    catches the conflict the FIRST time two rows collide in one batch. Once
+    James Feldkamp exists in the CRM, a LATER upload (the same CSV again, or
+    a fresh one) containing Shawn Riely's row under James's email must still
+    be caught -- via classify_match's identity check, not just the within-file
+    one -- and never merge Shawn's data into James's contact."""
+    batch1 = await import_service.upload(
+        "batch1.csv",
+        csv_bytes("First Name,Last Name,Email,Company\nJames,Feldkamp,jfeldkamp@alarycapital.com,Alary Capital\n"),
+    )
+    await import_service.preview(
+        batch1.import_batch_id, {"First Name": "first_name", "Last Name": "last_name", "Email": "email", "Company": "company"}
+    )
+    await import_service.commit(batch1.import_batch_id)
+
+    batch2 = await import_service.upload(
+        "batch2.csv",
+        csv_bytes("First Name,Last Name,Email,Company\nShawn,Riely,jfeldkamp@alarycapital.com,Westmount Realty Capital\n"),
+    )
+    previewed2 = await import_service.preview(
+        batch2.import_batch_id, {"First Name": "first_name", "Last Name": "last_name", "Email": "email", "Company": "company"}
+    )
+    assert previewed2.preview[0].status == CrmImportRowStatus.POSSIBLE_DUPLICATE
+    assert previewed2.preview[0].matched_on == "email_conflicting_identity"
+    report2 = await import_service.commit(batch2.import_batch_id)
+
+    assert report2.skipped == 1
+    assert report2.created == 0
+    contacts = (await import_service.crm_service.list_contacts()).items
+    assert len(contacts) == 1
+    assert contacts[0].first_name == "James"
+    assert contacts[0].company == "Alary Capital"  # never touched by Shawn's row
+
+
+@pytest.mark.asyncio
+async def test_within_file_dedup_still_merges_when_names_genuinely_match(import_service):
+    """Sanity check: the new identity check must not break the ordinary case --
+    same person, same name, split across two rows in one file, still merges."""
+    batch = await import_service.upload(
+        "p.csv",
+        csv_bytes(
+            "First Name,Last Name,Email,Company\n"
+            "Ada,Lovelace,ada@example.com,\n"
+            "Ada,Lovelace,ada@example.com,Analytical Engines Ltd\n"
+        ),
+    )
+    previewed = await import_service.preview(
+        batch.import_batch_id, {"First Name": "first_name", "Last Name": "last_name", "Email": "email", "Company": "company"}
+    )
+    assert previewed.preview[1].status == CrmImportRowStatus.EXISTING
+    assert previewed.preview[1].matched_on == "within_file_row_0"
+    report = await import_service.commit(batch.import_batch_id)
+    contacts = (await import_service.crm_service.list_contacts()).items
+    assert len(contacts) == 1
+    assert contacts[0].company == "Analytical Engines Ltd"
+
+
+@pytest.mark.asyncio
 async def test_preview_splits_multi_value_thesis_fields_on_semicolon_not_comma(import_service):
     """Canonical option text contains literal commas -- splitting on comma would shred it."""
     batch = await import_service.upload(
@@ -198,6 +327,11 @@ async def test_commit_respects_explicit_decision_to_create_a_possible_duplicate_
 
 @pytest.mark.asyncio
 async def test_commit_within_file_duplicate_updates_the_row_created_earlier_in_the_same_commit(import_service):
+    """The second row's update still applies to the first row's new contact --
+    but company is already populated by the first row, so the (same person,
+    conflicting) second value is preserved-not-overwritten, same as any other
+    populated field. See test_commit_within_file_duplicate_fills_an_empty_field
+    below for the case where the second row's value actually lands."""
     batch = await import_service.upload(
         "p.csv", csv_bytes("Email,Company\nsame@example.com,Old Co\nsame@example.com,New Co\n")
     )
@@ -208,7 +342,25 @@ async def test_commit_within_file_duplicate_updates_the_row_created_earlier_in_t
     assert report.updated == 1
     contacts = (await import_service.crm_service.list_contacts()).items
     assert len(contacts) == 1
-    assert contacts[0].company == "New Co"  # second row's update applied to the first row's new contact
+    assert contacts[0].company == "Old Co"  # already populated by row 1 -- row 2's conflicting value is preserved-not-overwritten
+
+
+@pytest.mark.asyncio
+async def test_commit_within_file_duplicate_fills_an_empty_field(import_service):
+    """Same shape as above, but the field is empty on row 1 -- row 2's value
+    for the SAME within-file contact correctly fills it in (fill-empty is
+    always allowed; only a conflicting non-empty value is protected)."""
+    batch = await import_service.upload(
+        "p.csv", csv_bytes("Email,Company\nsame@example.com,\nsame@example.com,New Co\n")
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email", "Company": "company"})
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    assert report.updated == 1
+    contacts = (await import_service.crm_service.list_contacts()).items
+    assert len(contacts) == 1
+    assert contacts[0].company == "New Co"
 
 
 @pytest.mark.asyncio
@@ -300,6 +452,280 @@ async def test_future_csv_upload_normalizes_dinner_subscriptions_automatically(i
 
 
 @pytest.mark.asyncio
+async def test_dinner_subscriptions_small_group_dinners_end_to_end(import_service):
+    """User's explicit decision for the one unmapped value found in the
+    2026-08-06 two-CSV audit: map to Investor Dinners, don't add a new option."""
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Dinner Subscriptions\nnicole@example.com,\"Small group dinners, Fireside Dinners\"\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Fireside Dinners"]
+
+
+@pytest.mark.asyncio
+async def test_future_csv_upload_populates_dinners_attended_automatically(import_service):
+    """Dinners Attended is deliberately left unmapped -- proves the classification
+    rule fires independent of column_mapping, and dated entries survive verbatim."""
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,Dinners Attended\n"
+            "nova@example.com,\"Investor Dinners, Savvy [2.25.2025] Austin, Fireside Dinners\"\n"
+        ),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["dinners_attended"] == [
+        "Investor Dinners", "Savvy [2.25.2025] Austin", "Fireside Dinners",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_future_csv_upload_populates_chris_degree_connection_automatically(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Chris Degree Connection\nnova@example.com,1st degree\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["chris_degree_connection"] == "1st degree"
+
+
+@pytest.mark.asyncio
+async def test_future_csv_upload_populates_age_range_automatically(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Age Range\nnova@example.com,61-70\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["age_range"] == "61-70"
+
+
+@pytest.mark.asyncio
+async def test_future_csv_upload_populates_core_field_aliases_with_zero_manual_mapping(import_service):
+    """The exact scenario the user described for Person Linkedin Url/Company Name
+    for Emails/Secondary Email/Corporate Phone/Gender: a human just accepts
+    suggest_mapping()'s default suggestion (no manual column mapping at all), and
+    every one of these fields still lands correctly."""
+    await _seed_validated_single_selects(import_service)
+    headers_row = (
+        "Email,Person Linkedin Url,Company Name for Emails,Secondary Email,Corporate Phone,Gender\n"
+        "nova@example.com,http://linkedin.com/in/nova,Nova Inc,nova2@example.com,555-0100,Female\n"
+    )
+    batch = await import_service.upload("future.csv", csv_bytes(headers_row))
+    mapping = suggest_mapping(batch.headers)  # zero manual mapping -- exactly what suggest_mapping() gives by default
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.linkedin_url == "http://linkedin.com/in/nova"
+    assert contact.company == "Nova Inc"
+    assert contact.custom_fields["secondary_email"] == "nova2@example.com"
+    assert contact.custom_fields["corporate_phone"] == "555-0100"
+    assert contact.custom_fields["gender"] == "Female"
+
+
+@pytest.mark.asyncio
+async def test_stage_column_populates_engagement_stage_not_funding_stage(import_service):
+    """The exact bug found in the 2026-08-06 two-CSV audit: a CSV `Stage` column
+    (outreach/engagement value) must land in engagement_stage, never funding_stage --
+    with zero manual mapping, using the same default suggest_mapping() a human gets."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Stage\nnova@example.com,Interested\n"))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["engagement_stage"] == "Interested"
+    assert contact.funding_stage is None  # never populated by Stage
+
+
+@pytest.mark.asyncio
+async def test_funding_stage_column_still_populates_funding_stage(import_service):
+    """Preserves the legitimate Funding Stage -> funding_stage mapping -- a real
+    funding-round value from a genuine "Funding Stage" column must still land
+    in the core field, unaffected by the Stage/engagement_stage fix."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Funding Stage\nnova@example.com,Series A\n"))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.funding_stage == "Series A"
+    assert "engagement_stage" not in contact.custom_fields  # never populated by Funding Stage
+
+
+@pytest.mark.asyncio
+async def test_stage_and_funding_stage_columns_coexist_without_colliding(import_service):
+    """Both columns present in the same row (as could happen in a future export
+    combining both concepts) -- each must land in its own distinct field, neither
+    overwriting or blending with the other."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Stage,Funding Stage\nnova@example.com,Cold,Seed\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["engagement_stage"] == "Cold"
+    assert contact.funding_stage == "Seed"
+
+
+@pytest.mark.asyncio
+async def test_stage_replied_populates_engagement_stage_automatically(import_service):
+    """"Replied" is a real, live engagement_stage option (17 genuine occurrences in the
+    audit) -- a future upload must capture it, not drop it just because it wasn't in the
+    field's original guessed option list."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Stage\nnova@example.com,Replied\n"))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["engagement_stage"] == "Replied"
+    assert contact.funding_stage is None
+
+
+@pytest.mark.asyncio
+async def test_stage_no_stage_placeholder_never_populates_engagement_stage():
+    """"(No Stage)" is a null/unset placeholder, not a real stage -- a future upload must
+    never fabricate a literal "(No Stage)" engagement_stage value from it."""
+    crm = CrmService()
+    await crm.create_custom_field(
+        "engagement_stage", "Engagement Stage", CustomFieldType.SINGLE_SELECT,
+        options=["Cold", "Interested", "Unresponsive", "Replied"],
+    )
+    import_service = CrmImportService(crm_service=crm, batch_store=MemoryCrmImportBatchStore())
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Stage\nnova@example.com,(No Stage)\n"))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await crm.list_contacts()).items[0]
+    assert "engagement_stage" not in contact.custom_fields
+    assert contact.funding_stage is None
+
+
+@pytest.mark.asyncio
+async def test_blank_csv_cell_never_erases_existing_chris_degree_connection(import_service):
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact(
+        {"email": "known@example.com", "custom_fields": {"chris_degree_connection": "1st degree"}}
+    )
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Chris Degree Connection\nknown@example.com,\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["chris_degree_connection"] == "1st degree"  # blank cell never erases it
+
+
+@pytest.mark.asyncio
+async def test_blank_csv_cell_never_erases_existing_age_range(import_service):
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact(
+        {"email": "known@example.com", "custom_fields": {"age_range": "31-40"}}
+    )
+    batch = await import_service.upload("future.csv", csv_bytes("Email,Age Range\nknown@example.com,\n"))
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["age_range"] == "31-40"
+
+
+@pytest.mark.asyncio
+async def test_carlos_oviedo_merge_scenario(import_service):
+    """User's specified merge test: existing Dinner Subscriptions
+    [Investor, Founder, Biz Dev] + newer CSV [Investor, Founder, Not actively
+    Investing] -> [Investor, Founder, Biz Dev, Not actively Investing]. Dinners
+    Attended must likewise merge (add-only), never replace."""
+    existing = await import_service.crm_service.create_contact({
+        "email": "carlos@carloscardenas.com",
+        "custom_fields": {
+            "dinner_subscriptions": ["Investor Dinners", "Founder Dinners", "Biz Dev Dinners"],
+            "dinners_attended": ["Investor Dinners", "Alpha Rose [08.13.2025] Austin", "Biz Dev Dinners", "Ensitech [11.13.2025] Austin"],
+        },
+    })
+
+    batch = await import_service.upload(
+        "newer.csv",
+        csv_bytes(
+            "Email,Dinner Subscriptions,Dinners Attended\n"
+            "carlos@carloscardenas.com,"
+            "\"Investor Dinners, Founder Dinners, Not actively Investing\","
+            "\"Investor Dinners, Metropolitan Development Co [11.13.2025] Austin, Founder Dinners\"\n"
+        ),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["dinner_subscriptions"] == [
+        "Investor Dinners", "Founder Dinners", "Biz Dev Dinners", "Not actively Investing",
+    ]
+    assert updated.custom_fields["dinners_attended"] == [
+        "Investor Dinners", "Alpha Rose [08.13.2025] Austin", "Biz Dev Dinners", "Ensitech [11.13.2025] Austin",
+        "Metropolitan Development Co [11.13.2025] Austin", "Founder Dinners",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_alex_pepe_end_to_end(import_service):
+    """User's specified final verification case -- values taken verbatim from
+    Alex Pepe's real row in Contacts 2 (ITF).csv (2026-08-06 audit), not
+    hardcoded/guessed. A brand-new contact, all 4 fields unmapped, zero manual
+    configuration, using the same suggested mapping a human would just accept."""
+    await _seed_validated_single_selects(import_service)
+    row = (
+        "Email,Dinner Subscriptions,Dinners Attended,Chris Degree Connection,Age Range\n"
+        "alexjpepe@gmail.com,"
+        "\"Investor Dinners, Fireside Dinners, Biz Dev Dinners\","
+        "\"Investor Dinners, Fireside Dinners, Savvy [2.25.2025] Austin, VacayMyWay [08.12.2025] Austin, "
+        "Alpha Rose [08.13.2025] Austin, Biz Dev Dinners, Ensitech [11.13.2025] Austin, "
+        "SharpsAI [12.04.2025] Austin, Civilization Fund [01.19.2026] Austin, Predict RX [03.10.2026] Austin, "
+        "Submersive [04.30.2026] Austin\","
+        "1st degree,61-70\n"
+    )
+    batch = await import_service.upload("future.csv", csv_bytes(row))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    alex = (await import_service.crm_service.list_contacts()).items[0]
+    assert alex.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Fireside Dinners", "Biz Dev Dinners"]
+    assert alex.custom_fields["dinners_attended"] == [
+        "Investor Dinners", "Fireside Dinners", "Savvy [2.25.2025] Austin", "VacayMyWay [08.12.2025] Austin",
+        "Alpha Rose [08.13.2025] Austin", "Biz Dev Dinners", "Ensitech [11.13.2025] Austin",
+        "SharpsAI [12.04.2025] Austin", "Civilization Fund [01.19.2026] Austin", "Predict RX [03.10.2026] Austin",
+        "Submersive [04.30.2026] Austin",
+    ]
+    assert alex.custom_fields["chris_degree_connection"] == "1st degree"
+    assert alex.custom_fields["age_range"] == "61-70"
+
+
+@pytest.mark.asyncio
 async def test_classification_rule_preserves_source_snapshot_unchanged(import_service):
     batch = await import_service.upload(
         "p.csv",
@@ -315,10 +741,11 @@ async def test_classification_rule_preserves_source_snapshot_unchanged(import_se
 
 
 @pytest.mark.asyncio
-async def test_update_decision_overwrites_industry_but_never_overwrites_existing_investment_industry(import_service):
-    """industry is an external field (overwrite-if-non-empty). investment_industry
-    is a custom field (never auto-overwrite an existing value) -- an update
-    import must respect both rules simultaneously."""
+async def test_update_decision_preserves_industry_and_merges_investment_industry(import_service):
+    """industry (external field) is now protected the same as every other field --
+    a conflicting incoming value never overwrites an existing one. investment_industry
+    (multi-select custom field) still union-merges its existing selections with the
+    incoming ones rather than replacing or freezing the list."""
     existing = await import_service.crm_service.create_contact({"email": "known@example.com", "industry": "Old Value"})
     existing = await import_service.crm_service.update_contact(
         existing.crm_contact_id, {"custom_fields": {"investment_industry": ["Existing Value"]}}
@@ -333,8 +760,8 @@ async def test_update_decision_overwrites_industry_but_never_overwrites_existing
 
     assert report.updated == 1
     updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
-    assert updated.industry == "New Apollo Industry"  # external field: overwritten
-    assert updated.custom_fields["investment_industry"] == ["Existing Value"]  # custom field: protected
+    assert updated.industry == "Old Value"  # external field: preserved, not overwritten by a conflicting value
+    assert updated.custom_fields["investment_industry"] == ["Existing Value", "New Investment Interest"]  # merged, not replaced
 
 
 # --- Classification rules (Investor Type -> mode, Role) ---

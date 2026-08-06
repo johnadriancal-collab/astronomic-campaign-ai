@@ -5,13 +5,18 @@ CSV import (see crm_import_service.py, which calls into
 classify_match()/apply_import_mapping() rather than re-implementing them).
 
 Merge rule (the crux of "the CRM is our own source of truth"):
-  - External/source fields: an incoming value only overwrites an existing
-    one if the incoming value is non-empty. A blank CSV cell never erases
-    data we already have.
-  - Investor Thesis fields AND custom fields: NEVER automatically
-    overwritten if a value already exists. Only filled in when the
-    existing value is currently empty. Treated as "ours" -- an import can
-    add missing thesis/custom data, never silently replace what's there.
+  - External/source fields, Investor Thesis fields, AND custom fields are
+    ALL treated identically: NEVER automatically overwritten if a value
+    already exists, whether the incoming value is blank OR a genuinely
+    different non-empty value. Only filled in when the existing value is
+    currently empty. A conflicting CSV value for an already-populated
+    field (e.g. a re-imported contact whose CSV row has a different
+    LinkedIn URL or Company than what's already on file) is a source-data
+    question for a human, not something an automated import should ever
+    resolve by picking a side -- so it's silently left alone rather than
+    guessed at. (External fields used to overwrite on any non-empty
+    incoming value; changed after a real re-import overwrote a correct
+    LinkedIn URL/Company with a mismatched row from a messier CSV export.)
   - `source_snapshot` is never merged -- always fully replaced with the
     latest raw import payload, since it's explicitly not authoritative.
 
@@ -356,26 +361,67 @@ class CrmService:
         normalized = normalize_linkedin_url(linkedin_url)
         return await self.contact_store.get_by_linkedin_url(normalized) if normalized else None
 
+    @staticmethod
+    def _conflicts_on_identity(mapped_fields: dict[str, Any], existing: CrmContact) -> bool:
+        """
+        True only if the incoming row's first AND last name BOTH disagree
+        with the matched contact's -- e.g. an email/apollo_contact_id/
+        linkedin_url match found a real existing contact, but the row is
+        actually about a completely different, unrelated person (a source-
+        data error: one row's identifier column holds someone else's
+        value). Confirmed real shape in the 2026-08-06 two-CSV audit -- one
+        contact's email column literally held a different person's address
+        (James Feldkamp / Shawn Riely -- no name overlap at all).
+
+        Deliberately NOT triggered by a partial mismatch (e.g. same first
+        name, different last name -- Carlos Oviedo's CSV export also
+        contained a "Carlos Cardenas" row under his email, likely a
+        nickname/data-entry variant rather than a different person): that's
+        exactly the ambiguous case this module's merge rule already handles
+        safely on its own (a populated external field is never overwritten
+        regardless of identity, so a partial-match row can still safely
+        contribute new custom-field data like Dinner Subscriptions without
+        risking a wrong scalar-field overwrite). If either side has no name
+        at all, there's nothing to conflict on either.
+        """
+        incoming_first = (mapped_fields.get("first_name") or "").strip().lower()
+        incoming_last = (mapped_fields.get("last_name") or "").strip().lower()
+        existing_first = (existing.first_name or "").strip().lower()
+        existing_last = (existing.last_name or "").strip().lower()
+        if not (incoming_first or incoming_last) or not (existing_first or existing_last):
+            return False
+        return incoming_first != existing_first and incoming_last != existing_last
+
     async def classify_match(
         self, mapped_fields: dict[str, Any]
     ) -> tuple[CrmImportRowStatus, CrmContact | None, str | None]:
         """
         The dedup hierarchy, in order. The first three tiers are exact,
-        normalized, confident matches -> EXISTING (safe to auto-update).
-        The fourth is exact-normalized but NOT confident -> POSSIBLE_DUPLICATE,
+        normalized, confident matches -> EXISTING (safe to auto-update) --
+        UNLESS the row's name conflicts with the matched contact's name, in
+        which case it's downgraded to POSSIBLE_DUPLICATE (see
+        _conflicts_on_identity): a shared identifier does not make it safe
+        to auto-merge a row that's actually about someone else. The fourth
+        tier is exact-normalized but NOT confident -> POSSIBLE_DUPLICATE,
         always surfaced for human review, never auto-merged. No fuzzy
         matching anywhere in this chain.
         """
         match = await self._match_by_email(mapped_fields.get("email"))
         if match:
+            if self._conflicts_on_identity(mapped_fields, match):
+                return CrmImportRowStatus.POSSIBLE_DUPLICATE, match, "email_conflicting_identity"
             return CrmImportRowStatus.EXISTING, match, "email"
 
         match = await self._match_by_apollo_contact_id(mapped_fields.get("apollo_contact_id"))
         if match:
+            if self._conflicts_on_identity(mapped_fields, match):
+                return CrmImportRowStatus.POSSIBLE_DUPLICATE, match, "apollo_contact_id_conflicting_identity"
             return CrmImportRowStatus.EXISTING, match, "apollo_contact_id"
 
         match = await self._match_by_linkedin(mapped_fields.get("linkedin_url"))
         if match:
+            if self._conflicts_on_identity(mapped_fields, match):
+                return CrmImportRowStatus.POSSIBLE_DUPLICATE, match, "linkedin_url_conflicting_identity"
             return CrmImportRowStatus.EXISTING, match, "linkedin_url"
 
         normalized_name_company = normalize_name_company(
@@ -410,12 +456,12 @@ class CrmService:
                     updates[field_name] = incoming_value
                 continue
 
-            if field_name in EXTERNAL_FIELD_NAMES:
-                if not _is_empty(incoming_value):
-                    updates[field_name] = incoming_value
-            else:  # THESIS_FIELD_NAMES -- never overwrite an existing value
-                if _is_empty(getattr(contact, field_name)) and not _is_empty(incoming_value):
-                    updates[field_name] = incoming_value
+            # External AND thesis fields alike -- never overwrite an existing value,
+            # whether the incoming value is blank or a genuinely different one. See
+            # this module's docstring for why external fields no longer get the old
+            # "overwrite on any non-empty incoming value" treatment.
+            if _is_empty(getattr(contact, field_name)) and not _is_empty(incoming_value):
+                updates[field_name] = incoming_value
 
         if "source_snapshot" in mapped_fields or is_new:
             updates["source_snapshot"] = mapped_fields.get("source_snapshot", contact.source_snapshot)
@@ -431,8 +477,32 @@ class CrmService:
         they're ours too. Builds on `updates["custom_fields"]` if an
         earlier custom field in this same call already started it --
         otherwise every custom field but the last would be lost.
+
+        Multi-select fields (incoming_value is a list -- the shape
+        _coerce_value()/classification rules always produce for a
+        MULTI_SELECT custom field) are the one exception to "only fill
+        when empty": an existing selection list is UNION-MERGED with the
+        incoming one (order-preserving, deduplicated) rather than only
+        filled in from empty. This is what lets a re-imported contact pick
+        up a newly-added Dinner Subscription or a newly-attended dinner
+        without ever dropping a selection that was already there --
+        replacing the list outright would silently erase whatever the
+        incoming row didn't happen to repeat.
         """
         base = updates.get("custom_fields", contact.custom_fields)
         current = base.get(field_key)
-        if is_new or (_is_empty(current) and not _is_empty(incoming_value)):
+
+        if is_new:
+            if not _is_empty(incoming_value):
+                updates["custom_fields"] = {**base, field_key: incoming_value}
+            return
+
+        if isinstance(incoming_value, list):
+            existing_list = current if isinstance(current, list) else []
+            merged = existing_list + [v for v in incoming_value if v not in existing_list]
+            if merged != existing_list:
+                updates["custom_fields"] = {**base, field_key: merged}
+            return
+
+        if _is_empty(current) and not _is_empty(incoming_value):
             updates["custom_fields"] = {**base, field_key: incoming_value}

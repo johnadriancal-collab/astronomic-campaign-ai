@@ -250,6 +250,7 @@ DINNER_SUBSCRIPTION_LEGACY_MAP = {
     "Sigma Librae Dinners": "Founder Dinners",
     "Exodus Dinners": "Founder Dinners",
     "CD Newsletter Unsubscribe": "Newsletter Unsubscribe",
+    "Small group dinners": "Investor Dinners",
 }
 
 # Legacy values that carry no forward-looking signal at all -- dropped, never mapped.

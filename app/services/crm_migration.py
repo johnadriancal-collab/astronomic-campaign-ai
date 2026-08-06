@@ -57,6 +57,33 @@ re-run:
     delete-only values are dropped, removing the key entirely if nothing
     valid remains.
 
+    migrate_all_funding_stage_corruption() -- one-time repair for a
+    2026-08-06 discovery: HEADER_ALIASES used to map BOTH "stage" and
+    "funding stage" to the core `funding_stage` field (fixed in
+    crm_import_service.py), so every past CSV commit that had a "Stage"
+    column (outreach/engagement values -- Interested/Cold/Unresponsive/
+    Replied/"(No Stage)") silently overwrote or filled funding_stage with
+    that value instead of a real funding-round term. Clears funding_stage
+    ONLY when it is byte-identical to THIS CONTACT'S OWN source_snapshot
+    ["Stage"] value AND that value is one of the known engagement-stage-
+    shaped strings -- the same "derive from own source_snapshot, prove it,
+    never guess" pattern as repair_contact_comma_delimited_fields. A
+    funding_stage value that doesn't mechanically prove this exact
+    signature (e.g. a real term like "Seed"/"Series A") is left completely
+    untouched -- confirmed via the 2026-08-06 audit that all 29 non-
+    matching populated values are genuine funding-round terms from a
+    different, legitimate source. Also fills engagement_stage from the
+    same value, but ONLY when engagement_stage is currently empty AND the
+    value is one of its live options -- CUSTOM_FIELD_CORRECTIONS added
+    "Replied" as a real option once the audit confirmed it's a legitimate
+    outreach stage (17 real occurrences), so those contacts DO get
+    engagement_stage filled. "(No Stage)" (1 occurrence) is deliberately
+    NOT an option -- it's a null/unset placeholder, not a real stage -- so
+    that one contact gets funding_stage cleared but engagement_stage left
+    blank rather than set to a fabricated value. Idempotent: once
+    funding_stage is cleared, the exact-match precondition can never fire
+    again for that contact.
+
 Old single-value fields with no explicit "(Institutional)" counterpart
 default to the PRIVATE thesis variant, mirroring "Check Size" (no suffix)
 vs "Check Size (Institutional)" already being two distinct fields.
@@ -119,10 +146,15 @@ LEGACY_FIELD_SEEDS: list[tuple[str, str, CustomFieldType, str | None, list[str]]
      CustomFieldType.TEXT, None, []),
     ("chris_knows_personally", "Chris Knows Personally", CustomFieldType.BOOLEAN, None, []),
     ("chris_degree_connection", "Chris Degree Connection", CustomFieldType.TEXT, None, []),
-    # Added after reviewing the real 50-row export:
+    # Added after reviewing the real 50-row export. "Replied" was missing until the
+    # 2026-08-06 two-CSV audit -- it never appeared in that original 50-row export,
+    # only in the larger 501-row one (17 real occurrences). "(No Stage)" (1 occurrence,
+    # also only in the larger export) is a null/unset placeholder, not a real stage --
+    # deliberately NOT added as an option; a contact whose Stage is "(No Stage)" gets
+    # engagement_stage left blank, never a literal "(No Stage)" value.
     ("engagement_stage", "Engagement Stage", CustomFieldType.SINGLE_SELECT,
      "Our own outreach/engagement pipeline stage -- NOT a funding stage.",
-     ["Cold", "Interested", "Unresponsive"]),
+     ["Cold", "Interested", "Unresponsive", "Replied"]),
     ("do_not_call", "Do Not Call", CustomFieldType.BOOLEAN, None, []),
     ("secondary_email", "Secondary Email", CustomFieldType.TEXT, None, []),
     ("revenue_stage", "Revenue Stage", CustomFieldType.SINGLE_SELECT,
@@ -143,6 +175,12 @@ LEGACY_FIELD_SEEDS: list[tuple[str, str, CustomFieldType, str | None, list[str]]
 # seeded with a wrong guess before the real CSV was available to check against.
 CUSTOM_FIELD_CORRECTIONS: dict[str, tuple[CustomFieldType, list[str]]] = {
     "accredited_status": (CustomFieldType.SINGLE_SELECT, ["Yes", "No"]),
+    # "Replied" confirmed via the 2026-08-06 two-CSV audit: 17 real occurrences, only in
+    # the larger 501-row export -- missed originally because the 50-row export this field
+    # was first reviewed against had none. Deliberately does NOT add "(No Stage)" -- that's
+    # a null/unset placeholder (1 occurrence), not a real stage; a contact with that raw
+    # value gets engagement_stage left blank rather than a fabricated literal option.
+    "engagement_stage": (CustomFieldType.SINGLE_SELECT, ["Cold", "Interested", "Unresponsive", "Replied"]),
     "age_range": (CustomFieldType.SINGLE_SELECT,
                   ["18-22", "23-30", "31-40", "41-50", "51-60", "61-70", "71-80", "81+", "Retired", "Deceased"]),
     "dinner_subscriptions": (CustomFieldType.MULTI_SELECT, DINNER_SUBSCRIPTION_OPTIONS),
@@ -421,16 +459,96 @@ async def migrate_all_dinner_subscriptions(contact_store: CrmContactStore) -> di
     return {"dinner_subscriptions_contacts_scanned": len(contacts), "dinner_subscriptions_contacts_updated": contacts_updated}
 
 
+# funding_stage values that are shaped like an engagement_stage answer, not a real
+# funding-round term -- confirmed via the 2026-08-06 audit as the exhaustive set of
+# raw "Stage" values actually found in the two real CSVs.
+FUNDING_STAGE_ENGAGEMENT_SHAPED_VALUES = frozenset(
+    {"Interested", "Cold", "Unresponsive", "Replied", "(No Stage)"}
+)
+
+
+def migrate_contact_funding_stage_corruption(
+    contact: CrmContact, engagement_stage_options: set[str]
+) -> tuple[CrmContact, str]:
+    """
+    Pure function -- does not save. Returns (possibly-updated contact,
+    outcome) where outcome is one of:
+      "not_populated"     -- funding_stage was already empty, nothing to do.
+      "legitimate"        -- funding_stage doesn't look like an engagement
+                              value at all; never touched.
+      "ambiguous"         -- funding_stage LOOKS engagement-shaped, but
+                              doesn't exactly match this contact's own
+                              source_snapshot Stage value -- flagged, never
+                              touched, since the corruption can't be
+                              mechanically proven for this specific row.
+      "cleared"           -- proven corrupted; funding_stage cleared,
+                              engagement_stage NOT touched (already
+                              populated, or the value isn't one of its
+                              live options).
+      "cleared_and_engagement_set" -- proven corrupted; funding_stage
+                              cleared AND engagement_stage filled in from
+                              the same value (was empty, value is valid).
+    """
+    current = contact.funding_stage
+    if not current:
+        return contact, "not_populated"
+    if current not in FUNDING_STAGE_ENGAGEMENT_SHAPED_VALUES:
+        return contact, "legitimate"
+
+    stage_raw = (contact.source_snapshot.get("Stage") or "").strip()
+    if stage_raw != current:
+        return contact, "ambiguous"
+
+    updates: dict[str, Any] = {"funding_stage": None}
+    outcome = "cleared"
+    if not contact.custom_fields.get("engagement_stage") and current in engagement_stage_options:
+        updates["custom_fields"] = {**contact.custom_fields, "engagement_stage": current}
+        outcome = "cleared_and_engagement_set"
+
+    updates["updated_at"] = datetime.now(timezone.utc)
+    return contact.model_copy(update=updates), outcome
+
+
+async def migrate_all_funding_stage_corruption(
+    contact_store: CrmContactStore, engagement_stage_options: set[str]
+) -> dict[str, int]:
+    contacts = await contact_store.list()
+    counts = {
+        "not_populated": 0, "legitimate": 0, "ambiguous": 0, "cleared": 0, "cleared_and_engagement_set": 0,
+    }
+    for contact in contacts:
+        updated, outcome = migrate_contact_funding_stage_corruption(contact, engagement_stage_options)
+        counts[outcome] += 1
+        if outcome in ("cleared", "cleared_and_engagement_set"):
+            await contact_store.save(updated)
+    return {
+        "funding_stage_contacts_scanned": len(contacts),
+        "funding_stage_legitimate": counts["legitimate"],
+        "funding_stage_ambiguous": counts["ambiguous"],
+        "funding_stage_cleared": counts["cleared"] + counts["cleared_and_engagement_set"],
+        "funding_stage_engagement_stage_set": counts["cleared_and_engagement_set"],
+    }
+
+
 async def reconcile_legacy_fields(crm_service: CrmService) -> dict[str, Any]:
     """The single entry point: seed new definitions, correct previously-guessed ones,
-    migrate any values already sitting under the old keys, then normalize Dinner
-    Subscriptions' free-text values into the multi-select representation. Safe to
-    call any number of times."""
+    migrate any values already sitting under the old keys, normalize Dinner
+    Subscriptions' free-text values into the multi-select representation, then clear
+    any funding_stage value proven corrupted by the old Stage->funding_stage mapping
+    bug. Safe to call any number of times."""
     seed_report = await seed_legacy_custom_fields(crm_service)
     corrected = await apply_custom_field_corrections(crm_service)
     migrate_report = await migrate_all_contacts(crm_service.contact_store)
     dinner_subscriptions_report = await migrate_all_dinner_subscriptions(crm_service.contact_store)
-    return {**seed_report, "corrected": corrected, **migrate_report, **dinner_subscriptions_report}
+    engagement_stage_field = await crm_service.custom_field_store.get_by_field_key("engagement_stage")
+    engagement_stage_options = set(engagement_stage_field.options) if engagement_stage_field else set()
+    funding_stage_report = await migrate_all_funding_stage_corruption(
+        crm_service.contact_store, engagement_stage_options
+    )
+    return {
+        **seed_report, "corrected": corrected, **migrate_report,
+        **dinner_subscriptions_report, **funding_stage_report,
+    }
 
 
 def _translate_comma_joined_column(raw_value: str, legacy_map: dict[str, str]) -> str:

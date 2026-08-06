@@ -66,6 +66,22 @@ def _ordered_dedup(*token_lists: list[str]) -> list[str]:
     return merged
 
 
+def _validate_single_select(raw_value: str | None, options: set[str]) -> str | None:
+    """
+    Kept ONLY if it exactly matches one of `options` -- same "never guess"
+    principle as classify_role's approved-tags filter, applied to a
+    single-select field instead of a multi-select one. A single-select
+    field renders as one fixed dropdown; storing a value that isn't one of
+    its options would show as blank/broken there, so an unrecognized value
+    is dropped (never stored) rather than preserved verbatim -- unlike
+    Dinner Subscriptions' multi-select convention, where an extra list
+    item can't corrupt the field the same way.
+    """
+    if not raw_value:
+        return None
+    return raw_value if raw_value in options else None
+
+
 def classify_industry(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
     """
     industry <- CSV `Industry` only (the real Apollo/LinkedIn company
@@ -155,6 +171,78 @@ def classify_dinner_subscriptions(raw_row: dict[str, str], context: dict[str, An
     return {"custom:dinner_subscriptions": normalized} if normalized else {}
 
 
+def classify_dinners_attended(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    dinners_attended (custom field) <- CSV `Dinners Attended`, comma-split,
+    trimmed, and order-preserving-deduplicated -- deliberately NO wording
+    normalization, unlike Dinner Subscriptions. Every dated historical
+    entry (e.g. "Savvy [2.25.2025] Austin") must survive verbatim; this is
+    not a stable closed set the way Dinner Subscriptions is, so there is no
+    legacy/delete mapping here, ever.
+    """
+    tokens = _split_tokens(_find_column(raw_row, "Dinners Attended", "Dinner Attended"))
+    deduped = _ordered_dedup(tokens)
+    return {"custom:dinners_attended": deduped} if deduped else {}
+
+
+def classify_chris_degree_connection(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    chris_degree_connection (custom field, single_select) <- CSV `Chris
+    Degree Connection`, kept only if it exactly matches one of the field's
+    live options (context["chris_degree_connection_options"] -- see
+    build_classification_context()). Every real value found in the 2026-08-06
+    two-CSV audit ("1st degree"/"2nd degree"/"3rd degree") matched cleanly.
+    """
+    raw = _find_column(raw_row, "Chris Degree Connection")
+    value = _validate_single_select(raw, context.get("chris_degree_connection_options") or set())
+    return {"custom:chris_degree_connection": value} if value else {}
+
+
+def classify_age_range(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    age_range (custom field, single_select) <- CSV `Age Range`, kept only
+    if it exactly matches one of the field's live options (context
+    ["age_range_options"]) -- e.g. "31-40", "61-70". Never invents/derives
+    a range from some other column.
+    """
+    raw = _find_column(raw_row, "Age Range")
+    value = _validate_single_select(raw, context.get("age_range_options") or set())
+    return {"custom:age_range": value} if value else {}
+
+
+def classify_gender(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    gender (custom field, single_select) <- CSV `Gender`, kept only if it
+    exactly matches one of the field's live options (context
+    ["gender_options"]).
+    """
+    raw = _find_column(raw_row, "Gender")
+    value = _validate_single_select(raw, context.get("gender_options") or set())
+    return {"custom:gender": value} if value else {}
+
+
+def classify_engagement_stage(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    engagement_stage (custom field, single_select) <- CSV `Stage`, kept only
+    if it exactly matches one of the field's live options (context
+    ["engagement_stage_options"]).
+
+    This exists specifically to keep `Stage` OUT of the core `funding_stage`
+    field. HEADER_ALIASES used to map both "stage" and "funding stage" to
+    funding_stage -- confirmed via the 2026-08-06 two-CSV audit that neither
+    real export even has a "Funding Stage" column; their "Stage" column
+    holds outreach/engagement values (Interested/Cold/Unresponsive/Replied),
+    which is exactly what engagement_stage's own description says it's
+    for: "Our own outreach/engagement pipeline stage -- NOT a funding
+    stage." Classification rules always win over column_mapping, so this
+    permanently prevents that collision regardless of what a human maps
+    "Stage" to during a future upload.
+    """
+    raw = _find_column(raw_row, "Stage")
+    value = _validate_single_select(raw, context.get("engagement_stage_options") or set())
+    return {"custom:engagement_stage": value} if value else {}
+
+
 # Registry of independent classification rules. Each is applied to every
 # imported row, in order; later rules win on key collision (none currently
 # collide). Add new rules here -- see module docstring.
@@ -163,6 +251,11 @@ CLASSIFICATION_RULES: list[Classifier] = [
     classify_investor_mode,
     classify_role,
     classify_dinner_subscriptions,
+    classify_dinners_attended,
+    classify_chris_degree_connection,
+    classify_age_range,
+    classify_gender,
+    classify_engagement_stage,
 ]
 
 
@@ -173,8 +266,19 @@ async def build_classification_context(custom_field_store: Any) -> dict[str, Any
     here when a new rule needs live reference data (e.g. a fixed options
     list) rather than deriving it fresh per row.
     """
+
+    async def _options(field_key: str) -> set[str]:
+        field = await custom_field_store.get_by_field_key(field_key)
+        return set(field.options) if field else set()
+
     role_field = await custom_field_store.get_by_field_key("role")
-    return {"role_options": set(role_field.options) if role_field else set()}
+    return {
+        "role_options": set(role_field.options) if role_field else set(),
+        "chris_degree_connection_options": await _options("chris_degree_connection"),
+        "age_range_options": await _options("age_range"),
+        "gender_options": await _options("gender"),
+        "engagement_stage_options": await _options("engagement_stage"),
+    }
 
 
 def apply_classification_rules(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:

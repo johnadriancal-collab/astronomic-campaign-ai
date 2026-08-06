@@ -12,13 +12,16 @@ import pytest
 from app.models.crm import CrmContact, CrmImportBatch, CustomFieldType
 from app.services.crm_migration import (
     CUSTOM_FIELD_CORRECTIONS,
+    FUNDING_STAGE_ENGAGEMENT_SHAPED_VALUES,
     HOW_EARLY_KNOWN_PHRASES,
     LEGACY_FIELD_SEEDS,
     _retokenize_known_phrases,
     apply_custom_field_corrections,
     migrate_all_contacts,
     migrate_all_dinner_subscriptions,
+    migrate_all_funding_stage_corruption,
     migrate_contact_dinner_subscriptions,
+    migrate_contact_funding_stage_corruption,
     migrate_contact_legacy_fields,
     reconcile_legacy_fields,
     repair_all_contacts_comma_delimited_fields,
@@ -645,3 +648,198 @@ async def test_repair_all_contacts_reports_accurate_counts(service):
 
     assert (await service.get_contact(a.crm_contact_id)).custom_fields["investor_type"] == ["Private Equity", "Venture Capital"]
     assert (await service.get_contact(c.crm_contact_id)).custom_fields["investor_type"] == ["Angel Investor"]
+
+
+# --- Funding Stage corruption cleanup (2026-08-06 discovery) ---
+#
+# LIVE_ENGAGEMENT_STAGE_OPTIONS mirrors production's real, corrected option list
+# (CUSTOM_FIELD_CORRECTIONS["engagement_stage"] -- "Replied" added after the audit
+# confirmed it's a legitimate outreach stage; "(No Stage)" deliberately excluded,
+# since it's a null/unset placeholder, not a real stage).
+
+LIVE_ENGAGEMENT_STAGE_OPTIONS = {"Cold", "Interested", "Unresponsive", "Replied"}
+
+
+def test_funding_stage_interested_clears_and_sets_engagement_stage():
+    contact = make_contact(funding_stage="Interested", source_snapshot={"Stage": "Interested"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "cleared_and_engagement_set"
+    assert updated.funding_stage is None
+    assert updated.custom_fields["engagement_stage"] == "Interested"
+
+
+def test_funding_stage_cold_clears_and_sets_engagement_stage():
+    contact = make_contact(funding_stage="Cold", source_snapshot={"Stage": "Cold"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "cleared_and_engagement_set"
+    assert updated.funding_stage is None
+    assert updated.custom_fields["engagement_stage"] == "Cold"
+
+
+def test_funding_stage_unresponsive_clears_and_sets_engagement_stage():
+    contact = make_contact(funding_stage="Unresponsive", source_snapshot={"Stage": "Unresponsive"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "cleared_and_engagement_set"
+    assert updated.funding_stage is None
+    assert updated.custom_fields["engagement_stage"] == "Unresponsive"
+
+
+def test_funding_stage_replied_clears_and_sets_engagement_stage():
+    """"Replied" is a genuine value found in the CSVs (17 real occurrences) confirmed as
+    a legitimate outreach stage -- CUSTOM_FIELD_CORRECTIONS added it as a real option, so
+    it now clears funding_stage AND is preserved in engagement_stage, not just dropped."""
+    contact = make_contact(funding_stage="Replied", source_snapshot={"Stage": "Replied"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "cleared_and_engagement_set"
+    assert updated.funding_stage is None
+    assert updated.custom_fields["engagement_stage"] == "Replied"
+
+
+def test_funding_stage_no_stage_placeholder_clears_but_leaves_engagement_stage_blank():
+    """"(No Stage)" (1 real occurrence) is a null/unset placeholder, not a real stage --
+    deliberately NOT added as an option. funding_stage is still cleared (proven corrupted:
+    it exactly matches this contact's own raw Stage value), but nothing is written to
+    engagement_stage -- information is never fabricated to fill a gap."""
+    contact = make_contact(funding_stage="(No Stage)", source_snapshot={"Stage": "(No Stage)"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "cleared"
+    assert updated.funding_stage is None
+    assert "engagement_stage" not in updated.custom_fields
+
+
+def test_funding_stage_legitimate_value_never_touched():
+    """The exact 29-contact case from the audit: a real funding-round term whose Stage
+    column holds something completely different -- proves this value came from a
+    legitimate source, not the Stage->funding_stage bug."""
+    contact = make_contact(funding_stage="Seed", source_snapshot={"Stage": "Interested"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "legitimate"
+    assert updated.funding_stage == "Seed"
+    assert updated is contact  # untouched, not even a copy
+
+
+def test_funding_stage_ambiguous_when_engagement_shaped_but_does_not_match_own_stage():
+    """funding_stage LOOKS like an engagement value, but this contact's own Stage column
+    doesn't match it -- can't mechanically prove the corruption, so it's flagged and left
+    alone rather than guessed at."""
+    contact = make_contact(funding_stage="Cold", source_snapshot={"Stage": "Interested"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "ambiguous"
+    assert updated.funding_stage == "Cold"
+
+
+def test_funding_stage_ambiguous_when_no_source_snapshot_stage_at_all():
+    contact = make_contact(funding_stage="Interested", source_snapshot={})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "ambiguous"
+    assert updated.funding_stage == "Interested"
+
+
+def test_funding_stage_not_populated_is_a_noop():
+    contact = make_contact(funding_stage=None, source_snapshot={"Stage": "Interested"})
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "not_populated"
+    assert updated is contact
+
+
+def test_funding_stage_cleared_without_overwriting_existing_engagement_stage():
+    contact = make_contact(
+        funding_stage="Cold",
+        source_snapshot={"Stage": "Cold"},
+        custom_fields={"engagement_stage": "Unresponsive"},  # already correctly set to something else
+    )
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "cleared"
+    assert updated.funding_stage is None
+    assert updated.custom_fields["engagement_stage"] == "Unresponsive"  # never overwritten
+
+
+def test_funding_stage_cleared_never_touches_any_other_field():
+    contact = make_contact(
+        funding_stage="Interested",
+        source_snapshot={"Stage": "Interested"},
+        first_name="Ada", company="Acme", industry="SaaS",
+        custom_fields={"gender": "Female"},
+    )
+    updated, outcome = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome == "cleared_and_engagement_set"
+    assert updated.first_name == "Ada"
+    assert updated.company == "Acme"
+    assert updated.industry == "SaaS"
+    assert updated.custom_fields["gender"] == "Female"
+
+
+def test_funding_stage_migration_is_idempotent_on_a_single_contact():
+    contact = make_contact(funding_stage="Interested", source_snapshot={"Stage": "Interested"})
+    once, outcome1 = migrate_contact_funding_stage_corruption(contact, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    twice, outcome2 = migrate_contact_funding_stage_corruption(once, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert outcome1 == "cleared_and_engagement_set"
+    assert outcome2 == "not_populated"  # funding_stage is already None -- no-op the second time
+    assert twice.funding_stage is None
+    assert twice.custom_fields["engagement_stage"] == "Interested"
+
+
+@pytest.mark.asyncio
+async def test_migrate_all_funding_stage_corruption_counts_every_outcome(service):
+    await service.create_contact({"funding_stage": "Interested", "source_snapshot": {"Stage": "Interested"}})
+    await service.create_contact({"funding_stage": "Replied", "source_snapshot": {"Stage": "Replied"}})
+    await service.create_contact({"funding_stage": "(No Stage)", "source_snapshot": {"Stage": "(No Stage)"}})
+    await service.create_contact({"funding_stage": "Seed", "source_snapshot": {"Stage": "Interested"}})
+    await service.create_contact({"funding_stage": "Cold", "source_snapshot": {"Stage": "Interested"}})  # ambiguous
+    await service.create_contact({"first_name": "No funding stage at all"})
+
+    report = await migrate_all_funding_stage_corruption(service.contact_store, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert report == {
+        "funding_stage_contacts_scanned": 6,
+        "funding_stage_legitimate": 1,
+        "funding_stage_ambiguous": 1,
+        "funding_stage_cleared": 3,
+        "funding_stage_engagement_stage_set": 2,  # Interested + Replied; "(No Stage)" cleared but not set
+    }
+
+
+@pytest.mark.asyncio
+async def test_migrate_all_funding_stage_corruption_is_idempotent(service):
+    await service.create_contact({"funding_stage": "Interested", "source_snapshot": {"Stage": "Interested"}})
+    first = await migrate_all_funding_stage_corruption(service.contact_store, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    second = await migrate_all_funding_stage_corruption(service.contact_store, LIVE_ENGAGEMENT_STAGE_OPTIONS)
+    assert first["funding_stage_cleared"] == 1
+    assert second["funding_stage_cleared"] == 0  # already cleared -- no-op the second time
+
+
+@pytest.mark.asyncio
+async def test_reconcile_legacy_fields_also_clears_corrupted_funding_stage(service):
+    """End-to-end through the real entry point: apply_custom_field_corrections() must run
+    BEFORE the funding_stage cleanup so "Replied" is already a valid option by the time
+    engagement_stage gets filled -- proves the two fixes compose correctly, not just in
+    isolation."""
+    await service.create_contact({"funding_stage": "Interested", "source_snapshot": {"Stage": "Interested"}})
+    await service.create_contact({"funding_stage": "Replied", "source_snapshot": {"Stage": "Replied"}})
+    await service.create_contact({"funding_stage": "(No Stage)", "source_snapshot": {"Stage": "(No Stage)"}})
+
+    report = await reconcile_legacy_fields(service)
+    assert report["funding_stage_cleared"] == 3
+    assert report["funding_stage_engagement_stage_set"] == 2
+
+    contacts = {c.source_snapshot["Stage"]: c for c in (await service.list_contacts()).items}
+    assert contacts["Interested"].funding_stage is None
+    assert contacts["Interested"].custom_fields["engagement_stage"] == "Interested"
+    assert contacts["Replied"].funding_stage is None
+    assert contacts["Replied"].custom_fields["engagement_stage"] == "Replied"
+    assert contacts["(No Stage)"].funding_stage is None
+    assert "engagement_stage" not in contacts["(No Stage)"].custom_fields
+
+
+def test_funding_stage_engagement_shaped_values_matches_the_audit():
+    assert FUNDING_STAGE_ENGAGEMENT_SHAPED_VALUES == {"Interested", "Cold", "Unresponsive", "Replied", "(No Stage)"}
+
+
+@pytest.mark.asyncio
+async def test_engagement_stage_correction_adds_replied_without_dropping_existing_options(service):
+    """CUSTOM_FIELD_CORRECTIONS must ADD "Replied", never silently replace the existing
+    Cold/Interested/Unresponsive options that were already correct."""
+    await seed_legacy_custom_fields(service)
+    await apply_custom_field_corrections(service)
+    fields = await service.list_custom_fields()
+    engagement_field = next(f for f in fields if f.field_key == "engagement_stage")
+    assert set(engagement_field.options) == {"Cold", "Interested", "Unresponsive", "Replied"}

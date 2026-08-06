@@ -56,22 +56,58 @@ HEADER_ALIASES: dict[str, str] = {
     "phone": "phone", "phone number": "phone", "mobile": "phone", "mobile phone": "phone",
     "linkedin": "linkedin_url", "linkedin url": "linkedin_url",
     "linkedin profile": "linkedin_url", "linkedin profile url": "linkedin_url",
+    "person linkedin url": "linkedin_url",
     "title": "title", "job title": "title", "position": "title",
     "company": "company", "organization": "company", "employer": "company", "company name": "company",
+    "company name for emails": "company",
     "company website": "company_website", "website": "company_website",
     "domain": "company_website", "company domain": "company_website",
     "city": "city", "state": "state", "country": "country", "industry": "industry",
     "company size": "company_size", "employees": "company_size",
     "employee count": "company_size", "number of employees": "company_size",
     "revenue": "revenue", "annual revenue": "revenue",
-    "funding stage": "funding_stage", "stage": "funding_stage",
+    # "stage" (bare) deliberately does NOT alias to funding_stage -- confirmed via the
+    # 2026-08-06 two-CSV audit that neither CSV even HAS a "Funding Stage" column; their
+    # "Stage" column holds outreach/engagement values (Interested/Cold/Unresponsive/
+    # Replied), which is exactly what the custom field engagement_stage exists for (see
+    # its description: "Our own outreach/engagement pipeline stage -- NOT a funding
+    # stage."). See classify_engagement_stage in crm_classification_rules.py -- that's
+    # the real destination for "Stage", validated against its live options.
+    "funding stage": "funding_stage",
     "funding amount": "funding_amount", "total funding": "funding_amount",
     "technologies": "technologies", "tech stack": "technologies",
     "seniority": "seniority", "department": "department",
     "job function": "job_function", "function": "job_function",
     "apollo contact id": "apollo_contact_id", "apollo id": "apollo_contact_id",
     "dietary preferences": "thesis_dietary_preferences", "dietary restrictions": "thesis_dietary_preferences",
+    "secondary email": f"{CUSTOM_FIELD_PREFIX}secondary_email",
+    "corporate phone": f"{CUSTOM_FIELD_PREFIX}corporate_phone",
 }
+
+
+def _same_identity(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """
+    False only if BOTH first and last name disagree between two mapped-row
+    dicts -- i.e. no name overlap at all (the real James Feldkamp/Shawn Riely
+    shape: two completely unrelated names sharing one identifier due to a
+    source-data error). A partial match (same first name, different last
+    name, or vice versa) is treated as the SAME identity, not a conflict --
+    that's more likely a nickname/data-entry variant of one real person
+    (confirmed real shape: Carlos Oviedo's CSV also had a "Carlos Cardenas"
+    row under his email) than two different people, and the merge rule
+    already protects against a wrong overwrite regardless (a populated
+    external field is never overwritten). If either row has no name at all,
+    there's nothing to conflict on either. Used to decide whether a shared
+    confident dedup key within one file represents the same real person or a
+    source-data collision (see preview()); mirrors CrmService.
+    _conflicts_on_identity, which applies the identical rule against an
+    already-existing DB contact.
+    """
+    a_first, a_last = (a.get("first_name") or "").strip().lower(), (a.get("last_name") or "").strip().lower()
+    b_first, b_last = (b.get("first_name") or "").strip().lower(), (b.get("last_name") or "").strip().lower()
+    if not (a_first or a_last) or not (b_first or b_last):
+        return True
+    return not (a_first != b_first and a_last != b_last)
 
 
 def _normalize_header(header: str) -> str:
@@ -217,7 +253,23 @@ class CrmImportService:
                 confident_keys = self._confident_keys(mapped)
                 first_row = next((seen_confident[k] for k in confident_keys if k in seen_confident), None)
                 if first_row is not None:
-                    status, matched_on = CrmImportRowStatus.EXISTING, f"within_file_row_{first_row}"
+                    # A shared confident key (usually email) normally means "the same
+                    # person, safe to auto-merge" -- EXCEPT when the two rows' names
+                    # don't match. That's a source-data error (e.g. one row's email
+                    # column was accidentally filled with a DIFFERENT person's address --
+                    # confirmed by exactly this shape of row in the 2026-08-06 two-CSV
+                    # audit: two different names sharing one email, where only one
+                    # name's own email domain/company actually matches it). Blindly
+                    # merging would silently fold a second real person into the first's
+                    # record, so this downgrades to POSSIBLE_DUPLICATE (defaults to
+                    # skip, always human-reviewed) instead of auto-merging.
+                    if _same_identity(mapped, previews[first_row].mapped_fields):
+                        status, matched_on = CrmImportRowStatus.EXISTING, f"within_file_row_{first_row}"
+                    else:
+                        status, matched_on = (
+                            CrmImportRowStatus.POSSIBLE_DUPLICATE,
+                            f"within_file_row_{first_row}_conflicting_identity",
+                        )
                 else:
                     fallback_key = normalize_name_company(
                         mapped.get("first_name"), mapped.get("last_name"), mapped.get("company")
