@@ -43,7 +43,7 @@ export function ManagerSidebar() {
           className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         >
           <Sparkles className="h-4 w-4" />
-          Campaign Builder
+          Astro AI
         </Link>
         <div className="flex items-center gap-2 rounded-lg bg-sidebar-accent px-3 py-2 text-sm font-medium text-sidebar-accent-foreground">
           <LayoutDashboard className="h-4 w-4" />
