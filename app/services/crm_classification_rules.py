@@ -244,6 +244,19 @@ def classify_engagement_stage(raw_row: dict[str, str], context: dict[str, Any]) 
     return {"custom:engagement_stage": value} if value else {}
 
 
+def classify_accredited_status(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    accredited_status (custom field, single_select) <- CSV `Accredited
+    Status`, kept only if it exactly matches one of the field's live
+    options (context["accredited_status_options"], e.g. "Yes"/"No"). Same
+    never-guess validated-single-select pattern as Chris Degree
+    Connection/Age Range/Gender/Engagement Stage.
+    """
+    raw = _find_column(raw_row, "Accredited Status")
+    value = _validate_single_select(raw, context.get("accredited_status_options") or set())
+    return {"custom:accredited_status": value} if value else {}
+
+
 _CHECK_SIZE_DASH_RE = re.compile(r"[‒–—−]")  # figure/en/em dash, minus sign -> hyphen
 
 
@@ -337,6 +350,97 @@ def classify_check_size(raw_row: dict[str, str], context: dict[str, Any]) -> dic
     return result
 
 
+# 2026-08-06 broader-audit Phase 2 -- wires the legacy-wording translation
+# infrastructure that already existed in crm_migration.py (built for the
+# one-time /crm/import/{id}/translate-legacy-values endpoint, but never
+# reachable from the normal upload -> preview -> commit flow -- the
+# frontend import wizard never calls that endpoint) into the SAME
+# always-wins classification-rule mechanism every other permanent fix in
+# this project uses. Reuses LEGACY_THESIS_COLUMN_VALUE_MAPS,
+# _translate_comma_joined_column, HOW_EARLY_KNOWN_PHRASES, and
+# _retokenize_known_phrases verbatim -- no value-map or tokenizer logic is
+# reimplemented here.
+
+# CSV column -> target CRM field, for the four legacy thesis columns being wired
+# this round. Deliberately excludes "Founder Diversity Preference" (the fifth key
+# in LEGACY_THESIS_COLUMN_VALUE_MAPS) -- the 2026-08-06 broader audit found a second
+# plausible source for thesis_private_demographic_preferences (the "Would you prefer
+# to dine with a gender-specific..." column) that's still an open duplicate-
+# destination decision; wiring one candidate now would preempt that decision.
+_THESIS_COLUMN_TARGETS: dict[str, str] = {
+    "Deal Stage": "thesis_private_deal_stages",
+    "Investing in these types of assets": "thesis_private_asset_types",
+    "Investing in these business models:": "thesis_private_business_models",
+    "Would like to meet founders by": "thesis_private_meeting_preferences",
+}
+
+
+def classify_legacy_thesis_columns(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    Deal Stage / Investing in these types of assets / Investing in these
+    business models: / Would like to meet founders by (core Investor
+    Thesis list fields, Q11/Q7/Q8/Q12) <- their respective CSV columns,
+    translated through crm_migration.py's own legacy-wording maps
+    (_DEAL_STAGE_LEGACY_MAP etc., accessed via LEGACY_THESIS_COLUMN_VALUE_MAPS)
+    via _translate_comma_joined_column -- the SAME function and maps the
+    (previously unreachable) translate-legacy-values endpoint used.
+
+    _translate_comma_joined_column comma-splits the RAW abbreviated text
+    first (safe -- no abbreviated token contains its own comma, verified
+    against every real value in both CSVs), translates each token through
+    the legacy map, THEN joins with semicolons -- so a canonical value that
+    itself contains a comma (e.g. "Collectibles (e.g., art, wine,
+    watches)") is produced only after the comma-splitting is already done,
+    and splitting the semicolon-joined result here can never shred it. An
+    unrecognized token is preserved verbatim by that function (never
+    dropped, never guessed into the wrong bucket) -- consistent with these
+    fields having no fixed option list to validate against.
+    """
+    from app.services.crm_migration import (  # local import, same rationale as classify_investor_mode
+        LEGACY_THESIS_COLUMN_VALUE_MAPS,
+        _translate_comma_joined_column,
+    )
+
+    result: dict[str, Any] = {}
+    for column, target_field in _THESIS_COLUMN_TARGETS.items():
+        raw = _find_column(raw_row, column)
+        if not raw:
+            continue
+        legacy_map = LEGACY_THESIS_COLUMN_VALUE_MAPS[column]
+        translated = _translate_comma_joined_column(raw, legacy_map)
+        tokens = _ordered_dedup([t.strip() for t in translated.split(";") if t.strip()])
+        if tokens:
+            result[target_field] = tokens
+    return result
+
+
+def classify_how_early_do_you_invest(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    how_early_do_you_invest (custom field, multi_select) <- CSV `How early
+    do you invest?`, re-tokenized by _retokenize_known_phrases (reused
+    verbatim from crm_migration.py) against HOW_EARLY_KNOWN_PHRASES -- two
+    of its six live options contain their own internal comma ("Great team,
+    no revenue", "Great team, some revenue"), so a naive comma-split would
+    shred them into "Great team" + "no revenue" as separate, wrong values.
+    _retokenize_known_phrases greedily matches the longest known phrase at
+    each position and stops (rather than guessing) on an unrecognized
+    fragment -- so a row mixing recognized and unrecognized text keeps only
+    the recognized prefix; the raw text is never lost regardless, since it
+    always remains in source_snapshot.
+    """
+    from app.services.crm_migration import (  # local import, same rationale as classify_investor_mode
+        HOW_EARLY_COLUMN,
+        HOW_EARLY_KNOWN_PHRASES,
+        _retokenize_known_phrases,
+    )
+
+    raw = _find_column(raw_row, HOW_EARLY_COLUMN)
+    if not raw:
+        return {}
+    tokens = _ordered_dedup(_retokenize_known_phrases(raw, HOW_EARLY_KNOWN_PHRASES))
+    return {"custom:how_early_do_you_invest": tokens} if tokens else {}
+
+
 # Registry of independent classification rules. Each is applied to every
 # imported row, in order; later rules win on key collision (none currently
 # collide). Add new rules here -- see module docstring.
@@ -351,6 +455,9 @@ CLASSIFICATION_RULES: list[Classifier] = [
     classify_gender,
     classify_engagement_stage,
     classify_check_size,
+    classify_accredited_status,
+    classify_legacy_thesis_columns,
+    classify_how_early_do_you_invest,
 ]
 
 
@@ -375,6 +482,7 @@ async def build_classification_context(custom_field_store: Any) -> dict[str, Any
         "engagement_stage_options": await _options("engagement_stage"),
         "check_size_personal_options": await _options("check_size_personal"),
         "check_size_institutional_options": await _options("check_size_institutional"),
+        "accredited_status_options": await _options("accredited_status"),
     }
 
 

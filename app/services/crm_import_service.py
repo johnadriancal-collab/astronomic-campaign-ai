@@ -82,6 +82,24 @@ HEADER_ALIASES: dict[str, str] = {
     "dietary preferences": "thesis_dietary_preferences", "dietary restrictions": "thesis_dietary_preferences",
     "secondary email": f"{CUSTOM_FIELD_PREFIX}secondary_email",
     "corporate phone": f"{CUSTOM_FIELD_PREFIX}corporate_phone",
+    # 2026-08-06 broader-audit Phase 1 -- ten plain scalar custom fields with a real
+    # CRM destination and zero prior mapping. Every one is a simple text/boolean/date
+    # scalar with no comma-parsing or legacy-wording concern, so a bare alias plus the
+    # existing generic _coerce_value()/apply_import_mapping() fill-only-if-empty policy
+    # is sufficient -- no classification rule needed (unlike Accredited Status, a
+    # validated single-select, which gets its own rule below in
+    # crm_classification_rules.py). "Chris Knows Personally"/"Do Not Call" rely on
+    # _coerce_value's existing generic boolean coercion for CustomFieldType.BOOLEAN
+    # ("yes"/"true"/"1" -> True, everything else -> False).
+    "work direct phone": f"{CUSTOM_FIELD_PREFIX}work_direct_phone",
+    "do not call": f"{CUSTOM_FIELD_PREFIX}do_not_call",
+    "last raised at": f"{CUSTOM_FIELD_PREFIX}last_raised_at",
+    "how often do you invest": f"{CUSTOM_FIELD_PREFIX}how_often_do_you_invest",
+    "personal notes": f"{CUSTOM_FIELD_PREFIX}personal_notes",
+    "notes": f"{CUSTOM_FIELD_PREFIX}notes",
+    "who were you referred to constellation dinners by": f"{CUSTOM_FIELD_PREFIX}referred_to_constellation_dinners_by",
+    "geographic preference": f"{CUSTOM_FIELD_PREFIX}investment_geography_preference",
+    "chris knows personally": f"{CUSTOM_FIELD_PREFIX}chris_knows_personally",
 }
 
 

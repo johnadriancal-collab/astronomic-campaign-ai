@@ -12,6 +12,7 @@ import pytest
 from app.services.crm_classification_rules import (
     apply_classification_rules,
     build_classification_context,
+    classify_accredited_status,
     classify_age_range,
     classify_check_size,
     classify_chris_degree_connection,
@@ -19,8 +20,10 @@ from app.services.crm_classification_rules import (
     classify_dinners_attended,
     classify_engagement_stage,
     classify_gender,
+    classify_how_early_do_you_invest,
     classify_industry,
     classify_investor_mode,
+    classify_legacy_thesis_columns,
     classify_role,
 )
 
@@ -568,6 +571,180 @@ def test_check_size_every_defined_option_passes():
         assert result["custom:check_size_personal"] == [option]
 
 
+# --- classify_accredited_status (2026-08-06 broader-audit Phase 1) ---
+
+ACCREDITED_STATUS_CONTEXT = {"accredited_status_options": {"Yes", "No"}}
+
+
+def test_accredited_status_valid_value_passes_through():
+    row = {"Accredited Status": "Yes"}
+    result = classify_accredited_status(row, ACCREDITED_STATUS_CONTEXT)
+    assert result["custom:accredited_status"] == "Yes"
+
+
+def test_accredited_status_every_defined_option_passes():
+    for option in ["Yes", "No"]:
+        row = {"Accredited Status": option}
+        result = classify_accredited_status(row, ACCREDITED_STATUS_CONTEXT)
+        assert result["custom:accredited_status"] == option
+
+
+def test_accredited_status_unrecognized_value_produces_no_key():
+    row = {"Accredited Status": "Maybe"}
+    result = classify_accredited_status(row, ACCREDITED_STATUS_CONTEXT)
+    assert result == {}
+
+
+def test_accredited_status_missing_column_produces_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_accredited_status(row, ACCREDITED_STATUS_CONTEXT)
+    assert result == {}
+
+
+def test_accredited_status_no_context_options_drops_everything():
+    row = {"Accredited Status": "Yes"}
+    result = classify_accredited_status(row, NO_CONTEXT)
+    assert result == {}
+
+
+# --- classify_legacy_thesis_columns (2026-08-06 broader-audit Phase 2) ---
+#
+# Wires crm_migration.py's own LEGACY_THESIS_COLUMN_VALUE_MAPS /
+# _translate_comma_joined_column into the live classification-rule
+# pipeline -- reused verbatim, not reimplemented. Deliberately excludes
+# "Founder Diversity Preference" (still an open duplicate-destination
+# question against the gender-specific dining column, per the broader
+# audit) even though it's a key in LEGACY_THESIS_COLUMN_VALUE_MAPS.
+
+
+def test_legacy_deal_stage_translates_abbreviated_to_canonical():
+    row = {"Deal Stage": "Friends & family, Pre-seed, Seed, Series A"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result["thesis_private_deal_stages"] == [
+        "Friends & Family (idea or concept stage, often pre-incorporation)",
+        "Pre-Seed (early development, pre-revenue or minimal traction)",
+        "Seed (product in market, early customers or pilots)",
+        "Series A (scaling phase, revenue traction, team expansion)",
+    ]
+
+
+def test_legacy_deal_stage_series_cde_shorthand_collapses_and_dedupes():
+    # Real Alex Pepe shape: "Series C,D,E" has no repeated "Series" -- after the
+    # comma-split, "D"/"E" arrive as bare tokens that all resolve to the SAME
+    # canonical "Series B or later" bucket as "Series B"/"Series C" -- must
+    # collapse to one entry, not four duplicates.
+    row = {"Deal Stage": "Series B, Series C,D,E"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result["thesis_private_deal_stages"] == [
+        "Series B or later (growth or expansion stage, institutional rounds)",
+    ]
+
+
+def test_legacy_asset_types_translates_and_preserves_internal_commas():
+    # "Collectibles (e.g., art, wine, watches)" contains its own internal commas --
+    # produced only AFTER the raw abbreviated text ("Collectibles") is comma-split
+    # and translated, so splitting the semicolon-joined result can never shred it.
+    row = {"Investing in these types of assets": "Collectibles, Real estate, Venture capital"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result["thesis_private_asset_types"] == [
+        "Collectibles (e.g., art, wine, watches)",
+        "Real estate (direct ownership, syndications, REITs)",
+        "Venture capital (e.g., angel checks, early-stage startups, high-growth tech)",
+    ]
+
+
+def test_legacy_business_models_translates_abbreviated_to_canonical():
+    row = {"Investing in these business models:": "Marketplaces, Software as a Service (SaaS)"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result["thesis_private_business_models"] == [
+        "Marketplaces (e.g., Airbnb, Uber-style platforms)",
+        "Software as a Service (SaaS)",
+    ]
+
+
+def test_legacy_meeting_preferences_translates_abbreviated_to_canonical():
+    row = {"Would like to meet founders by": "Email intro, Zoom Call"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result["thesis_private_meeting_preferences"] == [
+        "In an email intro", "I'd do a Zoom call",
+    ]
+
+
+def test_legacy_thesis_columns_unrecognized_token_preserved_verbatim():
+    row = {"Deal Stage": "Some Brand New Stage"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result["thesis_private_deal_stages"] == ["Some Brand New Stage"]
+
+
+def test_legacy_thesis_columns_never_touches_founder_diversity_preference():
+    row = {"Founder Diversity Preference": "Open to investing in anyone"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_legacy_thesis_columns_missing_columns_produce_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_legacy_thesis_columns_handles_each_independently():
+    row = {
+        "Deal Stage": "Seed",
+        "Investing in these types of assets": "Real estate",
+        "Investing in these business models:": "Marketplaces",
+        "Would like to meet founders by": "Email intro",
+    }
+    result = classify_legacy_thesis_columns(row, NO_CONTEXT)
+    assert result["thesis_private_deal_stages"] == ["Seed (product in market, early customers or pilots)"]
+    assert result["thesis_private_asset_types"] == ["Real estate (direct ownership, syndications, REITs)"]
+    assert result["thesis_private_business_models"] == ["Marketplaces (e.g., Airbnb, Uber-style platforms)"]
+    assert result["thesis_private_meeting_preferences"] == ["In an email intro"]
+
+
+# --- classify_how_early_do_you_invest (2026-08-06 broader-audit Phase 2) ---
+#
+# Wires crm_migration.py's own HOW_EARLY_KNOWN_PHRASES / _retokenize_known_phrases
+# into the live classification-rule pipeline -- reused verbatim.
+
+
+def test_how_early_do_you_invest_internal_comma_phrases_not_shredded():
+    # The critical edge case: "Great team, no revenue" and "Great team, some
+    # revenue" are each ONE canonical option containing their own comma. A naive
+    # comma-split would produce "Great team" + "no revenue" as two wrong values.
+    row = {"How early do you invest?": "Great team, no revenue, Great team, some revenue"}
+    result = classify_how_early_do_you_invest(row, NO_CONTEXT)
+    assert result["custom:how_early_do_you_invest"] == ["Great team, no revenue", "Great team, some revenue"]
+
+
+def test_how_early_do_you_invest_mixed_comma_and_plain_phrases():
+    row = {"How early do you invest?": "Great team, no revenue, $10k-$50k MRR / GMV, $1M+ MRR / GMV"}
+    result = classify_how_early_do_you_invest(row, NO_CONTEXT)
+    assert result["custom:how_early_do_you_invest"] == [
+        "Great team, no revenue", "$10k-$50k MRR / GMV", "$1M+ MRR / GMV",
+    ]
+
+
+def test_how_early_do_you_invest_deduplicates_repeated_phrase():
+    row = {"How early do you invest?": "$1M+ MRR / GMV, $1M+ MRR / GMV"}
+    result = classify_how_early_do_you_invest(row, NO_CONTEXT)
+    assert result["custom:how_early_do_you_invest"] == ["$1M+ MRR / GMV"]
+
+
+def test_how_early_do_you_invest_stops_at_unrecognized_fragment():
+    # _retokenize_known_phrases stops (never guesses) at the first unrecognized
+    # fragment -- documenting this inherited behavior, not introducing it.
+    row = {"How early do you invest?": "$1M+ MRR / GMV, Some Unknown Phrase, Great team, no revenue"}
+    result = classify_how_early_do_you_invest(row, NO_CONTEXT)
+    assert result["custom:how_early_do_you_invest"] == ["$1M+ MRR / GMV"]
+
+
+def test_how_early_do_you_invest_missing_column_produces_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_how_early_do_you_invest(row, NO_CONTEXT)
+    assert result == {}
+
+
 # --- registry / integration ---
 
 
@@ -586,10 +763,16 @@ def test_apply_classification_rules_runs_the_full_registry():
         "Stage": "Interested",
         "Check Size": "$25k - $50k",
         "Check Size (Institutional)": "$1M - $2M",
+        "Accredited Status": "Yes",
+        "Deal Stage": "Seed",
+        "Investing in these types of assets": "Real estate",
+        "Investing in these business models:": "Marketplaces",
+        "Would like to meet founders by": "Email intro",
+        "How early do you invest?": "Great team, no revenue",
     }
     full_context = {
         **ROLE_CONTEXT, **CHRIS_DEGREE_CONTEXT, **AGE_RANGE_CONTEXT, **GENDER_CONTEXT, **ENGAGEMENT_STAGE_CONTEXT,
-        **CHECK_SIZE_CONTEXT,
+        **CHECK_SIZE_CONTEXT, **ACCREDITED_STATUS_CONTEXT,
     }
     result = apply_classification_rules(row, full_context)
     assert result["industry"] == "Consumer Electronics"
@@ -605,6 +788,12 @@ def test_apply_classification_rules_runs_the_full_registry():
     assert result["custom:engagement_stage"] == "Interested"
     assert result["custom:check_size_personal"] == ["$25k - $50k"]
     assert result["custom:check_size_institutional"] == ["$1M - $2M"]
+    assert result["custom:accredited_status"] == "Yes"
+    assert result["thesis_private_deal_stages"] == ["Seed (product in market, early customers or pilots)"]
+    assert result["thesis_private_asset_types"] == ["Real estate (direct ownership, syndications, REITs)"]
+    assert result["thesis_private_business_models"] == ["Marketplaces (e.g., Airbnb, Uber-style platforms)"]
+    assert result["thesis_private_meeting_preferences"] == ["In an email intro"]
+    assert result["custom:how_early_do_you_invest"] == ["Great team, no revenue"]
     assert "funding_stage" not in result  # the exact collision this fix prevents
 
 
@@ -622,6 +811,7 @@ async def test_build_classification_context_fetches_live_options_for_every_valid
         "engagement_stage": FakeField(["Cold", "Interested", "Unresponsive"]),
         "check_size_personal": FakeField(["$1k - $10k", "$10k - $25k"]),
         "check_size_institutional": FakeField(["$500k - $1M", "$1M - $2M"]),
+        "accredited_status": FakeField(["Yes", "No"]),
     }
 
     class FakeCustomFieldStore:
@@ -636,6 +826,7 @@ async def test_build_classification_context_fetches_live_options_for_every_valid
     assert context["engagement_stage_options"] == {"Cold", "Interested", "Unresponsive"}
     assert context["check_size_personal_options"] == {"$1k - $10k", "$10k - $25k"}
     assert context["check_size_institutional_options"] == {"$500k - $1M", "$1M - $2M"}
+    assert context["accredited_status_options"] == {"Yes", "No"}
 
 
 @pytest.mark.asyncio
@@ -652,3 +843,4 @@ async def test_build_classification_context_handles_missing_fields():
     assert context["engagement_stage_options"] == set()
     assert context["check_size_personal_options"] == set()
     assert context["check_size_institutional_options"] == set()
+    assert context["accredited_status_options"] == set()

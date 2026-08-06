@@ -51,6 +51,30 @@ async def _seed_validated_single_selects(import_service):
         "check_size_institutional", "Check Size (Institutional)", CustomFieldType.MULTI_SELECT,
         options=check_size_options,
     )
+    await crm.create_custom_field(
+        "accredited_status", "Accredited Status", CustomFieldType.SINGLE_SELECT, options=["Yes", "No"],
+    )
+    await crm.create_custom_field(
+        "how_early_do_you_invest", "How Early Do You Invest?", CustomFieldType.MULTI_SELECT,
+        options=["Great team, no revenue", "Great team, some revenue", "$10k-$50k MRR / GMV",
+                 "$50k-$100k MRR / GMV", "$100k-$1M MRR / GMV", "$1M+ MRR / GMV"],
+    )
+    # 2026-08-06 broader-audit Phase 1 -- the ten plain scalar fields, mirroring
+    # production state where these definitions already exist before any CSV upload.
+    await crm.create_custom_field("work_direct_phone", "Work Direct Phone", CustomFieldType.TEXT)
+    await crm.create_custom_field("do_not_call", "Do Not Call", CustomFieldType.BOOLEAN)
+    await crm.create_custom_field("last_raised_at", "Last Raised At", CustomFieldType.DATE)
+    await crm.create_custom_field("how_often_do_you_invest", "How Often Do You Invest?", CustomFieldType.TEXT)
+    await crm.create_custom_field("personal_notes", "Personal Notes", CustomFieldType.LONG_TEXT)
+    await crm.create_custom_field("notes", "Notes", CustomFieldType.LONG_TEXT)
+    await crm.create_custom_field(
+        "referred_to_constellation_dinners_by", "Who were you referred to Constellation Dinners by?",
+        CustomFieldType.TEXT,
+    )
+    await crm.create_custom_field(
+        "investment_geography_preference", "Investment Geography Preference", CustomFieldType.TEXT,
+    )
+    await crm.create_custom_field("chris_knows_personally", "Chris Knows Personally", CustomFieldType.BOOLEAN)
 
 
 def csv_bytes(text: str) -> bytes:
@@ -817,14 +841,24 @@ async def test_alex_pepe_end_to_end(import_service):
     configuration, using the same suggested mapping a human would just accept."""
     await _seed_validated_single_selects(import_service)
     row = (
-        "Email,Dinner Subscriptions,Dinners Attended,Chris Degree Connection,Age Range,Check Size\n"
+        "Email,Dinner Subscriptions,Dinners Attended,Chris Degree Connection,Age Range,Check Size,"
+        "Do Not Call,Chris knows personally,Accredited Status,Deal Stage,"
+        "Investing in these types of assets,Investing in these business models:,"
+        "Would like to meet founders by\n"
         "alexjpepe@gmail.com,"
         "\"Investor Dinners, Fireside Dinners, Biz Dev Dinners\","
         "\"Investor Dinners, Fireside Dinners, Savvy [2.25.2025] Austin, VacayMyWay [08.12.2025] Austin, "
         "Alpha Rose [08.13.2025] Austin, Biz Dev Dinners, Ensitech [11.13.2025] Austin, "
         "SharpsAI [12.04.2025] Austin, Civilization Fund [01.19.2026] Austin, Predict RX [03.10.2026] Austin, "
         "Submersive [04.30.2026] Austin\","
-        "1st degree,61-70,\"$25k - $50k, $50k - $100k\"\n"
+        "1st degree,61-70,\"$25k - $50k, $50k - $100k\","
+        "false,Yes,Yes,"
+        "\"Pre-seed, Seed, Series A, Series B, Series C,D,E, Fund LP, Secondary\","
+        "\"Hedge funds, Infrastructure, Private credit, Private equity, Public equities, Real estate, "
+        "Royalty financing, Venture capital\","
+        "\"Hardware / Physical products, Licensing / IP-based, Manufacturing, Marketplaces, "
+        "Software as a Service (SaaS)\","
+        "\"Email intro, Zoom Call\"\n"
     )
     batch = await import_service.upload("future.csv", csv_bytes(row))
     mapping = suggest_mapping(batch.headers)
@@ -843,6 +877,35 @@ async def test_alex_pepe_end_to_end(import_service):
     assert alex.custom_fields["chris_degree_connection"] == "1st degree"
     assert alex.custom_fields["age_range"] == "61-70"
     assert alex.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+    # Phase 1 (2026-08-06 broader-audit) fields, real Alex Pepe values
+    assert alex.custom_fields["do_not_call"] is False
+    assert alex.custom_fields["chris_knows_personally"] is True
+    assert alex.custom_fields["accredited_status"] == "Yes"
+    # Phase 2 (legacy thesis translation) fields, real Alex Pepe values -- including
+    # the "Series C,D,E" shorthand collapsing to the same canonical bucket as B/C.
+    assert alex.thesis_private_deal_stages == [
+        "Pre-Seed (early development, pre-revenue or minimal traction)",
+        "Seed (product in market, early customers or pilots)",
+        "Series A (scaling phase, revenue traction, team expansion)",
+        "Series B or later (growth or expansion stage, institutional rounds)",
+        "Fund LP (investor in venture/private equity funds)",
+        "Secondary (buying equity from early investors or founders)",
+    ]
+    assert alex.thesis_private_asset_types == [
+        "Hedge funds (multi-asset strategies)",
+        "Infrastructure (e.g., toll roads, utilities, airports)",
+        "Private credit (e.g., private loans, direct lending)",
+        "Private equity",
+        "Public equities (stocks, ETFs)",
+        "Real estate (direct ownership, syndications, REITs)",
+        "Royalty financing",
+        "Venture capital (e.g., angel checks, early-stage startups, high-growth tech)",
+    ]
+    assert alex.thesis_private_business_models == [
+        "Hardware / Physical products", "Licensing / IP-based", "Manufacturing",
+        "Marketplaces (e.g., Airbnb, Uber-style platforms)", "Software as a Service (SaaS)",
+    ]
+    assert alex.thesis_private_meeting_preferences == ["In an email intro", "I'd do a Zoom call"]
 
 
 @pytest.mark.asyncio
@@ -978,3 +1041,336 @@ async def test_role_rule_works_even_when_role_field_does_not_exist_yet(import_se
     assert report.created == 1
     contact = (await import_service.crm_service.list_contacts()).items[0]
     assert "role" not in contact.custom_fields
+
+
+# --- 2026-08-06 broader-audit Phase 1: the ten plain scalar mappings ---
+
+
+@pytest.mark.asyncio
+async def test_future_upload_populates_all_ten_phase1_fields_with_zero_manual_mapping(import_service):
+    """All ten Phase 1 fields, both CSV headers, via suggest_mapping()'s default --
+    exactly what a human gets by accepting the suggested mapping with no changes."""
+    await _seed_validated_single_selects(import_service)
+    headers_row = (
+        "Email,Work Direct Phone,Do Not Call,Last Raised At,How often do you invest?,"
+        "Personal Notes,Notes,Who were you referred to Constellation Dinners by?,"
+        "Geographic preference,Chris knows personally,Accredited Status\n"
+        "nova@example.com,555-0100,false,2025-07-01T00:00:00+00:00,4 per year,"
+        "Family office context,General notes here,Chris Beaman,"
+        "\"Austin, Texas\",Yes,Yes\n"
+    )
+    batch = await import_service.upload("future.csv", csv_bytes(headers_row))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    cf = contact.custom_fields
+    assert cf["work_direct_phone"] == "555-0100"
+    assert cf["do_not_call"] is False
+    assert cf["last_raised_at"] == "2025-07-01T00:00:00+00:00"
+    assert cf["how_often_do_you_invest"] == "4 per year"
+    assert cf["personal_notes"] == "Family office context"
+    assert cf["notes"] == "General notes here"
+    assert cf["referred_to_constellation_dinners_by"] == "Chris Beaman"
+    assert cf["investment_geography_preference"] == "Austin, Texas"
+    assert cf["chris_knows_personally"] is True
+    assert cf["accredited_status"] == "Yes"
+
+
+@pytest.mark.asyncio
+async def test_chris_knows_personally_boolean_coercion_yes_and_false_strings(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Chris knows personally,Do Not Call\nnova@example.com,Yes,false\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["chris_knows_personally"] is True
+    assert contact.custom_fields["do_not_call"] is False
+
+
+@pytest.mark.asyncio
+async def test_accredited_status_single_select_validation_drops_unrecognized(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Accredited Status\nnova@example.com,Maybe\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email"})
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert "accredited_status" not in contact.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_phase1_scalar_fields_never_overwrite_existing_populated_value(import_service):
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact({
+        "email": "known@example.com",
+        "custom_fields": {
+            "notes": "Original note", "accredited_status": "No", "chris_knows_personally": False,
+        },
+    })
+    batch = await import_service.upload(
+        "newer.csv",
+        csv_bytes("Email,Notes,Accredited Status,Chris knows personally\nknown@example.com,New note,Yes,Yes\n"),
+    )
+    mapping = suggest_mapping(batch.headers)  # Notes/Chris knows personally are alias-based, not
+    # classification-rule-driven -- must use the real suggested mapping, not a narrowed one, or
+    # they'd never even be read and this test would pass for the wrong reason.
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["notes"] == "Original note"
+    assert updated.custom_fields["accredited_status"] == "No"
+    assert updated.custom_fields["chris_knows_personally"] is False
+
+
+@pytest.mark.asyncio
+async def test_phase1_scalar_fields_blank_csv_cell_never_erases_existing_value(import_service):
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact(
+        {"email": "known@example.com", "custom_fields": {"work_direct_phone": "555-0100", "personal_notes": "x"}}
+    )
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Work Direct Phone,Personal Notes\nknown@example.com,,\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["work_direct_phone"] == "555-0100"
+    assert updated.custom_fields["personal_notes"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_phase1_fields_matched_via_apollo_contact_id(import_service):
+    """Apollo ID/email/LinkedIn matching is unchanged by Phase 1 -- proves a Phase 1
+    field lands on the correct contact even when matched purely by Apollo ID."""
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact(
+        {"apollo_contact_id": "apollo-123", "email": "old@example.com", "first_name": "Nova"}
+    )
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Apollo Contact Id,Email,First Name,Notes\napollo-123,new@example.com,Nova,Matched by Apollo ID\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["notes"] == "Matched by Apollo ID"
+    assert updated.email == "old@example.com"  # populated external field never overwritten
+
+
+@pytest.mark.asyncio
+async def test_phase1_field_identity_conflict_still_blocked(import_service):
+    """Same identity-conflict guard as every other field: a row sharing an email with
+    an existing contact but a fully mismatched name must never write into it."""
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact(
+        {"email": "shared@example.com", "first_name": "James", "last_name": "Feldkamp"}
+    )
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,First Name,Last Name,Notes\nshared@example.com,Shawn,Riely,Should not merge\n"),
+    )
+    mapping = suggest_mapping(batch.headers)  # Notes is alias-based -- must be really mapped so
+    # this test proves the identity-conflict guard is what blocks it, not a missing mapping.
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 0  # defaults to skip, never silently merged
+    unchanged = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert "notes" not in unchanged.custom_fields
+
+
+# --- 2026-08-06 broader-audit Phase 2: legacy thesis-column translation, full pipeline ---
+
+
+@pytest.mark.asyncio
+async def test_future_upload_populates_deal_stage_with_legacy_translation(import_service):
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Deal Stage\nnova@example.com,\"Pre-seed, Seed, Series A\"\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_private_deal_stages == [
+        "Pre-Seed (early development, pre-revenue or minimal traction)",
+        "Seed (product in market, early customers or pilots)",
+        "Series A (scaling phase, revenue traction, team expansion)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_future_upload_populates_asset_types_with_internal_comma_canonical_values(import_service):
+    """The critical parsing edge case, run through the real pipeline: 'Collectibles'
+    translates to a canonical value that itself contains commas -- must survive whole."""
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Investing in these types of assets\nnova@example.com,\"Collectibles, Real estate\"\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_private_asset_types == [
+        "Collectibles (e.g., art, wine, watches)",
+        "Real estate (direct ownership, syndications, REITs)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_future_upload_populates_business_models_with_legacy_translation(import_service):
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Investing in these business models:\nnova@example.com,\"Marketplaces\"\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_private_business_models == ["Marketplaces (e.g., Airbnb, Uber-style platforms)"]
+
+
+@pytest.mark.asyncio
+async def test_future_upload_populates_meeting_preferences_with_legacy_translation(import_service):
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Would like to meet founders by\nnova@example.com,\"Email intro, Zoom Call\"\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_private_meeting_preferences == ["In an email intro", "I'd do a Zoom call"]
+
+
+@pytest.mark.asyncio
+async def test_future_upload_never_populates_founder_diversity_preference(import_service):
+    """Deliberately excluded from Phase 2 -- still an open duplicate-destination
+    question against the gender-specific dining column (2026-08-06 broader audit)."""
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Founder Diversity Preference\nnova@example.com,Open to investing in anyone\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_private_demographic_preferences == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_thesis_fields_never_overwrite_existing_populated_value(import_service):
+    existing = await import_service.crm_service.create_contact({
+        "email": "known@example.com",
+        "thesis_private_deal_stages": ["Series B or later (growth or expansion stage, institutional rounds)"],
+    })
+    batch = await import_service.upload(
+        "newer.csv", csv_bytes("Email,Deal Stage\nknown@example.com,\"Pre-seed, Seed\"\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    # Core thesis fields fill-only-if-empty (never merge, never overwrite) -- same
+    # policy as every other core/external field, established before this round.
+    assert updated.thesis_private_deal_stages == [
+        "Series B or later (growth or expansion stage, institutional rounds)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_future_upload_populates_how_early_do_you_invest_with_internal_commas(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,How early do you invest?\n"
+            "nova@example.com,\"Great team, no revenue, Great team, some revenue, $1M+ MRR / GMV\"\n"
+        ),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["how_early_do_you_invest"] == [
+        "Great team, no revenue", "Great team, some revenue", "$1M+ MRR / GMV",
+    ]
+
+
+# --- Idempotency (repeat upload of the same rows) ---
+
+
+@pytest.mark.asyncio
+async def test_repeat_upload_of_phase1_and_phase2_fields_is_idempotent(import_service):
+    await _seed_validated_single_selects(import_service)
+    content = csv_bytes(
+        "Email,Notes,Accredited Status,Deal Stage,How early do you invest?\n"
+        "nova@example.com,A note,Yes,\"Pre-seed, Seed\",\"Great team, no revenue\"\n"
+    )
+
+    batch1 = await import_service.upload("run1.csv", content)
+    mapping = suggest_mapping(batch1.headers)
+    await import_service.preview(batch1.import_batch_id, mapping)
+    report1 = await import_service.commit(batch1.import_batch_id)
+    assert report1.created == 1
+
+    batch2 = await import_service.upload("run2.csv", content)
+    await import_service.preview(batch2.import_batch_id, mapping)
+    report2 = await import_service.commit(batch2.import_batch_id)
+    assert report2.created == 0
+    assert report2.updated == 1  # matched the same contact, not duplicated
+
+    contacts = (await import_service.crm_service.list_contacts()).items
+    assert len(contacts) == 1
+    contact = contacts[0]
+    assert contact.custom_fields["notes"] == "A note"
+    assert contact.custom_fields["accredited_status"] == "Yes"
+    assert contact.thesis_private_deal_stages == [
+        "Pre-Seed (early development, pre-revenue or minimal traction)",
+        "Seed (product in market, early customers or pilots)",
+    ]
+    assert contact.custom_fields["how_early_do_you_invest"] == ["Great team, no revenue"]
+
+
+# --- Check Size regression (must remain fully untouched by Phase 1/2) ---
+
+
+@pytest.mark.asyncio
+async def test_check_size_still_works_unchanged_alongside_new_phase1_phase2_fields(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,Check Size,Deal Stage,Notes\n"
+            "nova@example.com,\"$25k - $50k, $50k - $100k\",\"Seed\",A note\n"
+        ),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+    assert contact.thesis_private_deal_stages == ["Seed (product in market, early customers or pilots)"]
+    assert contact.custom_fields["notes"] == "A note"
