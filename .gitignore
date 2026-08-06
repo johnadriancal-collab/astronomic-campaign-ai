@@ -35,3 +35,6 @@ data/
 *.db-journal
 *.db-wal
 *.db-shm
+
+# --- CRM backup exports (contain real contact PII -- never commit) ---
+backups/
