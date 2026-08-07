@@ -257,6 +257,22 @@ def classify_accredited_status(raw_row: dict[str, str], context: dict[str, Any])
     return {"custom:accredited_status": value} if value else {}
 
 
+def classify_revenue_stage(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    revenue_stage (custom field, single_select) <- CSV `Revenue Stage`,
+    kept only if it exactly matches one of the field's live options
+    (context["revenue_stage_options"], e.g. "$1M - $10M"). Same never-guess
+    validated-single-select pattern as Chris Degree Connection/Age Range/
+    Gender/Engagement Stage/Accredited Status -- added for the 2026-08-06
+    Contacts 3 (Investors) CSV, whose Revenue Stage column has real
+    values (101 rows) for the first time. NOT the same concept as `Deal
+    Stage` (their investing preference) -- see the field's own description.
+    """
+    raw = _find_column(raw_row, "Revenue Stage")
+    value = _validate_single_select(raw, context.get("revenue_stage_options") or set())
+    return {"custom:revenue_stage": value} if value else {}
+
+
 _CHECK_SIZE_DASH_RE = re.compile(r"[‒–—−]")  # figure/en/em dash, minus sign -> hyphen
 
 
@@ -456,6 +472,7 @@ CLASSIFICATION_RULES: list[Classifier] = [
     classify_engagement_stage,
     classify_check_size,
     classify_accredited_status,
+    classify_revenue_stage,
     classify_legacy_thesis_columns,
     classify_how_early_do_you_invest,
 ]
@@ -483,6 +500,7 @@ async def build_classification_context(custom_field_store: Any) -> dict[str, Any
         "check_size_personal_options": await _options("check_size_personal"),
         "check_size_institutional_options": await _options("check_size_institutional"),
         "accredited_status_options": await _options("accredited_status"),
+        "revenue_stage_options": await _options("revenue_stage"),
     }
 
 

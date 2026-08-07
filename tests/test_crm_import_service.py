@@ -59,6 +59,10 @@ async def _seed_validated_single_selects(import_service):
         options=["Great team, no revenue", "Great team, some revenue", "$10k-$50k MRR / GMV",
                  "$50k-$100k MRR / GMV", "$100k-$1M MRR / GMV", "$1M+ MRR / GMV"],
     )
+    await crm.create_custom_field(
+        "revenue_stage", "Revenue Stage", CustomFieldType.SINGLE_SELECT,
+        options=["$250K - $500K", "$500k - $1M", "$1M - $10M", "$10M - $100M"],
+    )
     # 2026-08-06 broader-audit Phase 1 -- the ten plain scalar fields, mirroring
     # production state where these definitions already exist before any CSV upload.
     await crm.create_custom_field("work_direct_phone", "Work Direct Phone", CustomFieldType.TEXT)
@@ -117,6 +121,43 @@ def test_suggest_mapping_matches_common_header_variants():
 def test_suggest_mapping_leaves_unknown_headers_unmapped():
     mapping = suggest_mapping(["Some Totally Unknown Column"])
     assert "Some Totally Unknown Column" not in mapping
+
+
+def test_suggest_mapping_leaves_company_size_unmapped_but_employee_headers_still_map():
+    """2026-08-06 Contacts 3 (Investors) audit -- 'Company Size' (the Investor Thesis
+    form's own free-text bucket answer, e.g. '51-200 employees') is a DIFFERENT concept
+    from '# Employees' (Apollo's real headcount number) and must never alias to
+    company_size, even though every populated production company_size value has always
+    come from an employee-count header. All employee-count header variants must keep
+    mapping to company_size exactly as before."""
+    mapping = suggest_mapping(
+        ["Company Size", "# Employees", "Employees", "Employee Count", "Number of Employees"]
+    )
+    assert "Company Size" not in mapping
+    assert mapping["# Employees"] == "company_size"
+    assert mapping["Employees"] == "company_size"
+    assert mapping["Employee Count"] == "company_size"
+    assert mapping["Number of Employees"] == "company_size"
+
+
+@pytest.mark.asyncio
+async def test_company_size_never_wins_over_number_of_employees_end_to_end(import_service):
+    """Real Contacts 3 (Investors) shape: a row with BOTH '# Employees' (Apollo's real
+    headcount) and 'Company Size' (the thesis form's own bucketed text) populated --
+    company_size must come from '# Employees' only; the raw 'Company Size' text is still
+    preserved in source_snapshot, just never structured into the core field."""
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes('Email,# Employees,Company Size\nnova@example.com,84,"51-200 employees"\n'),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.company_size == "84"
+    assert contact.source_snapshot["Company Size"] == "51-200 employees"
 
 
 @pytest.mark.asyncio
@@ -1054,10 +1095,11 @@ async def test_future_upload_populates_all_ten_phase1_fields_with_zero_manual_ma
     headers_row = (
         "Email,Work Direct Phone,Do Not Call,Last Raised At,How often do you invest?,"
         "Personal Notes,Notes,Who were you referred to Constellation Dinners by?,"
-        "Geographic preference,Chris knows personally,Accredited Status\n"
+        "Geographic preference,Chris knows personally,Accredited Status,"
+        "Qualify Contact,DO NOT INVEST IN\n"
         "nova@example.com,555-0100,false,2025-07-01T00:00:00+00:00,4 per year,"
         "Family office context,General notes here,Chris Beaman,"
-        "\"Austin, Texas\",Yes,Yes\n"
+        "\"Austin, Texas\",Yes,Yes,Warm intro only,\"Wearables, Digital Health\"\n"
     )
     batch = await import_service.upload("future.csv", csv_bytes(headers_row))
     mapping = suggest_mapping(batch.headers)
@@ -1077,6 +1119,8 @@ async def test_future_upload_populates_all_ten_phase1_fields_with_zero_manual_ma
     assert cf["investment_geography_preference"] == "Austin, Texas"
     assert cf["chris_knows_personally"] is True
     assert cf["accredited_status"] == "Yes"
+    assert cf["qualify_contact"] == "Warm intro only"
+    assert cf["do_not_invest_in"] == "Wearables, Digital Health"
 
 
 @pytest.mark.asyncio
@@ -1105,6 +1149,127 @@ async def test_accredited_status_single_select_validation_drops_unrecognized(imp
 
     contact = (await import_service.crm_service.list_contacts()).items[0]
     assert "accredited_status" not in contact.custom_fields
+
+
+# --- 2026-08-06 Contacts 3 (Investors) audit: Revenue Stage, Qualify Contact, DO NOT INVEST IN ---
+
+
+@pytest.mark.asyncio
+async def test_revenue_stage_single_select_validation_recognizes_live_option(import_service):
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Revenue Stage\nnova@example.com,$1M - $10M\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["revenue_stage"] == "$1M - $10M"
+
+
+@pytest.mark.asyncio
+async def test_revenue_stage_single_select_validation_drops_unrecognized(import_service):
+    """Real Contacts 3 (Investors) values like '$100K - $250K' (not a live option),
+    '$0-$50k', and 'Just getting started' must never be guessed into the nearest bucket."""
+    await _seed_validated_single_selects(import_service)
+    for raw in ["$100K - $250K", "$0-$50k", "Just getting started"]:
+        batch = await import_service.upload(
+            "future.csv", csv_bytes(f"Email,Revenue Stage\nnova+{raw!r}@example.com,{raw}\n"),
+        )
+        await import_service.preview(batch.import_batch_id, {"Email": "email"})
+        await import_service.commit(batch.import_batch_id)
+
+    contacts = (await import_service.crm_service.list_contacts()).items
+    assert len(contacts) == 3
+    for contact in contacts:
+        assert "revenue_stage" not in contact.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_revenue_stage_never_touches_deal_stage_or_deprecated_check_size_fields(import_service):
+    """Revenue Stage (the contact's own company) is a different concept from Deal Stage
+    (their investing preference) and from Check Size -- confirm no cross-contamination."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes("Email,Revenue Stage,Deal Stage\nnova@example.com,$1M - $10M,Seed\n"),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["revenue_stage"] == "$1M - $10M"
+    assert contact.thesis_private_deal_stages == ["Seed (product in market, early customers or pilots)"]
+    assert contact.thesis_private_check_sizes == []
+    assert contact.thesis_institutional_check_sizes == []
+    assert "check_size_personal" not in contact.custom_fields
+    assert "check_size_institutional" not in contact.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_qualify_contact_and_do_not_invest_in_plain_scalar_mapping(import_service):
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,Qualify Contact,DO NOT INVEST IN\n"
+            "nova@example.com,Warm intro only,\"Wearables, Digital Health\"\n"
+        ),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["qualify_contact"] == "Warm intro only"
+    assert contact.custom_fields["do_not_invest_in"] == "Wearables, Digital Health"
+
+
+@pytest.mark.asyncio
+async def test_qualify_contact_rule_works_even_when_field_does_not_exist_yet(import_service):
+    """No qualify_contact custom field defined at all -- must not error; the raw value
+    is stored as-is (same fallback as every other custom-field alias when the
+    definition is missing -- see _coerce_value)."""
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Qualify Contact\nnova@example.com,Warm intro only\n"),
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email", "Qualify Contact": "custom:qualify_contact"})
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["qualify_contact"] == "Warm intro only"
+
+
+@pytest.mark.asyncio
+async def test_new_mappings_never_overwrite_existing_populated_values(import_service):
+    """Same fill-only-if-empty policy as every other custom field -- an existing
+    populated value must survive a re-import with a different incoming value."""
+    await _seed_validated_single_selects(import_service)
+    await import_service.crm_service.create_contact({
+        "email": "known@example.com",
+        "custom_fields": {
+            "revenue_stage": "$10M - $100M", "qualify_contact": "Already qualified",
+            "do_not_invest_in": "Crypto",
+        },
+    })
+    batch = await import_service.upload(
+        "future.csv",
+        csv_bytes(
+            "Email,Revenue Stage,Qualify Contact,DO NOT INVEST IN\n"
+            "known@example.com,$1M - $10M,New value,Real Estate\n"
+        ),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    updated = (await import_service.crm_service.list_contacts()).items[0]
+    assert updated.custom_fields["revenue_stage"] == "$10M - $100M"
+    assert updated.custom_fields["qualify_contact"] == "Already qualified"
+    assert updated.custom_fields["do_not_invest_in"] == "Crypto"
 
 
 @pytest.mark.asyncio

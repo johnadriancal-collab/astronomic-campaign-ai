@@ -24,6 +24,7 @@ from app.services.crm_classification_rules import (
     classify_industry,
     classify_investor_mode,
     classify_legacy_thesis_columns,
+    classify_revenue_stage,
     classify_role,
 )
 
@@ -607,6 +608,58 @@ def test_accredited_status_no_context_options_drops_everything():
     assert result == {}
 
 
+# --- classify_revenue_stage (2026-08-06 Contacts 3 (Investors) audit) ---
+
+REVENUE_STAGE_CONTEXT = {
+    "revenue_stage_options": {"$250K - $500K", "$500k - $1M", "$1M - $10M", "$10M - $100M"}
+}
+
+
+def test_revenue_stage_valid_value_passes_through():
+    row = {"Revenue Stage": "$1M - $10M"}
+    result = classify_revenue_stage(row, REVENUE_STAGE_CONTEXT)
+    assert result["custom:revenue_stage"] == "$1M - $10M"
+
+
+def test_revenue_stage_every_defined_option_passes():
+    for option in REVENUE_STAGE_CONTEXT["revenue_stage_options"]:
+        row = {"Revenue Stage": option}
+        result = classify_revenue_stage(row, REVENUE_STAGE_CONTEXT)
+        assert result["custom:revenue_stage"] == option
+
+
+def test_revenue_stage_unrecognized_value_produces_no_key():
+    """Real Contacts 3 (Investors) values like '$100K - $250K' (not a live option),
+    '$0-$50k', '$50k - $100K', and 'Just getting started' must never be guessed into
+    the nearest bucket -- same never-guess rule as every other validated single-select."""
+    for raw in ["$100K - $250K", "$0-$50k", "$50k - $100K", "Just getting started"]:
+        row = {"Revenue Stage": raw}
+        result = classify_revenue_stage(row, REVENUE_STAGE_CONTEXT)
+        assert result == {}
+
+
+def test_revenue_stage_missing_column_produces_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_revenue_stage(row, REVENUE_STAGE_CONTEXT)
+    assert result == {}
+
+
+def test_revenue_stage_no_context_options_drops_everything():
+    row = {"Revenue Stage": "$1M - $10M"}
+    result = classify_revenue_stage(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_revenue_stage_does_not_collide_with_deal_stage():
+    """Revenue Stage (the contact's own company's revenue) and Deal Stage (their
+    investing preference) are different concepts on different columns -- confirm
+    populating one never touches the other's key."""
+    row = {"Revenue Stage": "$1M - $10M", "Deal Stage": "Seed"}
+    result = classify_revenue_stage(row, REVENUE_STAGE_CONTEXT)
+    assert "thesis_private_deal_stages" not in result
+    assert result == {"custom:revenue_stage": "$1M - $10M"}
+
+
 # --- classify_legacy_thesis_columns (2026-08-06 broader-audit Phase 2) ---
 #
 # Wires crm_migration.py's own LEGACY_THESIS_COLUMN_VALUE_MAPS /
@@ -764,6 +817,7 @@ def test_apply_classification_rules_runs_the_full_registry():
         "Check Size": "$25k - $50k",
         "Check Size (Institutional)": "$1M - $2M",
         "Accredited Status": "Yes",
+        "Revenue Stage": "$1M - $10M",
         "Deal Stage": "Seed",
         "Investing in these types of assets": "Real estate",
         "Investing in these business models:": "Marketplaces",
@@ -772,7 +826,7 @@ def test_apply_classification_rules_runs_the_full_registry():
     }
     full_context = {
         **ROLE_CONTEXT, **CHRIS_DEGREE_CONTEXT, **AGE_RANGE_CONTEXT, **GENDER_CONTEXT, **ENGAGEMENT_STAGE_CONTEXT,
-        **CHECK_SIZE_CONTEXT, **ACCREDITED_STATUS_CONTEXT,
+        **CHECK_SIZE_CONTEXT, **ACCREDITED_STATUS_CONTEXT, **REVENUE_STAGE_CONTEXT,
     }
     result = apply_classification_rules(row, full_context)
     assert result["industry"] == "Consumer Electronics"
@@ -789,6 +843,7 @@ def test_apply_classification_rules_runs_the_full_registry():
     assert result["custom:check_size_personal"] == ["$25k - $50k"]
     assert result["custom:check_size_institutional"] == ["$1M - $2M"]
     assert result["custom:accredited_status"] == "Yes"
+    assert result["custom:revenue_stage"] == "$1M - $10M"
     assert result["thesis_private_deal_stages"] == ["Seed (product in market, early customers or pilots)"]
     assert result["thesis_private_asset_types"] == ["Real estate (direct ownership, syndications, REITs)"]
     assert result["thesis_private_business_models"] == ["Marketplaces (e.g., Airbnb, Uber-style platforms)"]
@@ -812,6 +867,7 @@ async def test_build_classification_context_fetches_live_options_for_every_valid
         "check_size_personal": FakeField(["$1k - $10k", "$10k - $25k"]),
         "check_size_institutional": FakeField(["$500k - $1M", "$1M - $2M"]),
         "accredited_status": FakeField(["Yes", "No"]),
+        "revenue_stage": FakeField(["$250K - $500K", "$500k - $1M", "$1M - $10M", "$10M - $100M"]),
     }
 
     class FakeCustomFieldStore:
@@ -827,6 +883,7 @@ async def test_build_classification_context_fetches_live_options_for_every_valid
     assert context["check_size_personal_options"] == {"$1k - $10k", "$10k - $25k"}
     assert context["check_size_institutional_options"] == {"$500k - $1M", "$1M - $2M"}
     assert context["accredited_status_options"] == {"Yes", "No"}
+    assert context["revenue_stage_options"] == {"$250K - $500K", "$500k - $1M", "$1M - $10M", "$10M - $100M"}
 
 
 @pytest.mark.asyncio
@@ -844,3 +901,4 @@ async def test_build_classification_context_handles_missing_fields():
     assert context["check_size_personal_options"] == set()
     assert context["check_size_institutional_options"] == set()
     assert context["accredited_status_options"] == set()
+    assert context["revenue_stage_options"] == set()

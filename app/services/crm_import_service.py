@@ -67,7 +67,18 @@ HEADER_ALIASES: dict[str, str] = {
     "company website": "company_website", "website": "company_website",
     "domain": "company_website", "company domain": "company_website",
     "city": "city", "state": "state", "country": "country", "industry": "industry",
-    "company size": "company_size", "employees": "company_size",
+    # "company size" (bare) deliberately does NOT alias to company_size -- confirmed via
+    # the 2026-08-06 Contacts 3 (Investors) audit that this is a DIFFERENT concept from
+    # "# Employees"/"employees"/"employee count"/"number of employees": those are Apollo's
+    # real headcount number, while "Company Size" is the Investor Thesis form's own
+    # free-text bucketed answer (e.g. "51-200 employees"). Every populated company_size
+    # value in production (484/528 contacts) is a bare number, proving "# Employees" has
+    # been the sole real-world source all along; CSV A and B never had a single "Company
+    # Size" value, and CSV C's 3 rows all had "# Employees" populated too, so removing
+    # this alias loses zero data across every CSV imported so far. Left genuinely
+    # unmapped (no destination) rather than repointed -- no CRM field for the thesis-form
+    # answer exists yet; that's a separate decision, not resolved here.
+    "employees": "company_size",
     "employee count": "company_size", "number of employees": "company_size",
     "revenue": "revenue", "annual revenue": "revenue",
     # "stage" (bare) deliberately does NOT alias to funding_stage -- confirmed via the
@@ -104,6 +115,16 @@ HEADER_ALIASES: dict[str, str] = {
     "who were you referred to constellation dinners by": f"{CUSTOM_FIELD_PREFIX}referred_to_constellation_dinners_by",
     "geographic preference": f"{CUSTOM_FIELD_PREFIX}investment_geography_preference",
     "chris knows personally": f"{CUSTOM_FIELD_PREFIX}chris_knows_personally",
+    # 2026-08-06 Contacts 3 (Investors) audit -- two more plain scalar custom fields
+    # with a real CRM destination and zero prior mapping. `qualify_contact` (TEXT) and
+    # `do_not_invest_in` (LONG_TEXT) have no options to validate against, so -- same
+    # reasoning as Secondary Email/Corporate Phone/Notes above -- a bare alias plus the
+    # existing generic _coerce_value()/apply_import_mapping() fill-only-if-empty policy
+    # is sufficient; no classification rule needed. `Revenue Stage` is NOT here -- it's
+    # a validated single_select field, handled by classify_revenue_stage() instead, same
+    # pattern as Accredited Status/Chris Degree Connection/Age Range/Gender/Engagement Stage.
+    "qualify contact": f"{CUSTOM_FIELD_PREFIX}qualify_contact",
+    "do not invest in": f"{CUSTOM_FIELD_PREFIX}do_not_invest_in",
 }
 
 
