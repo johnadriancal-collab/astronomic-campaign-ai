@@ -617,3 +617,72 @@ class CrmContactPage(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+# --- More Filters: dynamic field registry + query engine (2026-08-07) ---
+#
+# The filter TYPE here is a richer classification than get_contact_export_fields()'s
+# scalar/list/boolean -- it drives which OPERATORS a field exposes, and none of the
+# core/thesis fields are actually enum-enforced at the Pydantic level (thesis_investor_mode
+# is a plain `str`, thesis_private_industries is a plain `list[str]` -- the *_OPTIONS
+# constants above are respected by convention, not validation). So this classification is a
+# small, explicit, hand-maintained registry (see crm_filter_service.py), the same "one small
+# named list is the source of truth" pattern as EXTERNAL_FIELD_NAMES/THESIS_FIELD_NAMES above --
+# NOT something derivable purely from CrmContact.model_fields introspection.
+class FilterFieldType(str, Enum):
+    TEXT = "text"
+    NUMBER = "number"
+    BOOLEAN = "boolean"
+    DATE = "date"
+    SINGLE_SELECT = "single_select"
+    MULTI_SELECT = "multi_select"
+
+
+class FilterFieldMeta(BaseModel):
+    """
+    One filterable field's complete metadata -- the frontend builds its entire field
+    picker, operator dropdown, and value control from this alone (GET
+    /crm/filterable-fields), never from a second hardcoded field list of its own.
+
+    `ordered_options`/`non_ordered_options` implement the explicit-ordering design for
+    fields like Check Size and Age Range: `ordered_options` is the hand-authored
+    ascending list a gt/gte/lt/lte comparison is positioned against; `non_ordered_options`
+    is every other value in `options` (e.g. "Other:", "Retired", "Deceased") -- valid for
+    every other operator, but NEVER assigned an inferred ordinal position. Both are empty
+    unless `ordered` is True.
+    """
+
+    key: str
+    label: str
+    category: str
+    type: FilterFieldType
+    storage_shape: str  # "scalar" | "list"
+    source: str  # "core" | "thesis" | "custom"
+    options: list[str] = Field(default_factory=list)  # empty = open-vocabulary (e.g. technologies)
+    ordered: bool = False
+    ordered_options: list[str] = Field(default_factory=list)
+    non_ordered_options: list[str] = Field(default_factory=list)
+    operators: list[str] = Field(default_factory=list)
+
+
+class FilterCondition(BaseModel):
+    field: str
+    operator: str
+    value: Any = None
+
+
+class FilterSort(BaseModel):
+    field: str
+    direction: str = "asc"  # "asc" | "desc"
+
+
+class FilterQuery(BaseModel):
+    filters: list[FilterCondition] = Field(default_factory=list)
+    logic: str = "AND"  # "AND" | "OR" -- applied across every condition in `filters`;
+    # OR *within* one field (e.g. "State is Texas or California") is expressed via a
+    # multi-value `value` on a single condition instead, not a second logic level --
+    # deliberately flat, no nested groups, per the approved V1 scope.
+    include_archived: bool = False
+    page: int = 1
+    page_size: int = 50
+    sort: FilterSort | None = None

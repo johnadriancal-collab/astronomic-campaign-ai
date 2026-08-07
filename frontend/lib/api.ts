@@ -661,3 +661,55 @@ export function commitCrmImport(importBatchId: string, decisions: Record<string,
 export function exportCrmBackup(): Promise<Record<string, unknown>> {
   return request<Record<string, unknown>>("/crm/backup/export");
 }
+
+// --- More Filters: dynamic field registry + query engine ---
+//
+// FilterFieldMeta is the ONLY source of truth for the filter builder's field
+// list, operator choices, and select options -- there is no second, hardcoded
+// field list anywhere in the frontend. A field added to the backend registry
+// (core/thesis fields in crm_filter_service.py, or a new active custom field
+// definition) shows up here automatically, with zero frontend changes.
+
+export type FilterFieldType = "text" | "number" | "boolean" | "date" | "single_select" | "multi_select";
+
+export interface FilterFieldMeta {
+  key: string;
+  label: string;
+  category: string;
+  type: FilterFieldType;
+  storage_shape: "scalar" | "list";
+  source: "core" | "thesis" | "custom";
+  options: string[];
+  ordered: boolean;
+  ordered_options: string[];
+  non_ordered_options: string[];
+  operators: string[];
+}
+
+export interface FilterCondition {
+  field: string;
+  operator: string;
+  value?: unknown;
+}
+
+export interface FilterSort {
+  field: string;
+  direction: "asc" | "desc";
+}
+
+export interface FilterQuery {
+  filters: FilterCondition[];
+  logic: "AND" | "OR";
+  include_archived?: boolean;
+  page?: number;
+  page_size?: number;
+  sort?: FilterSort | null;
+}
+
+export function listCrmFilterableFields(): Promise<FilterFieldMeta[]> {
+  return request<FilterFieldMeta[]>("/crm/filterable-fields");
+}
+
+export function queryCrmContacts(query: FilterQuery): Promise<CrmContactPage> {
+  return post<CrmContactPage>("/crm/contacts/query", query);
+}

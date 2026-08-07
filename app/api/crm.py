@@ -20,8 +20,11 @@ from app.models.crm import (
     CrmImportBatch,
     CrmImportReport,
     CustomFieldType,
+    FilterFieldMeta,
+    FilterQuery,
     get_contact_export_fields,
 )
+from app.services.crm_filter_service import FilterValidationError
 from app.services.crm_import_service import CrmImportBatchNotFound, CrmImportService
 from app.services.crm_migration import (
     reconcile_legacy_fields,
@@ -84,6 +87,25 @@ async def list_contacts(
     )
 
 
+@router.post("/contacts/query", response_model=CrmContactPage)
+async def query_contacts(query: FilterQuery, service: CrmService = Depends(get_crm_service)):
+    """
+    More Filters: a dynamic field+operator+value query over every filterable field
+    (core, thesis, and active custom fields alike) -- entirely additive, does not
+    replace or alter GET /contacts above, which keeps backing the existing Contacts
+    page's keyword/city/investor-mode search unmodified. Filtering, sorting, and
+    pagination all happen server-side; the caller never has to fetch more than the
+    one page it asked for. Every field/operator/value is validated against the live
+    field registry (GET /filterable-fields) before anything runs -- an unrecognized
+    field or a disallowed operator for that field's type is rejected with a 400,
+    never silently ignored or passed through to a raw query.
+    """
+    try:
+        return await service.query_contacts(query)
+    except FilterValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.post("/contacts", response_model=CrmContact)
 async def create_contact(fields: dict[str, Any] = Body(...), service: CrmService = Depends(get_crm_service)):
     """Manual creation. Rejects a duplicate on the three confident dedup tiers only."""
@@ -105,6 +127,18 @@ async def list_contact_export_fields():
     as a contact id.
     """
     return get_contact_export_fields()
+
+
+@router.get("/filterable-fields", response_model=list[FilterFieldMeta])
+async def list_filterable_fields(service: CrmService = Depends(get_crm_service)):
+    """
+    The complete More Filters field registry -- core/thesis fields (hand-registered
+    in crm_filter_service.py) merged with every ACTIVE custom field definition, each
+    normalized to the same shape (key/label/category/type/options/operators/ordered).
+    This is the single source of truth the frontend builds its entire filter UI
+    from; it never maintains a second, independent field list of its own.
+    """
+    return await service.get_filterable_fields()
 
 
 @router.get("/contacts/{crm_contact_id}", response_model=CrmContact)

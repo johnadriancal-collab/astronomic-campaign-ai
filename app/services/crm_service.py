@@ -37,6 +37,8 @@ from app.models.crm import (
     CrmCustomFieldDefinition,
     CrmImportRowStatus,
     CustomFieldType,
+    FilterFieldMeta,
+    FilterQuery,
     derive_investor_mode,
     normalize_email,
     normalize_linkedin_url,
@@ -380,6 +382,31 @@ class CrmService:
         if include_inactive:
             return definitions
         return [d for d in definitions if d.active]
+
+    # --- More Filters: dynamic field registry + query engine (crm_filter_service.py) ---
+    # Deferred import to avoid a circular import -- crm_filter_service.py imports
+    # `_is_empty` from this module, so it can't be imported at this module's top level.
+
+    async def get_filterable_fields(self) -> list[FilterFieldMeta]:
+        from app.services.crm_filter_service import build_registry
+
+        active_custom_fields = await self.list_custom_fields(include_inactive=False)
+        return build_registry(active_custom_fields)
+
+    async def query_contacts(self, query: FilterQuery) -> CrmContactPage:
+        """
+        The More Filters engine's entry point -- entirely additive, does not touch
+        list_contacts()/GET /crm/contacts above, which keeps backing the existing
+        Contacts page unmodified. Field/operator/value are validated against the
+        live registry before any predicate runs, so no unrecognized field name or
+        operator (and no raw SQL) is ever accepted from the caller.
+        """
+        from app.services.crm_filter_service import query_contacts as _query_contacts, validate_query
+
+        registry = await self.get_filterable_fields()
+        field_by_key = validate_query(query, registry)
+        contacts = await self.contact_store.list()
+        return _query_contacts(contacts, query, field_by_key)
 
     # --- Backup/export ---
 
