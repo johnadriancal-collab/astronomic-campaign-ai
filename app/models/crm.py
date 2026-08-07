@@ -46,7 +46,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, get_args, get_origin
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Shared option lists -- Section 2 (private) and Section 3 (institutional)
 # of the real form ask these seven questions with IDENTICAL choices, so one
@@ -166,6 +166,25 @@ DEMOGRAPHIC_PREFERENCE_OPTIONS = [
 ]
 
 INVESTOR_MODE_OPTIONS = ["Privately", "Institutionally", "Both"]
+
+# 2026-08-07 Dietary Preferences design -- canonical multi-select vocabulary for Q24,
+# derived from taxonomy review, NOT from observed CSV frequency (no CSV has ever
+# populated this column). Distinctions deliberately preserved rather than merged:
+# Dairy-Free/Lactose-Free, Gluten-Free/Wheat-Free, Seafood-Free/Shellfish-Free/
+# Fish-Free/Mollusks-Free, Vegetarian/Vegan, Pescatarian/Pollotarian, and
+# Paleo/Keto/Low Carb are each clinically or practically distinct concepts -- see
+# get_contact_export_fields()-adjacent design notes in the PR/commit for the full
+# reasoning. "None" and "Other" are themselves valid, recognized options here (not
+# fallback sentinels) -- classify_dietary_preferences treats a literal "None" or
+# "Other" value as already-recognized, never as unrecognized overflow.
+DIETARY_PREFERENCE_OPTIONS = [
+    "Vegetarian", "Vegan", "Pescatarian", "Pollotarian", "Paleo", "Keto", "Low Carb",
+    "Halal", "Kosher", "Gluten-Free", "Dairy-Free", "Lactose-Free", "Nut-Free",
+    "Soy-Free", "Egg-Free", "Pork-Free", "Beef-Free", "Shellfish-Free", "Fish-Free",
+    "Seafood-Free", "Alcohol-Free", "Sugar-Free", "No Spicy Food", "Wheat-Free",
+    "Mollusks-Free", "Grain-Free", "Corn-Free", "MSG-Free", "Seed Oil-Free",
+    "None", "Other",
+]
 
 # The custom field "Investor Type" (field_key="investor_type") is Astronomic's
 # investor archetype -- distinct from this Investor Thesis Q6 mode -- but each
@@ -356,7 +375,7 @@ THESIS_FIELD_NAMES = frozenset(
         "thesis_institutional_meeting_preferences", "thesis_institutional_meeting_preferences_other",
         "thesis_institutional_demographic_preferences", "thesis_institutional_demographic_preferences_other",
         "thesis_institutional_other_criteria",
-        "thesis_dietary_preferences", "thesis_referral_emails",
+        "thesis_dietary_preferences", "thesis_dietary_preferences_other", "thesis_referral_emails",
     }
 )
 
@@ -437,11 +456,29 @@ class CrmContact(BaseModel):
     thesis_institutional_demographic_preferences_other: str | None = None
     thesis_institutional_other_criteria: str | None = None  # Q23
 
-    thesis_dietary_preferences: str | None = None  # Q24
+    # Q24 -- converted from a plain TEXT field to a validated multi-select on
+    # 2026-08-07 (see DIETARY_PREFERENCE_OPTIONS above). Every existing stored
+    # contact has this field as a literal JSON `null` (the old str|None default),
+    # which a bare `list[str]` annotation would reject outright on load -- the
+    # `mode="before"` validator below coerces that legacy null to `[]` so every
+    # pre-existing contact keeps loading correctly with zero data migration.
+    thesis_dietary_preferences: list[str] = Field(default_factory=list)
+    thesis_dietary_preferences_other: str | None = None  # free-text overflow for unrecognized values
     thesis_referral_emails: str | None = None  # Q25, raw text (not split/parsed)
 
     # --- Group 3: custom fields ---
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("thesis_dietary_preferences", mode="before")
+    @classmethod
+    def _coerce_legacy_null_dietary_preferences(cls, value: Any) -> Any:
+        """Every contact stored before the 2026-08-07 TEXT->list conversion has this
+        field as a literal `null` in its persisted JSON (the old str|None default).
+        Without this, loading any pre-existing contact would fail model validation
+        outright the moment the field becomes `list[str]`. Only coerces None --
+        anything else (a real list, or a bad value) is passed through unchanged so
+        Pydantic's normal type validation still catches genuine errors."""
+        return [] if value is None else value
 
 
 class CrmContactExportField(BaseModel):

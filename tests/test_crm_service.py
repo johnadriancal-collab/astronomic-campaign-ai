@@ -488,16 +488,16 @@ async def test_external_field_blank_incoming_never_erases_existing_value(service
 
 @pytest.mark.asyncio
 async def test_thesis_field_never_overwritten_when_existing_value_present(service):
-    contact = await service.create_contact({"thesis_dietary_preferences": "Vegetarian"})
-    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences": "Vegan"}, is_new=False)
-    assert merged.thesis_dietary_preferences == "Vegetarian"  # preserved, not silently replaced
+    contact = await service.create_contact({"thesis_referral_emails": "referred by Jane"})
+    merged = service.apply_import_mapping(contact, {"thesis_referral_emails": "referred by John"}, is_new=False)
+    assert merged.thesis_referral_emails == "referred by Jane"  # preserved, not silently replaced
 
 
 @pytest.mark.asyncio
 async def test_thesis_field_filled_in_when_currently_empty(service):
-    contact = await service.create_contact({"first_name": "Ada"})  # thesis_dietary_preferences unset
-    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences": "Vegan"}, is_new=False)
-    assert merged.thesis_dietary_preferences == "Vegan"
+    contact = await service.create_contact({"first_name": "Ada"})  # thesis_referral_emails unset
+    merged = service.apply_import_mapping(contact, {"thesis_referral_emails": "referred by John"}, is_new=False)
+    assert merged.thesis_referral_emails == "referred by John"
 
 
 @pytest.mark.asyncio
@@ -507,6 +507,69 @@ async def test_thesis_list_field_never_overwritten_when_existing_present(service
         contact, {"thesis_private_industries": ["SaaS / Software Infrastructure"]}, is_new=False
     )
     assert merged.thesis_private_industries == ["Biotech & Life Sciences"]
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_union_merges_instead_of_overwriting(service):
+    """2026-08-07 requirement: existing Vegetarian + new Gluten-Free = both, never one
+    replacing the other -- the exact example from the spec."""
+    contact = await service.create_contact({"thesis_dietary_preferences": ["Vegetarian"]})
+    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences": ["Gluten-Free"]}, is_new=False)
+    assert merged.thesis_dietary_preferences == ["Vegetarian", "Gluten-Free"]
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_union_merge_deduplicates_exact_repeats(service):
+    contact = await service.create_contact({"thesis_dietary_preferences": ["Vegetarian", "Gluten-Free"]})
+    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences": ["Gluten-Free"]}, is_new=False)
+    assert merged.thesis_dietary_preferences == ["Vegetarian", "Gluten-Free"]  # no duplicate added
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_filled_in_when_currently_empty(service):
+    contact = await service.create_contact({"first_name": "Ada"})  # thesis_dietary_preferences unset
+    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences": ["Vegan"]}, is_new=False)
+    assert merged.thesis_dietary_preferences == ["Vegan"]
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_never_loses_a_value_across_repeated_imports(service):
+    """Explicit spec requirement: never remove an existing dietary preference just
+    because a later CSV row doesn't repeat it."""
+    contact = await service.create_contact({"thesis_dietary_preferences": ["Vegetarian"]})
+    merged1 = service.apply_import_mapping(contact, {"thesis_dietary_preferences": ["Nut-Free"]}, is_new=False)
+    merged2 = service.apply_import_mapping(merged1, {"thesis_dietary_preferences": ["Alcohol-Free"]}, is_new=False)
+    assert merged2.thesis_dietary_preferences == ["Vegetarian", "Nut-Free", "Alcohol-Free"]
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_other_stores_first_unrecognized_value_directly(service):
+    contact = await service.create_contact({"first_name": "Ada"})  # thesis_dietary_preferences_other unset
+    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences_other": "Cayenne-Free"}, is_new=False)
+    assert merged.thesis_dietary_preferences_other == "Cayenne-Free"
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_other_appends_a_new_value_with_semicolon(service):
+    contact = await service.create_contact({"thesis_dietary_preferences_other": "Cayenne-Free"})
+    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences_other": "Beets-Free"}, is_new=False)
+    assert merged.thesis_dietary_preferences_other == "Cayenne-Free; Beets-Free"
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_other_does_not_duplicate_an_existing_value(service):
+    contact = await service.create_contact({"thesis_dietary_preferences_other": "Cayenne-Free; Beets-Free"})
+    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences_other": "Beets-Free"}, is_new=False)
+    assert merged.thesis_dietary_preferences_other == "Cayenne-Free; Beets-Free"  # unchanged, no duplicate
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_other_never_overwritten_by_a_completely_different_value(service):
+    """Appended, not replaced -- the existing value must always survive in the merged result."""
+    contact = await service.create_contact({"thesis_dietary_preferences_other": "Cayenne-Free"})
+    merged = service.apply_import_mapping(contact, {"thesis_dietary_preferences_other": "Arugula-Free"}, is_new=False)
+    assert "Cayenne-Free" in merged.thesis_dietary_preferences_other
+    assert "Arugula-Free" in merged.thesis_dietary_preferences_other
 
 
 @pytest.mark.asyncio

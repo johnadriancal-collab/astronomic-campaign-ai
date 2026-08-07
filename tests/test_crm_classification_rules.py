@@ -23,6 +23,7 @@ from app.services.crm_classification_rules import (
     classify_how_early_do_you_invest,
     classify_industry,
     classify_investor_mode,
+    classify_dietary_preferences,
     classify_legacy_thesis_columns,
     classify_revenue_stage,
     classify_role,
@@ -798,6 +799,80 @@ def test_how_early_do_you_invest_missing_column_produces_no_keys():
     assert result == {}
 
 
+# --- classify_dietary_preferences (2026-08-07 design) ---
+
+
+def test_dietary_preferences_all_recognized_values_pass_through():
+    row = {"Dietary Preferences": "Vegetarian;Gluten-Free"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result == {"thesis_dietary_preferences": ["Vegetarian", "Gluten-Free"]}
+    assert "thesis_dietary_preferences_other" not in result
+
+
+def test_dietary_preferences_deduplicates_within_one_row():
+    row = {"Dietary Preferences": "Vegetarian;Vegetarian;Gluten-Free"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result["thesis_dietary_preferences"] == ["Vegetarian", "Gluten-Free"]
+
+
+def test_dietary_preferences_literal_none_and_other_are_recognized_not_overflow():
+    """None and Other are themselves valid options here, not fallback sentinels --
+    a literal 'None' or 'Other' token must never be treated as unrecognized text."""
+    row = {"Dietary Preferences": "None"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result == {"thesis_dietary_preferences": ["None"]}
+
+    row2 = {"Dietary Preferences": "Other"}
+    result2 = classify_dietary_preferences(row2, NO_CONTEXT)
+    assert result2 == {"thesis_dietary_preferences": ["Other"]}
+
+
+def test_dietary_preferences_unrecognized_value_adds_other_and_preserves_raw_text():
+    row = {"Dietary Preferences": "Vegetarian;Cayenne-Free"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result["thesis_dietary_preferences"] == ["Vegetarian", "Other"]
+    assert result["thesis_dietary_preferences_other"] == "Cayenne-Free"
+
+
+def test_dietary_preferences_all_unrecognized_still_adds_other():
+    row = {"Dietary Preferences": "Cayenne-Free;Arugula-Free"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result["thesis_dietary_preferences"] == ["Other"]
+    assert result["thesis_dietary_preferences_other"] == "Cayenne-Free; Arugula-Free"
+
+
+def test_dietary_preferences_multiple_unrecognized_values_all_preserved():
+    """Never lose a value just because more than one unrecognized token is present."""
+    row = {"Dietary Preferences": "Pineapple-Free;Coconut-Free;No Banana"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result["thesis_dietary_preferences_other"] == "Pineapple-Free; Coconut-Free; No Banana"
+
+
+def test_dietary_preferences_does_not_add_other_twice_if_literally_present():
+    row = {"Dietary Preferences": "Other;Cayenne-Free"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result["thesis_dietary_preferences"] == ["Other"]  # not ["Other", "Other"]
+    assert result["thesis_dietary_preferences_other"] == "Cayenne-Free"
+
+
+def test_dietary_preferences_reads_from_dietary_restrictions_header_alias_too():
+    row = {"Dietary Restrictions": "Vegan"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result == {"thesis_dietary_preferences": ["Vegan"]}
+
+
+def test_dietary_preferences_missing_column_produces_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_dietary_preferences_empty_column_produces_no_keys():
+    row = {"Dietary Preferences": ""}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result == {}
+
+
 # --- registry / integration ---
 
 
@@ -823,6 +898,7 @@ def test_apply_classification_rules_runs_the_full_registry():
         "Investing in these business models:": "Marketplaces",
         "Would like to meet founders by": "Email intro",
         "How early do you invest?": "Great team, no revenue",
+        "Dietary Preferences": "Vegetarian;Cayenne-Free",
     }
     full_context = {
         **ROLE_CONTEXT, **CHRIS_DEGREE_CONTEXT, **AGE_RANGE_CONTEXT, **GENDER_CONTEXT, **ENGAGEMENT_STAGE_CONTEXT,
@@ -849,6 +925,8 @@ def test_apply_classification_rules_runs_the_full_registry():
     assert result["thesis_private_business_models"] == ["Marketplaces (e.g., Airbnb, Uber-style platforms)"]
     assert result["thesis_private_meeting_preferences"] == ["In an email intro"]
     assert result["custom:how_early_do_you_invest"] == ["Great team, no revenue"]
+    assert result["thesis_dietary_preferences"] == ["Vegetarian", "Other"]
+    assert result["thesis_dietary_preferences_other"] == "Cayenne-Free"
     assert "funding_stage" not in result  # the exact collision this fix prevents
 
 

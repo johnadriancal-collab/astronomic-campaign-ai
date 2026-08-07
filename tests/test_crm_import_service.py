@@ -1568,3 +1568,99 @@ async def test_check_size_import_never_touches_deprecated_thesis_fields_even_whe
     assert updated.thesis_private_check_sizes == ["$1M - $2M"]  # untouched, not deleted
     assert updated.thesis_institutional_check_sizes == ["$10M+"]  # untouched, not deleted
     assert updated.custom_fields["check_size_personal"] == ["$25k - $50k"]  # new data lands only here
+
+
+# --- 2026-08-07 Dietary Preferences: TEXT -> validated MULTI_SELECT via a real import ---
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_semicolon_split_end_to_end(import_service):
+    batch = await import_service.upload(
+        "future.csv", csv_bytes('Email,Dietary Preferences\nnova@example.com,"Vegetarian;Gluten-Free"\n'),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_dietary_preferences == ["Vegetarian", "Gluten-Free"]
+    assert contact.thesis_dietary_preferences_other is None
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_unrecognized_value_lands_in_other_end_to_end(import_service):
+    batch = await import_service.upload(
+        "future.csv", csv_bytes('Email,Dietary Preferences\nnova@example.com,"Vegetarian;Cayenne-Free"\n'),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_dietary_preferences == ["Vegetarian", "Other"]
+    assert contact.thesis_dietary_preferences_other == "Cayenne-Free"
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_union_merges_across_two_separate_imports(import_service):
+    """The exact spec example: existing Vegetarian + a later CSV's Gluten-Free = both,
+    never one replacing the other, across two genuinely separate upload/preview/commit
+    cycles (not the same batch)."""
+    batch1 = await import_service.upload(
+        "first.csv", csv_bytes("Email,Dietary Preferences\nnova@example.com,Vegetarian\n"),
+    )
+    await import_service.preview(batch1.import_batch_id, suggest_mapping(batch1.headers))
+    await import_service.commit(batch1.import_batch_id)
+
+    batch2 = await import_service.upload(
+        "second.csv", csv_bytes("Email,Dietary Preferences\nnova@example.com,Gluten-Free\n"),
+    )
+    await import_service.preview(batch2.import_batch_id, suggest_mapping(batch2.headers))
+    report2 = await import_service.commit(batch2.import_batch_id)
+
+    assert report2.updated == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_dietary_preferences == ["Vegetarian", "Gluten-Free"]
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_reimport_does_not_duplicate_or_lose_values(import_service):
+    """Idempotency at the field level: re-importing the exact same row a second time
+    must not duplicate an already-present value or drop anything."""
+    for _ in range(2):
+        batch = await import_service.upload(
+            "future.csv", csv_bytes("Email,Dietary Preferences\nnova@example.com,Vegetarian;Gluten-Free\n"),
+        )
+        await import_service.preview(batch.import_batch_id, suggest_mapping(batch.headers))
+        await import_service.commit(batch.import_batch_id)
+
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.thesis_dietary_preferences == ["Vegetarian", "Gluten-Free"]  # unchanged, not doubled
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_other_field_appears_in_export_fields():
+    from app.models.crm import get_contact_export_fields
+
+    fields_by_key = {f.key: f.kind for f in get_contact_export_fields()}
+    assert fields_by_key["thesis_dietary_preferences"] == "list"
+    assert fields_by_key["thesis_dietary_preferences_other"] == "scalar"
+
+
+@pytest.mark.asyncio
+async def test_dietary_preferences_never_overwrites_a_prior_contacts_value_with_a_new_contacts_row(import_service):
+    """Sanity check that the new union-merge behavior is scoped per-contact --
+    a brand-new contact's row must never affect an unrelated existing contact."""
+    await import_service.crm_service.create_contact({
+        "email": "existing@example.com", "thesis_dietary_preferences": ["Halal"],
+    })
+    batch = await import_service.upload(
+        "future.csv", csv_bytes("Email,Dietary Preferences\nnova@example.com,Vegan\n"),
+    )
+    await import_service.preview(batch.import_batch_id, suggest_mapping(batch.headers))
+    await import_service.commit(batch.import_batch_id)
+
+    contacts = {c.email: c for c in (await import_service.crm_service.list_contacts()).items}
+    assert contacts["existing@example.com"].thesis_dietary_preferences == ["Halal"]
+    assert contacts["nova@example.com"].thesis_dietary_preferences == ["Vegan"]

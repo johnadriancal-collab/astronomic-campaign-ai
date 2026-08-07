@@ -103,10 +103,13 @@ def test_list_value_passed_through_unwrapped():
     assert changed == ["investing_asset_types"]
 
 
-def test_dietary_restrictions_migrates_into_dietary_preferences_scalar_field():
+def test_dietary_restrictions_migrates_into_dietary_preferences_list_field():
+    """2026-08-07: thesis_dietary_preferences converted from TEXT to list[str] --
+    the old scalar custom_fields value gets wrapped in a single-item list (is_list=True),
+    same as every other DIRECT_DUPLICATE_MIGRATIONS entry."""
     contact = make_contact(custom_fields={"dietary_restrictions": "Vegetarian"})
     migrated, changed = migrate_contact_legacy_fields(contact)
-    assert migrated.thesis_dietary_preferences == "Vegetarian"
+    assert migrated.thesis_dietary_preferences == ["Vegetarian"]
     assert changed == ["dietary_restrictions"]
 
 
@@ -189,8 +192,8 @@ async def test_migrate_all_contacts_only_saves_contacts_that_actually_changed(se
     report = await migrate_all_contacts(service.contact_store)
     assert report == {"contacts_scanned": 2, "contacts_updated": 1, "fields_migrated": 1}
 
-    assert (await service.get_contact(a.crm_contact_id)).thesis_dietary_preferences is None
-    assert (await service.get_contact(b.crm_contact_id)).thesis_dietary_preferences == "Vegan"
+    assert (await service.get_contact(a.crm_contact_id)).thesis_dietary_preferences == []
+    assert (await service.get_contact(b.crm_contact_id)).thesis_dietary_preferences == ["Vegan"]
 
 
 @pytest.mark.asyncio
@@ -608,13 +611,13 @@ def test_repair_does_not_touch_other_fields():
         first_name="Ada", company="Acme",
         custom_fields={"investor_type": ["Private Equity, Venture Capital"], "gender": "Female"},
         source_snapshot={"Investor type": "Private Equity, Venture Capital"},
-        thesis_dietary_preferences="Vegan",
+        thesis_dietary_preferences=["Vegan"],
     )
     updated, _ = repair_contact_comma_delimited_fields(contact)
     assert updated.first_name == "Ada"
     assert updated.company == "Acme"
     assert updated.custom_fields["gender"] == "Female"  # sibling custom field untouched
-    assert updated.thesis_dietary_preferences == "Vegan"
+    assert updated.thesis_dietary_preferences == ["Vegan"]
 
 
 def test_repair_handles_both_fields_on_one_contact():

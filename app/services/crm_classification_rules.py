@@ -457,6 +457,56 @@ def classify_how_early_do_you_invest(raw_row: dict[str, str], context: dict[str,
     return {"custom:how_early_do_you_invest": tokens} if tokens else {}
 
 
+def classify_dietary_preferences(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    thesis_dietary_preferences (core field, list[str]) <- CSV `Dietary
+    Preferences`/`Dietary Restrictions`, semicolon-split (this codebase's
+    established multi-value CSV delimiter -- see module docstring in
+    crm_import_service.py). Each token is validated against
+    DIETARY_PREFERENCE_OPTIONS (app/models/crm.py); "None" and "Other" are
+    themselves valid recognized options here, not fallback sentinels, so a
+    literal "None" or "Other" token is kept as-is, never treated as
+    unrecognized overflow.
+
+    Unlike every validated-single-select rule above (which silently drops
+    an unrecognized value), an unrecognized token here is NEVER dropped:
+    "Other" is added to the recognized list (if not already present), and
+    the raw unrecognized text is preserved verbatim in
+    thesis_dietary_preferences_other -- deliberately different from Check
+    Size's silent-drop policy, since this field's whole design intent is
+    that nothing typed by a real prospect disappears. This function only
+    resolves what THIS row contributes; cross-import accumulation (never
+    losing a value from an earlier import, never duplicating an already-
+    stored "Other" value) is handled separately by
+    UNION_MERGE_THESIS_LIST_FIELDS/UNION_MERGE_DELIMITED_TEXT_FIELDS in
+    crm_service.py's apply_import_mapping.
+
+    No live options lookup needed (unlike Chris Degree Connection/Age
+    Range/etc.) -- DIETARY_PREFERENCE_OPTIONS is a hardcoded core-model
+    constant, not a custom field definition fetched from the DB.
+    """
+    from app.models.crm import DIETARY_PREFERENCE_OPTIONS  # local import, same rationale as classify_investor_mode
+
+    raw = _find_column(raw_row, "Dietary Preferences", "Dietary Restrictions")
+    if not raw:
+        return {}
+
+    options = set(DIETARY_PREFERENCE_OPTIONS)
+    tokens = [t.strip() for t in raw.split(";") if t.strip()]
+    recognized = _ordered_dedup([t for t in tokens if t in options])
+    unrecognized = _ordered_dedup([t for t in tokens if t not in options])
+
+    if not unrecognized:
+        return {"thesis_dietary_preferences": recognized} if recognized else {}
+
+    if "Other" not in recognized:
+        recognized = recognized + ["Other"]
+    return {
+        "thesis_dietary_preferences": recognized,
+        "thesis_dietary_preferences_other": "; ".join(unrecognized),
+    }
+
+
 # Registry of independent classification rules. Each is applied to every
 # imported row, in order; later rules win on key collision (none currently
 # collide). Add new rules here -- see module docstring.
@@ -475,6 +525,7 @@ CLASSIFICATION_RULES: list[Classifier] = [
     classify_revenue_stage,
     classify_legacy_thesis_columns,
     classify_how_early_do_you_invest,
+    classify_dietary_preferences,
 ]
 
 

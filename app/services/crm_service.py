@@ -51,6 +51,39 @@ from app.repositories.crm_custom_field_store import (
 
 CUSTOM_FIELD_PREFIX = "custom:"
 
+# 2026-08-07 Dietary Preferences design -- opt-in exception to the fill-only merge
+# rule above, for core thesis fields specifically. Every other thesis field (Asset
+# Types, Business Models, ...) keeps the fill-only behavior verbatim; only fields
+# named here get the same union-merge treatment custom multi-selects already have,
+# so a later CSV can add a newly-disclosed restriction without ever dropping one a
+# contact already had. Deliberately a separate, explicitly-named set rather than a
+# rewrite of the shared merge rule -- same "one small named set governs one specific
+# behavior" pattern as LIST_FIELD_NAMES/BOOLEAN_FIELD_NAMES in crm_import_service.py.
+UNION_MERGE_THESIS_LIST_FIELDS = frozenset({"thesis_dietary_preferences"})
+
+# Companion free-text "overflow" fields that behave like a delimited SET of raw
+# strings rather than a single opaque value: a new unrecognized value is appended
+# (deduplicated) rather than only filled in from empty or replaced outright.
+UNION_MERGE_DELIMITED_TEXT_FIELDS = frozenset({"thesis_dietary_preferences_other"})
+DELIMITED_TEXT_SEPARATOR = "; "
+
+
+def _union_merge_list(existing: list[str], incoming: list[str]) -> list[str]:
+    """Order-preserving, deduplicated list union -- the exact logic
+    `_apply_custom_field` already uses for multi-select custom fields, extracted
+    here so both call sites share one implementation instead of two copies."""
+    return existing + [v for v in incoming if v not in existing]
+
+
+def _union_merge_delimited_text(existing: str | None, incoming: str, separator: str = DELIMITED_TEXT_SEPARATOR) -> str:
+    """Same union-merge idea as `_union_merge_list`, but for a scalar TEXT field that
+    represents a delimited set of raw strings (e.g. thesis_dietary_preferences_other)
+    rather than a real list field. An existing value is never removed or overwritten;
+    a new value already present (by exact string match) is never duplicated."""
+    existing_tokens = [t.strip() for t in (existing or "").split(separator) if t.strip()]
+    incoming_tokens = [t.strip() for t in incoming.split(separator) if t.strip()]
+    return separator.join(_union_merge_list(existing_tokens, incoming_tokens))
+
 
 def _is_empty(value: Any) -> bool:
     """None, "", [], {} count as empty. False and 0 do NOT -- they're real answers."""
@@ -474,6 +507,23 @@ class CrmService:
                     updates[field_name] = incoming_value
                 continue
 
+            # thesis_dietary_preferences (and its _other companion) are the one
+            # exception to "fill only when empty" -- see UNION_MERGE_THESIS_LIST_FIELDS
+            # above. Checked before the generic rule so every other thesis/external
+            # field's fill-only behavior is completely unaffected.
+            if field_name in UNION_MERGE_THESIS_LIST_FIELDS and isinstance(incoming_value, list):
+                current_list = getattr(contact, field_name) or []
+                merged_list = _union_merge_list(current_list, incoming_value)
+                if merged_list != current_list:
+                    updates[field_name] = merged_list
+                continue
+            if field_name in UNION_MERGE_DELIMITED_TEXT_FIELDS and isinstance(incoming_value, str):
+                current_text = getattr(contact, field_name)
+                merged_text = _union_merge_delimited_text(current_text, incoming_value)
+                if merged_text != (current_text or ""):
+                    updates[field_name] = merged_text
+                continue
+
             # External AND thesis fields alike -- never overwrite an existing value,
             # whether the incoming value is blank or a genuinely different one. See
             # this module's docstring for why external fields no longer get the old
@@ -517,7 +567,7 @@ class CrmService:
 
         if isinstance(incoming_value, list):
             existing_list = current if isinstance(current, list) else []
-            merged = existing_list + [v for v in incoming_value if v not in existing_list]
+            merged = _union_merge_list(existing_list, incoming_value)
             if merged != existing_list:
                 updates["custom_fields"] = {**base, field_key: merged}
             return

@@ -106,8 +106,8 @@ def test_q1_through_q4_are_not_duplicated_as_thesis_fields():
 def test_dietary_preference_is_a_thesis_field_not_duplicated_as_a_seed_custom_field():
     """Q24 of the real form -- lives on the model, not pre-seeded as a custom field."""
     now = datetime.now(timezone.utc)
-    contact = CrmContact(crm_contact_id="c1", created_at=now, updated_at=now, thesis_dietary_preferences="Vegan")
-    assert contact.thesis_dietary_preferences == "Vegan"
+    contact = CrmContact(crm_contact_id="c1", created_at=now, updated_at=now, thesis_dietary_preferences=["Vegan"])
+    assert contact.thesis_dietary_preferences == ["Vegan"]
 
 
 def test_no_custom_fields_are_pre_seeded():

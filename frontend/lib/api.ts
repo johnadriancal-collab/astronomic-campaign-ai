@@ -489,7 +489,8 @@ export interface CrmContact {
   thesis_institutional_demographic_preferences_other: string | null;
   thesis_institutional_other_criteria: string | null;
 
-  thesis_dietary_preferences: string | null;
+  thesis_dietary_preferences: string[];
+  thesis_dietary_preferences_other: string | null;
   thesis_referral_emails: string | null;
 
   custom_fields: Record<string, unknown>;

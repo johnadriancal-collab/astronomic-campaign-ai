@@ -20,7 +20,7 @@ import {
   type CrmContact,
   type CrmCustomFieldDefinition,
 } from "@/lib/api";
-import { INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
+import { DIETARY_PREFERENCE_OPTIONS, INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
 import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
 
 const CORE_TEXT_FIELDS: [keyof CrmContact, string][] = [
@@ -488,7 +488,19 @@ export default function CrmContactDetailPage() {
               <AccordionItem value="additional">
                 <AccordionTrigger>Additional Information</AccordionTrigger>
                 <AccordionPanel className="space-y-4">
-                  <TextField label="Dietary preferences" value={contact.thesis_dietary_preferences ?? ""} onChange={(v) => set("thesis_dietary_preferences", v)} />
+                  <div className="space-y-2">
+                    <MultiSelect
+                      label="Dietary preferences"
+                      options={DIETARY_PREFERENCE_OPTIONS}
+                      selected={contact.thesis_dietary_preferences ?? []}
+                      onChange={(v) => set("thesis_dietary_preferences", v)}
+                    />
+                    <Input
+                      placeholder="Other (free text)"
+                      value={contact.thesis_dietary_preferences_other ?? ""}
+                      onChange={(e) => set("thesis_dietary_preferences_other", e.target.value)}
+                    />
+                  </div>
                   <div className="space-y-1">
                     <label className="text-xs font-medium text-muted-foreground">Referral emails (other investor-friends to invite)</label>
                     <Textarea value={contact.thesis_referral_emails ?? ""} onChange={(e) => set("thesis_referral_emails", e.target.value)} />

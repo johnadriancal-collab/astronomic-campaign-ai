@@ -229,7 +229,11 @@ DIRECT_DUPLICATE_MIGRATIONS: dict[str, tuple[str, bool]] = {
     "investing_business_models": ("thesis_private_business_models", True),
     "founder_diversity_preference": ("thesis_private_demographic_preferences", True),
     "would_like_to_meet_founders_by": ("thesis_private_meeting_preferences", True),
-    "dietary_restrictions": ("thesis_dietary_preferences", False),
+    # is_list flipped True on 2026-08-07 when thesis_dietary_preferences converted from
+    # TEXT to list[str] -- confirmed via full historical backup audit that this old key
+    # has never actually held data on any contact, so this is a correctness fix with no
+    # real-world migration behavior to change, not a live bugfix.
+    "dietary_restrictions": ("thesis_dietary_preferences", True),
 }
 
 # --- CSV-import-specific: legacy (abbreviated) -> canonical Investor Thesis Form text.

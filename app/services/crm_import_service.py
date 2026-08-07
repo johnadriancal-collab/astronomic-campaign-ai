@@ -45,6 +45,10 @@ LIST_FIELD_NAMES = frozenset(
         "thesis_institutional_asset_types", "thesis_institutional_business_models", "thesis_institutional_industries",
         "thesis_institutional_deal_stages", "thesis_institutional_meeting_preferences",
         "thesis_institutional_demographic_preferences",
+        # thesis_dietary_preferences: classify_dietary_preferences (crm_classification_rules.py)
+        # is the authoritative path (validates against DIETARY_PREFERENCE_OPTIONS and always
+        # wins), but this entry keeps the plain column-mapping coercion path consistent too.
+        "thesis_dietary_preferences",
     }
 )
 

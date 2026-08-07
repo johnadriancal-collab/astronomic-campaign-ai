@@ -120,6 +120,17 @@ export const DEMOGRAPHIC_PREFERENCE_OPTIONS = [
 
 export const INVESTOR_MODE_OPTIONS = ["Privately", "Institutionally", "Both"];
 
+// Mirrors DIETARY_PREFERENCE_OPTIONS in app/models/crm.py exactly (29 dietary
+// options + None + Other = 31 total).
+export const DIETARY_PREFERENCE_OPTIONS = [
+  "Vegetarian", "Vegan", "Pescatarian", "Pollotarian", "Paleo", "Keto", "Low Carb",
+  "Halal", "Kosher", "Gluten-Free", "Dairy-Free", "Lactose-Free", "Nut-Free",
+  "Soy-Free", "Egg-Free", "Pork-Free", "Beef-Free", "Shellfish-Free", "Fish-Free",
+  "Seafood-Free", "Alcohol-Free", "Sugar-Free", "No Spicy Food", "Wheat-Free",
+  "Mollusks-Free", "Grain-Free", "Corn-Free", "MSG-Free", "Seed Oil-Free",
+  "None", "Other",
+];
+
 export interface ThesisSectionField {
   key: string; // suffix, e.g. "asset_types" -> thesis_private_asset_types / thesis_institutional_asset_types
   label: string;

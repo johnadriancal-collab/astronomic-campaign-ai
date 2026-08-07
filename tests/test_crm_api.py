@@ -169,7 +169,7 @@ def test_reconcile_legacy_fields_route_seeds_and_migrates(test_client):
     assert report["contacts_updated"] == 1
 
     contacts = test_client.get("/crm/contacts").json()["items"]
-    assert contacts[0]["thesis_dietary_preferences"] == "Vegan"
+    assert contacts[0]["thesis_dietary_preferences"] == ["Vegan"]
 
 
 def test_translate_legacy_values_route(test_client):
