@@ -36,6 +36,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from app.api.astro import router as astro_router
 from app.api.campaign import router as campaign_router
 from app.api.crm import router as crm_router
 from app.api.leads import router as leads_router
@@ -144,6 +145,7 @@ app.include_router(campaign_router)
 app.include_router(leads_router)
 app.include_router(sync_router)
 app.include_router(crm_router)
+app.include_router(astro_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
