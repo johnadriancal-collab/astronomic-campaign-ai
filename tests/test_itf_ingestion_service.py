@@ -272,6 +272,25 @@ async def test_unmapped_expected_question_is_reported_as_a_warning(itf_service):
     assert any("Which city/cities do you live in or frequent?" in w for w in result.warnings)
 
 
+@pytest.mark.asyncio
+async def test_unmapped_checklist_alias_is_reported_as_a_warning(itf_service):
+    """Regression coverage for requirement #6 of the demographic-preferences bug
+    fix: if a checklist alias (crm_classification_rules.thesis_checklist_aliases())
+    doesn't match any real header, that must surface as a warning -- this is
+    exactly the diagnostic that was missing when the broken demographic-
+    preferences aliases silently produced a missing private field and a
+    contaminated institutional field with zero warnings at all."""
+    headers = REAL_HEADERS.copy()
+    headers[13] = "Some completely different question wording"  # was the demographic-preferences private column
+    values = list(REAL_VALUES)
+
+    result = await itf_service.process_submission(headers, values, row_number=2, dry_run=True)
+    assert any(
+        "Do you have demographic preferences for the people whose companies you invest in?" in w
+        for w in result.warnings
+    )
+
+
 # --- full real-row regression: exact 26-column header set audited 2026-08-11 ---
 # Identity fields are synthetic (never the real respondent's actual PII); every
 # header string and every answer VALUE below is the real, audit-verified text --
@@ -291,7 +310,7 @@ REAL_HEADERS = [
     "Which size investments are you open to making?",
     "During which deal stages are you open to investing?",
     "How would you like to meet fundraisers?",
-    "Do you have any demographic preferences for the people whose companies you invest in?",
+    "Do you have demographic preferences for the people whose companies you invest in?",
     "Do you have any other criteria or feedback?",
     "Do you also invest institutionally (via a fund)?",
     "Which types of assets do you invest in or are you interested in?",  # Q, institutional dup
@@ -300,7 +319,7 @@ REAL_HEADERS = [
     "Which size investments are you open to making?",  # T, institutional dup
     "During which deal stages are you open to investing?",  # U, institutional dup
     "How would you like to meet fundraisers?",  # V, institutional dup
-    "Do you have demographic preferences for the people whose companies you invest in?",  # W, NOT a dup of N
+    "Do you have demographic preferences for the people whose companies you invest in?",  # W, institutional dup of N
     "Do you have any other criteria or feedback?",  # X, institutional dup
     "Do you have dietary preferences?",
     "Want us to invite/include other investor-friends? If so, enter their email(s) here.",
@@ -320,7 +339,8 @@ REAL_VALUES = row(
     "$1k - $10k, $10k - $25k, $25k - $50k, $50k - $100k",
     "Friends & Family (idea or concept stage, often pre-incorporation)",
     "In an email intro, I'd do a Zoom call",
-    "I'm open to investing in anyone, I prefer female fundraisers, I prefer male fundraisers, I prefer black fundraisers",
+    "I'm open to investing in anyone, I prefer female fundraisers, I prefer male fundraisers, "
+    "I prefer black fundraisers, I prefer Latino fundraisers",
     "",
     "Yes",
     "Carbon credits / ESG investments, Collectibles (e.g., art, wine, watches)",
@@ -363,7 +383,7 @@ async def test_full_real_row_dry_run_maps_every_column_with_no_warnings(itf_serv
     assert mapped["thesis_private_meeting_preferences"] == ["In an email intro", "I'd do a Zoom call"]
     assert mapped["thesis_private_demographic_preferences"] == [
         "I'm open to investing in anyone", "I prefer female fundraisers",
-        "I prefer male fundraisers", "I prefer black fundraisers",
+        "I prefer male fundraisers", "I prefer black fundraisers", "I prefer Latino fundraisers",
     ]
 
     # Institutional section (Q-W) -- triggered by P='Yes', verified independently from private
@@ -374,7 +394,8 @@ async def test_full_real_row_dry_run_maps_every_column_with_no_warnings(itf_serv
     assert mapped["thesis_institutional_industries"] == ["Creative Industries (Media, Music, Photo, etc.)", "Cybersecurity"]
     assert mapped["thesis_institutional_deal_stages"] == ["Growth Equity (post-Series B+, but still private)"]
     assert mapped["thesis_institutional_meeting_preferences"] == ["I'd host a dinner at my house"]
-    # W is NOT a duplicate of N -- verified as its own distinct, correctly-mapped field
+    # W IS a duplicate of N (both byte-identical, auto-suffixed by _disambiguate_headers) --
+    # verified independently mapped from the private column, not overwritten by/overwriting it
     assert mapped["thesis_institutional_demographic_preferences"] == [
         "I'm open to investing in anyone", "I prefer female fundraisers",
     ]

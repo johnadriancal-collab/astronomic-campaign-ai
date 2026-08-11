@@ -552,27 +552,30 @@ def classify_dietary_preferences(raw_row: dict[str, str], context: dict[str, Any
 
 
 # 2026-08-10 ITF intake design, header wording verified 2026-08-11 against the real
-# Sheet (live read-only audit of all 26 columns) -- the six private/institutional
-# checklist question pairs from the real Investor Thesis Google Form. Section 2
-# (private) and Section 3 (institutional) ask most of these with IDENTICAL wording,
-# so the Sheet has two columns sharing the same header text per question -- a plain
+# Sheet (live read-only audit of all 26 columns), and CORRECTED 2026-08-12 against a
+# real dry-run's actual source_snapshot -- the six private/institutional checklist
+# question pairs from the real Investor Thesis Google Form. Section 2 (private) and
+# Section 3 (institutional) ask ALL SIX of these with IDENTICAL wording, so the Sheet
+# has two columns sharing the same header text per question -- a plain
 # dict[str, str] raw_row can't hold both under that shared name. The ITF row-builder
 # (app/services/itf_ingestion_service.py's _disambiguate_headers) resolves this by
 # appending " (Institutional)" to the SECOND occurrence of an exact-duplicate header
 # text -- the exact same convention classify_check_size above already uses for
-# "Check Size" / "Check Size (Institutional)". Confirmed real exact duplicates: asset
-# types, business models, industries, deal stages, meeting preferences.
+# "Check Size" / "Check Size (Institutional)".
 #
-# Demographic preferences is the one exception, confirmed NOT a byte-identical
-# duplicate: the private question asks "...do you have ANY demographic
-# preferences..."; the institutional one drops "any". Since the two header strings
-# already differ, _disambiguate_headers never touches either one -- both survive as
-# their own natural dict keys with no suffix. Each spec therefore carries its own
-# explicit `private_alias`/`institutional_alias` rather than deriving the second from
-# the first; for the five true duplicates these two values are intentionally
-# `alias` and `f"{alias} (Institutional)"`, but demographic preferences needed its
-# own real institutional string instead. This rule is a no-op for ordinary CSV
-# imports, whose headers never happen to match this wording.
+# CORRECTION: demographic preferences was previously believed to NOT be a
+# byte-identical duplicate (an earlier manual, screenshot-based Sheet read
+# transcribed the private question as containing the word "any" that the
+# institutional one supposedly lacked). A real dry run's source_snapshot proved
+# that reading wrong -- both questions are in fact byte-identical, exactly like the
+# other five. The bug this caused: the hardcoded "institutional_alias" (lacking the
+# " (Institutional)" suffix) collided with the PRIVATE column's real, unsuffixed key,
+# so institutional_demographic_preferences silently received the PRIVATE column's
+# values while thesis_private_demographic_preferences was never set at all -- a
+# real submission's institutional preferences were completely unrecoverable this
+# way. All six specs now use the identical alias/f"{alias} (Institutional)" pattern;
+# none are hand-carried exceptions anymore. See thesis_checklist_aliases() below,
+# used by itf_ingestion_service.py to warn on exactly this class of mismatch.
 _THESIS_CHECKLIST_SPECS: list[dict[str, Any]] = [
     {
         "private_alias": "Which types of assets do you invest in or are you interested in?",
@@ -620,8 +623,8 @@ _THESIS_CHECKLIST_SPECS: list[dict[str, Any]] = [
         "institutional_other_target": "thesis_institutional_meeting_preferences_other",
     },
     {
-        "private_alias": "Do you have any demographic preferences for the people whose companies you invest in?",
-        "institutional_alias": "Do you have demographic preferences for the people whose companies you invest in?",
+        "private_alias": "Do you have demographic preferences for the people whose companies you invest in?",
+        "institutional_alias": "Do you have demographic preferences for the people whose companies you invest in? (Institutional)",
         "options_name": "DEMOGRAPHIC_PREFERENCE_OPTIONS",
         "private_target": "thesis_private_demographic_preferences",
         "private_other_target": "thesis_private_demographic_preferences_other",
@@ -660,6 +663,24 @@ def classify_thesis_checklist_fields(raw_row: dict[str, str], context: dict[str,
             if leftover:
                 result[other_key] = leftover
     return result
+
+
+def thesis_checklist_aliases() -> list[str]:
+    """
+    Every private/institutional alias string declared in
+    _THESIS_CHECKLIST_SPECS, flattened -- the public accessor other modules
+    (app/services/itf_ingestion_service.py) use to check "did this alias
+    actually match a real header?" without reaching into the private spec
+    list directly. Exists specifically so a future header-wording mismatch
+    (the exact bug this function was added to help catch) shows up as a
+    warning instead of silently producing wrong or missing data -- see
+    itf_ingestion_service.py's `warnings` construction.
+    """
+    aliases: list[str] = []
+    for spec in _THESIS_CHECKLIST_SPECS:
+        aliases.append(spec["private_alias"])
+        aliases.append(spec["institutional_alias"])
+    return aliases
 
 
 # Registry of independent classification rules. Each is applied to every

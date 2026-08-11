@@ -60,7 +60,11 @@ from typing import Any
 from app.models.crm import CrmImportRowStatus, CustomFieldType
 from app.models.itf import ItfIngestionLogEntry, ItfRowStatus, ItfWebhookResult
 from app.repositories.itf_ingestion_log_store import ItfIngestionLogStore
-from app.services.crm_classification_rules import _normalize_header, build_classification_context
+from app.services.crm_classification_rules import (
+    _normalize_header,
+    build_classification_context,
+    thesis_checklist_aliases,
+)
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmDuplicateFieldKeyError
 
@@ -280,15 +284,33 @@ class ItfIngestionService:
         else:
             warnings.append(f"Timestamp value not recognized -- {ITF_SUBMITTED_AT_FIELD_KEY} left unset")
 
+        normalized_real_headers = {_normalize_header(h) for h in disambiguated_headers}
         unmapped = [
-            alias
-            for alias in _SCALAR_COLUMN_ALIASES
-            if _normalize_header(alias) not in {_normalize_header(h) for h in disambiguated_headers}
+            alias for alias in _SCALAR_COLUMN_ALIASES if _normalize_header(alias) not in normalized_real_headers
         ]
         if unmapped:
             warnings.append(
                 "No matching column found for expected question(s) -- verify exact wording against "
                 f"the real header row: {', '.join(unmapped)}"
+            )
+
+        # Same check for the checklist-field aliases (asset types, business models,
+        # deal stages, meeting/demographic preferences, ...) -- these live in
+        # crm_classification_rules.py, not _SCALAR_COLUMN_ALIASES, so without this
+        # they'd silently produce missing/misplaced fields with zero warning at all.
+        # This is exactly the class of bug a wrong private/institutional alias pair
+        # caused for demographic preferences (fixed 2026-08-12): the institutional
+        # alias collided with the private column's real key, so institutional data
+        # silently overwrote private data and the private target was left unset --
+        # with no warning to catch it. This check exists so that never happens again
+        # unnoticed.
+        unmapped_checklist = [
+            alias for alias in thesis_checklist_aliases() if _normalize_header(alias) not in normalized_real_headers
+        ]
+        if unmapped_checklist:
+            warnings.append(
+                "No matching column found for expected checklist question(s) -- verify exact "
+                f"wording against the real header row: {', '.join(unmapped_checklist)}"
             )
 
         now = datetime.now(timezone.utc)

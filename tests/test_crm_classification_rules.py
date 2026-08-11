@@ -29,6 +29,7 @@ from app.services.crm_classification_rules import (
     classify_revenue_stage,
     classify_role,
     classify_thesis_checklist_fields,
+    thesis_checklist_aliases,
 )
 
 NO_CONTEXT: dict = {}
@@ -1080,21 +1081,62 @@ def test_classify_thesis_checklist_fields_deal_stage_pair():
     ]
 
 
-def test_classify_thesis_checklist_fields_demographic_preferences_private_and_institutional_are_not_byte_identical():
-    """Verified 2026-08-11 against the real Sheet: the institutional wording drops
-    the word 'any' -- these two headers never collide in _disambiguate_headers at
-    all, so each needs its own explicit alias rather than an auto-derived suffix."""
+def test_classify_thesis_checklist_fields_demographic_preferences_are_byte_identical_and_split_independently():
+    """CORRECTED 2026-08-12: an earlier manual/screenshot Sheet read wrongly concluded
+    the institutional wording dropped the word 'any', so the two headers were believed
+    to never collide in _disambiguate_headers. A real dry run's source_snapshot proved
+    both questions are in fact byte-identical -- the private column's raw_row key has
+    no suffix, and the institutional column's key gets the auto-appended
+    " (Institutional)" suffix, exactly like the other five checklist fields. This is a
+    direct regression test for that real bug report: private held 5 values, institutional
+    held 2, and (before the fix) the institutional alias collided with the private
+    column's unsuffixed key, so institutional silently received the private values while
+    private was left unmapped entirely."""
     row = {
-        "Do you have any demographic preferences for the people whose companies you invest in?": (
-            "I'm open to investing in anyone"
-        ),
         "Do you have demographic preferences for the people whose companies you invest in?": (
-            "I prefer female fundraisers"
+            "I'm open to investing in anyone, I prefer female fundraisers, I prefer male fundraisers, "
+            "I prefer black fundraisers, I prefer Latino fundraisers"
+        ),
+        "Do you have demographic preferences for the people whose companies you invest in? (Institutional)": (
+            "I'm open to investing in anyone, I prefer female fundraisers"
         ),
     }
     result = classify_thesis_checklist_fields(row, NO_CONTEXT)
-    assert result["thesis_private_demographic_preferences"] == ["I'm open to investing in anyone"]
-    assert result["thesis_institutional_demographic_preferences"] == ["I prefer female fundraisers"]
+    assert result["thesis_private_demographic_preferences"] == [
+        "I'm open to investing in anyone",
+        "I prefer female fundraisers",
+        "I prefer male fundraisers",
+        "I prefer black fundraisers",
+        "I prefer Latino fundraisers",
+    ]
+    assert result["thesis_institutional_demographic_preferences"] == [
+        "I'm open to investing in anyone",
+        "I prefer female fundraisers",
+    ]
+
+
+def test_thesis_checklist_aliases_pairs_every_spec_alias_including_demographic_preferences():
+    """Public accessor used by itf_ingestion_service.py's warnings check -- must
+    include both the private and institutional alias for every checklist spec,
+    with the institutional one carrying the " (Institutional)" suffix. This is
+    what would have caught the demographic-preferences bug: the old broken
+    institutional_alias (missing the suffix) would have failed to match the
+    real header row's suffixed key, surfacing as a warning instead of silently
+    producing wrong data."""
+    aliases = thesis_checklist_aliases()
+    assert (
+        "Do you have demographic preferences for the people whose companies you invest in?" in aliases
+    )
+    assert (
+        "Do you have demographic preferences for the people whose companies you invest in? (Institutional)"
+        in aliases
+    )
+    # every alias appears exactly once, and every institutional alias is the
+    # private alias + the standard suffix -- no hand-carried exceptions
+    non_institutional = [a for a in aliases if not a.endswith(" (Institutional)")]
+    institutional = [a for a in aliases if a.endswith(" (Institutional)")]
+    assert len(non_institutional) == len(institutional)
+    assert {f"{a} (Institutional)" for a in non_institutional} == set(institutional)
 
 
 def test_classify_dietary_preferences_reads_the_real_itf_question_wording():
