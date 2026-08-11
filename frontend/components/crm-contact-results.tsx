@@ -9,6 +9,13 @@ import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { CrmContact } from "@/lib/api";
+import {
+  contactResultsMode,
+  contactResultsSummaryText,
+  formatContactLocation,
+  formatContactName,
+  formatContactTitleCompany,
+} from "@/lib/contact-results-view";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -44,23 +51,24 @@ export function ContactResults({
   onChangePageSize,
   emptyStateAction,
   showSelectAllMatching = true,
+  simple = false,
 }: {
   contacts: CrmContact[] | null;
   total: number;
-  page: number;
-  pageSize: number;
+  page?: number;
+  pageSize?: number;
   error: string | null;
   hasActiveFilters: boolean;
   onClearFilters: () => void;
-  selected: Set<string>;
-  onToggleContact: (id: string) => void;
-  selectAllCheckboxRef: RefObject<HTMLInputElement | null>;
-  allSelectedOnPage: boolean;
-  onToggleSelectPage: () => void;
+  selected?: Set<string>;
+  onToggleContact?: (id: string) => void;
+  selectAllCheckboxRef?: RefObject<HTMLInputElement | null>;
+  allSelectedOnPage?: boolean;
+  onToggleSelectPage?: () => void;
   onSelectAllMatching?: () => void;
-  onClearSelection: () => void;
-  onGoToPage: (page: number) => void;
-  onChangePageSize: (pageSize: number) => void;
+  onClearSelection?: () => void;
+  onGoToPage?: (page: number) => void;
+  onChangePageSize?: (pageSize: number) => void;
   emptyStateAction?: React.ReactNode;
   // "Select all N matching contacts" requires holding every matching id in memory,
   // which is exactly what server-side pagination (More Filters) deliberately avoids --
@@ -68,18 +76,26 @@ export function ContactResults({
   // filtered-set behavior. More Filters passes false rather than show a button whose
   // label ("Select all N matching") would overpromise what it actually selects.
   showSelectAllMatching?: boolean;
+  // Read-only callers (Astro Search): hides bulk-selection chrome and the
+  // pagination footer entirely, and drops the per-card checkbox/left-padding.
+  // Astro only ever holds the first page_size matches returned by the backend
+  // and has no export/write action to attach a selection to -- showing either
+  // would imply a capability (paging further, exporting a selection) that
+  // doesn't exist yet. The Contacts and More Filters pages don't pass this,
+  // so their behavior is unchanged. See app/astro/page.tsx.
+  simple?: boolean;
 }) {
-  const totalPages = Math.max(1, Math.ceil(total / pageSize));
-  const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
-  const rangeEnd = Math.min(page * pageSize, total);
+  const effectivePage = page ?? 1;
+  const effectivePageSize = pageSize ?? Math.max(total, 1);
+  const totalPages = Math.max(1, Math.ceil(total / effectivePageSize));
   const pageIds = contacts?.map((c) => c.crm_contact_id) ?? [];
+  const mode = contactResultsMode(simple);
+  const summaryText = contactResultsSummaryText({ simple, total, page: effectivePage, pageSize: effectivePageSize });
 
   return (
     <>
       <div className="mb-6 flex items-center justify-between gap-4">
-        <p className="text-sm text-muted-foreground">
-          {total > 0 ? `Showing ${rangeStart}–${rangeEnd} of ${total} contact${total === 1 ? "" : "s"}` : null}
-        </p>
+        <p className="text-sm text-muted-foreground">{summaryText}</p>
         {hasActiveFilters && (
           <button
             type="button"
@@ -92,7 +108,7 @@ export function ContactResults({
         )}
       </div>
 
-      {!error && contacts !== null && contacts.length > 0 && (
+      {mode.showSelectionChrome && !error && contacts !== null && contacts.length > 0 && (
         <div className="mb-4 flex flex-wrap items-center gap-4 rounded-lg border border-border/60 bg-secondary/20 px-3 py-2 text-sm">
           <label className="flex cursor-pointer items-center gap-2">
             <input
@@ -111,10 +127,10 @@ export function ContactResults({
             </button>
           )}
 
-          {selected.size > 0 && (
+          {(selected?.size ?? 0) > 0 && (
             <>
               <span className="font-medium text-foreground">
-                {selected.size} contact{selected.size === 1 ? "" : "s"} selected
+                {selected?.size ?? 0} contact{(selected?.size ?? 0) === 1 ? "" : "s"} selected
               </span>
               <button
                 type="button"
@@ -173,19 +189,21 @@ export function ContactResults({
       {!error && contacts !== null && contacts.length > 0 && (
         <div className="grid gap-3 sm:grid-cols-2">
           {contacts.map((contact) => {
-            const name = [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
-            const location = [contact.city, contact.state].filter(Boolean).join(", ");
+            const name = formatContactName(contact);
+            const location = formatContactLocation(contact);
             return (
               <div key={contact.crm_contact_id} className="relative">
-                <input
-                  type="checkbox"
-                  checked={selected.has(contact.crm_contact_id)}
-                  onChange={() => onToggleContact(contact.crm_contact_id)}
-                  aria-label={`Select ${name}`}
-                  className="absolute left-3 top-3 z-10 h-4 w-4 cursor-pointer rounded border-input accent-primary"
-                />
+                {mode.showSelectionChrome && (
+                  <input
+                    type="checkbox"
+                    checked={selected?.has(contact.crm_contact_id) ?? false}
+                    onChange={() => onToggleContact?.(contact.crm_contact_id)}
+                    aria-label={`Select ${name}`}
+                    className="absolute left-3 top-3 z-10 h-4 w-4 cursor-pointer rounded border-input accent-primary"
+                  />
+                )}
                 <Link href={`/crm/${contact.crm_contact_id}`}>
-                  <Card className="h-full pl-9 transition-colors hover:bg-secondary/40">
+                  <Card className={cn("h-full transition-colors hover:bg-secondary/40", mode.showSelectionChrome && "pl-9")}>
                     <CardHeader>
                       <div className="mb-1 flex items-start justify-between gap-2">
                         <CardTitle className="leading-snug">{name}</CardTitle>
@@ -195,9 +213,7 @@ export function ContactResults({
                           </Badge>
                         )}
                       </div>
-                      <p className="line-clamp-1 text-sm text-muted-foreground">
-                        {[contact.title, contact.company].filter(Boolean).join(" @ ") || "No title/company on file"}
-                      </p>
+                      <p className="line-clamp-1 text-sm text-muted-foreground">{formatContactTitleCompany(contact)}</p>
                     </CardHeader>
                     <CardContent className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                       {location && <span>{location}</span>}
@@ -211,13 +227,13 @@ export function ContactResults({
         </div>
       )}
 
-      {!error && contacts !== null && total > 0 && (
+      {mode.showPagination && !error && contacts !== null && total > 0 && (
         <div className="mt-6 flex items-center justify-between gap-4">
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <span>Rows per page</span>
             <select
-              value={pageSize}
-              onChange={(e) => onChangePageSize(Number(e.target.value))}
+              value={effectivePageSize}
+              onChange={(e) => onChangePageSize?.(Number(e.target.value))}
               className="h-8 rounded-md border border-input bg-transparent px-2 text-sm"
             >
               {PAGE_SIZE_OPTIONS.map((size) => (
@@ -229,12 +245,12 @@ export function ContactResults({
           </div>
           <div className="flex items-center gap-3">
             <span className="text-sm text-muted-foreground">
-              Page {page} of {totalPages}
+              Page {effectivePage} of {totalPages}
             </span>
             <button
               type="button"
-              onClick={() => onGoToPage(page - 1)}
-              disabled={page <= 1}
+              onClick={() => onGoToPage?.(effectivePage - 1)}
+              disabled={effectivePage <= 1}
               className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1 disabled:opacity-40")}
             >
               <ChevronLeft className="h-4 w-4" />
@@ -242,8 +258,8 @@ export function ContactResults({
             </button>
             <button
               type="button"
-              onClick={() => onGoToPage(page + 1)}
-              disabled={page >= totalPages}
+              onClick={() => onGoToPage?.(effectivePage + 1)}
+              disabled={effectivePage >= totalPages}
               className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1 disabled:opacity-40")}
             >
               Next

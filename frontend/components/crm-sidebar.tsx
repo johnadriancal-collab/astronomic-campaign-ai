@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Contact, LayoutDashboard, ListFilter, ListPlus, SlidersHorizontal, Sparkles, Users } from "lucide-react";
+import { Contact, LayoutDashboard, ListFilter, ListPlus, MessageCircle, SlidersHorizontal, Sparkles, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const SECTIONS = [
@@ -40,6 +40,13 @@ export function CrmSidebar() {
           <Contact className="h-4 w-4" />
           CRM
         </div>
+        <Link
+          href="/astro"
+          className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+        >
+          <MessageCircle className="h-4 w-4" />
+          Astro Search
+        </Link>
       </div>
 
       <div className="px-3">

@@ -713,3 +713,47 @@ export function listCrmFilterableFields(): Promise<FilterFieldMeta[]> {
 export function queryCrmContacts(query: FilterQuery): Promise<CrmContactPage> {
   return post<CrmContactPage>("/crm/contacts/query", query);
 }
+
+// --- Astro Core (Phase 1/1.1) -- deterministic, Claude-free CRM search/count ---
+//
+// `context` is the ENTIRE conversation state: just the last resolved
+// FilterQuery + intent. There is no session id and nothing is persisted
+// server-side -- the caller holds this and resends it each turn. See
+// app/models/astro.py and app/services/astro_parser.py's Phase 1.1 module
+// docstring for why this is deliberately the smallest reliable design.
+
+export interface AstroCommandContext {
+  query: FilterQuery | null;
+  intent: "search_contacts" | "count_contacts" | null;
+}
+
+export interface AstroCommandRequest {
+  text: string;
+  context?: AstroCommandContext;
+}
+
+export interface AstroCommandResponse {
+  intent: "search_contacts" | "count_contacts" | "unresolved";
+  understood_as: string;
+
+  query: FilterQuery | null;
+  total: number | null;
+  contacts: CrmContact[] | null;
+
+  // Set only for a resolved Phase 1.1 refinement turn -- never set for a
+  // standalone Phase 1 command (e.g. the very first turn of a conversation).
+  operation: "add" | "replace" | "remove" | "reset" | "change_intent" | null;
+  changed_field: string | null;
+
+  // Deterministic -- never Claude-generated. Explains a refinement when
+  // `operation` is set; carries the Phase 1 clarification when intent is
+  // "unresolved"; null for a plain standalone command.
+  message: string | null;
+
+  understood: Record<string, string> | null;
+  unresolved_phrase: string | null;
+}
+
+export function sendAstroCommand(text: string, context?: AstroCommandContext): Promise<AstroCommandResponse> {
+  return post<AstroCommandResponse>("/astro/command", context ? { text, context } : { text });
+}
