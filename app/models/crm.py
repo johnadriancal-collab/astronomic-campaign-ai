@@ -343,7 +343,7 @@ EXTERNAL_FIELD_NAMES = frozenset(
         "apollo_contact_id", "first_name", "last_name", "email", "email_status", "phone",
         "linkedin_url", "title", "company", "company_website", "city", "state", "country",
         "industry", "company_size", "revenue", "funding_stage", "funding_amount",
-        "technologies", "seniority", "department", "job_function",
+        "technologies", "seniority", "department", "job_function", "source",
     }
 )
 
@@ -412,6 +412,11 @@ class CrmContact(BaseModel):
     job_function: str | None = None
     source_snapshot: dict = Field(default_factory=dict)  # raw imported row/payload --
     # never authoritative; the fields above always win.
+    source: str | None = None  # provenance of contact CREATION, e.g. "itf" for a contact
+    # first created by the ITF ingestion pipeline. Set only on create; an existing
+    # contact's source is never overwritten by a later import/update (standard
+    # fill-only-if-empty merge rule, since it's in EXTERNAL_FIELD_NAMES above). CSV-
+    # imported and manually-created contacts simply have source=None.
 
     # --- Group 2: Investor Thesis fields (Astronomic's real form, Q5-25;
     # Q1-4 are first_name/last_name/email/linkedin_url above) ---

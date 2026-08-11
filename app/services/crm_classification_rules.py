@@ -67,6 +67,39 @@ def _ordered_dedup(*token_lists: list[str]) -> list[str]:
     return merged
 
 
+def _split_known_options(raw_value: str, known_options: list[str]) -> tuple[list[str], str]:
+    """
+    Greedily parses a joined multi-select cell against a CLOSED, known
+    vocabulary -- for cells where a delimiter-based split is unsafe because
+    the options themselves contain internal commas followed by a space
+    (e.g. "Collectibles (e.g., art, wine, watches)", "Friends & Family
+    (idea or concept stage, often pre-incorporation)"). Added for the ITF
+    Google Form checklist questions (asset types, business models,
+    industries, deal stages, meeting preferences, demographic preferences),
+    whose canonical option wording makes even the ", "-based delimiter that
+    classify_check_size safely uses (its buckets have zero internal commas)
+    unreliable here.
+
+    Repeatedly matches the LONGEST known option that the remaining text
+    starts with, consumes it plus any separating ", "/",", and continues.
+    Whatever text is left once no known option matches as a prefix --
+    typically the respondent's "Other:" free text, since none of the known
+    options are themselves prefixes of each other or of arbitrary free text
+    -- is returned as `leftover` rather than guessed at.
+    """
+    remaining = raw_value.strip()
+    matched: list[str] = []
+    sorted_options = sorted(known_options, key=len, reverse=True)
+    while remaining:
+        match = next((opt for opt in sorted_options if remaining.startswith(opt)), None)
+        if match is None:
+            break
+        matched.append(match)
+        remaining = remaining[len(match) :]
+        remaining = re.sub(r"^,\s*", "", remaining).lstrip()
+    return matched, remaining.strip()
+
+
 def _validate_single_select(raw_value: str | None, options: set[str]) -> str | None:
     """
     Kept ONLY if it exactly matches one of `options` -- same "never guess"
@@ -348,7 +381,9 @@ def classify_check_size(raw_row: dict[str, str], context: dict[str, Any]) -> dic
     result: dict[str, Any] = {}
 
     personal_options = context.get("check_size_personal_options") or set()
-    personal_tokens = _split_check_size_tokens(_find_column(raw_row, "Check Size"))
+    personal_tokens = _split_check_size_tokens(
+        _find_column(raw_row, "Check Size", "Which size investments are you open to making?")
+    )
     personal = _ordered_dedup(
         [v for t in personal_tokens if (v := _normalize_check_size_token(t, personal_options))]
     )
@@ -356,7 +391,13 @@ def classify_check_size(raw_row: dict[str, str], context: dict[str, Any]) -> dic
         result["custom:check_size_personal"] = personal
 
     institutional_options = context.get("check_size_institutional_options") or set()
-    institutional_tokens = _split_check_size_tokens(_find_column(raw_row, "Check Size (Institutional)"))
+    institutional_tokens = _split_check_size_tokens(
+        _find_column(
+            raw_row,
+            "Check Size (Institutional)",
+            "Which size investments are you open to making? (Institutional)",
+        )
+    )
     institutional = _ordered_dedup(
         [v for t in institutional_tokens if (v := _normalize_check_size_token(t, institutional_options))]
     )
@@ -487,7 +528,10 @@ def classify_dietary_preferences(raw_row: dict[str, str], context: dict[str, Any
     """
     from app.models.crm import DIETARY_PREFERENCE_OPTIONS  # local import, same rationale as classify_investor_mode
 
-    raw = _find_column(raw_row, "Dietary Preferences", "Dietary Restrictions")
+    # "Do you have dietary preferences?" is the real ITF Form's wording (verified
+    # 2026-08-11 live Sheet audit); "Dietary Preferences"/"Dietary Restrictions" are
+    # the CSV export's own column headers -- kept so this rule still serves both.
+    raw = _find_column(raw_row, "Dietary Preferences", "Dietary Restrictions", "Do you have dietary preferences?")
     if not raw:
         return {}
 
@@ -505,6 +549,117 @@ def classify_dietary_preferences(raw_row: dict[str, str], context: dict[str, Any
         "thesis_dietary_preferences": recognized,
         "thesis_dietary_preferences_other": "; ".join(unrecognized),
     }
+
+
+# 2026-08-10 ITF intake design, header wording verified 2026-08-11 against the real
+# Sheet (live read-only audit of all 26 columns) -- the six private/institutional
+# checklist question pairs from the real Investor Thesis Google Form. Section 2
+# (private) and Section 3 (institutional) ask most of these with IDENTICAL wording,
+# so the Sheet has two columns sharing the same header text per question -- a plain
+# dict[str, str] raw_row can't hold both under that shared name. The ITF row-builder
+# (app/services/itf_ingestion_service.py's _disambiguate_headers) resolves this by
+# appending " (Institutional)" to the SECOND occurrence of an exact-duplicate header
+# text -- the exact same convention classify_check_size above already uses for
+# "Check Size" / "Check Size (Institutional)". Confirmed real exact duplicates: asset
+# types, business models, industries, deal stages, meeting preferences.
+#
+# Demographic preferences is the one exception, confirmed NOT a byte-identical
+# duplicate: the private question asks "...do you have ANY demographic
+# preferences..."; the institutional one drops "any". Since the two header strings
+# already differ, _disambiguate_headers never touches either one -- both survive as
+# their own natural dict keys with no suffix. Each spec therefore carries its own
+# explicit `private_alias`/`institutional_alias` rather than deriving the second from
+# the first; for the five true duplicates these two values are intentionally
+# `alias` and `f"{alias} (Institutional)"`, but demographic preferences needed its
+# own real institutional string instead. This rule is a no-op for ordinary CSV
+# imports, whose headers never happen to match this wording.
+_THESIS_CHECKLIST_SPECS: list[dict[str, Any]] = [
+    {
+        "private_alias": "Which types of assets do you invest in or are you interested in?",
+        "institutional_alias": "Which types of assets do you invest in or are you interested in? (Institutional)",
+        "options_name": "ASSET_TYPE_OPTIONS",
+        "private_target": "thesis_private_asset_types",
+        "private_other_target": "thesis_private_asset_types_other",
+        "institutional_target": "thesis_institutional_asset_types",
+        "institutional_other_target": "thesis_institutional_asset_types_other",
+    },
+    {
+        "private_alias": "Which business models do you invest in or are you interested in?",
+        "institutional_alias": "Which business models do you invest in or are you interested in? (Institutional)",
+        "options_name": "BUSINESS_MODEL_OPTIONS",
+        "private_target": "thesis_private_business_models",
+        "private_other_target": "thesis_private_business_models_other",
+        "institutional_target": "thesis_institutional_business_models",
+        "institutional_other_target": "thesis_institutional_business_models_other",
+    },
+    {
+        "private_alias": "Which industries do you invest in or are you interested in?",
+        "institutional_alias": "Which industries do you invest in or are you interested in? (Institutional)",
+        "options_name": "INDUSTRY_OPTIONS",
+        "private_target": "thesis_private_industries",
+        "private_other_target": "thesis_private_industries_other",
+        "institutional_target": "thesis_institutional_industries",
+        "institutional_other_target": "thesis_institutional_industries_other",
+    },
+    {
+        "private_alias": "During which deal stages are you open to investing?",
+        "institutional_alias": "During which deal stages are you open to investing? (Institutional)",
+        "options_name": "DEAL_STAGE_OPTIONS",
+        "private_target": "thesis_private_deal_stages",
+        "private_other_target": "thesis_private_deal_stages_other",
+        "institutional_target": "thesis_institutional_deal_stages",
+        "institutional_other_target": "thesis_institutional_deal_stages_other",
+    },
+    {
+        "private_alias": "How would you like to meet fundraisers?",
+        "institutional_alias": "How would you like to meet fundraisers? (Institutional)",
+        "options_name": "MEETING_PREFERENCE_OPTIONS",
+        "private_target": "thesis_private_meeting_preferences",
+        "private_other_target": "thesis_private_meeting_preferences_other",
+        "institutional_target": "thesis_institutional_meeting_preferences",
+        "institutional_other_target": "thesis_institutional_meeting_preferences_other",
+    },
+    {
+        "private_alias": "Do you have any demographic preferences for the people whose companies you invest in?",
+        "institutional_alias": "Do you have demographic preferences for the people whose companies you invest in?",
+        "options_name": "DEMOGRAPHIC_PREFERENCE_OPTIONS",
+        "private_target": "thesis_private_demographic_preferences",
+        "private_other_target": "thesis_private_demographic_preferences_other",
+        "institutional_target": "thesis_institutional_demographic_preferences",
+        "institutional_other_target": "thesis_institutional_demographic_preferences_other",
+    },
+]
+
+
+def classify_thesis_checklist_fields(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    The six ITF checklist question pairs (see _THESIS_CHECKLIST_SPECS above)
+    <- their private/institutional Sheet columns, parsed via
+    _split_known_options against each question's closed vocabulary
+    (app/models/crm.py's *_OPTIONS constants). Unrecognized leftover text
+    (an "Other:" entry) is preserved verbatim in the matching `_other`
+    companion field, same pattern as classify_dietary_preferences -- never
+    silently dropped.
+    """
+    from app.models import crm as crm_models
+
+    result: dict[str, Any] = {}
+    for spec in _THESIS_CHECKLIST_SPECS:
+        options: list[str] = getattr(crm_models, spec["options_name"])
+        for alias, target_key, other_key in (
+            (spec["private_alias"], spec["private_target"], spec["private_other_target"]),
+            (spec["institutional_alias"], spec["institutional_target"], spec["institutional_other_target"]),
+        ):
+            raw = _find_column(raw_row, alias)
+            if not raw:
+                continue
+            matched, leftover = _split_known_options(raw, options)
+            deduped = _ordered_dedup(matched)
+            if deduped:
+                result[target_key] = deduped
+            if leftover:
+                result[other_key] = leftover
+    return result
 
 
 # Registry of independent classification rules. Each is applied to every
@@ -526,6 +681,7 @@ CLASSIFICATION_RULES: list[Classifier] = [
     classify_legacy_thesis_columns,
     classify_how_early_do_you_invest,
     classify_dietary_preferences,
+    classify_thesis_checklist_fields,
 ]
 
 

@@ -25,5 +25,16 @@ class Settings(BaseSettings):
     # otherwise resets on every redeploy.
     database_path: str = "data/campaigns.db"
 
+    # ITF (Investor Thesis Form) contact intake -- see
+    # app/services/itf_ingestion_service.py. A Google Apps Script bound to the
+    # ITF response Sheet POSTs each new submission to POST /sync/itf-contact;
+    # no Google credentials of any kind live in this backend. This shared
+    # secret is the only thing authenticating that call -- generate a long
+    # random value (e.g. `openssl rand -hex 32`), set it here AND in the
+    # script's PropertiesService, and never commit it. None until Railway is
+    # configured with it; the webhook returns a clear 503 rather than crashing
+    # at startup when it's unset.
+    itf_webhook_token: str | None = None
+
 
 settings = Settings()

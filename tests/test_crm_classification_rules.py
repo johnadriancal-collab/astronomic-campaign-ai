@@ -10,6 +10,7 @@ standardization, etc.).
 import pytest
 
 from app.services.crm_classification_rules import (
+    _split_known_options,
     apply_classification_rules,
     build_classification_context,
     classify_accredited_status,
@@ -27,6 +28,7 @@ from app.services.crm_classification_rules import (
     classify_legacy_thesis_columns,
     classify_revenue_stage,
     classify_role,
+    classify_thesis_checklist_fields,
 )
 
 NO_CONTEXT: dict = {}
@@ -980,3 +982,122 @@ async def test_build_classification_context_handles_missing_fields():
     assert context["check_size_institutional_options"] == set()
     assert context["accredited_status_options"] == set()
     assert context["revenue_stage_options"] == set()
+
+
+# --- _split_known_options / classify_thesis_checklist_fields (2026-08-10 ITF intake design) ---
+
+
+def test_split_known_options_matches_options_containing_internal_commas():
+    """The exact case a naive comma-split would shred: an option whose own text
+    contains ', ' (comma followed by space)."""
+    options = ["Collectibles (e.g., art, wine, watches)", "Private equity"]
+    matched, leftover = _split_known_options("Collectibles (e.g., art, wine, watches), Private equity", options)
+    assert matched == ["Collectibles (e.g., art, wine, watches)", "Private equity"]
+    assert leftover == ""
+
+
+def test_split_known_options_preserves_unmatched_trailing_text_as_leftover():
+    options = ["Private equity", "Public equities (stocks, ETFs)"]
+    matched, leftover = _split_known_options("Private equity, Timber", options)
+    assert matched == ["Private equity"]
+    assert leftover == "Timber"
+
+
+def test_split_known_options_single_unmatched_value_is_all_leftover():
+    options = ["Private equity"]
+    matched, leftover = _split_known_options("Something else entirely", options)
+    assert matched == []
+    assert leftover == "Something else entirely"
+
+
+def test_split_known_options_prefers_longest_match_at_each_position():
+    options = ["Fund LP (investor in venture/private equity funds)", "Secondary (buying equity from early investors or founders)"]
+    matched, leftover = _split_known_options(
+        "Fund LP (investor in venture/private equity funds), Secondary (buying equity from early investors or founders)",
+        options,
+    )
+    assert matched == options
+    assert leftover == ""
+
+
+def test_split_known_options_empty_string_returns_nothing():
+    matched, leftover = _split_known_options("", ["Private equity"])
+    assert matched == []
+    assert leftover == ""
+
+
+ASSET_TYPES_ALIAS = "Which types of assets do you invest in or are you interested in?"
+ASSET_TYPES_ALIAS_INSTITUTIONAL = "Which types of assets do you invest in or are you interested in? (Institutional)"
+
+
+def test_classify_thesis_checklist_fields_reads_private_section():
+    row = {ASSET_TYPES_ALIAS: "Private equity, Venture capital (e.g., angel checks, early-stage startups, high-growth tech)"}
+    result = classify_thesis_checklist_fields(row, NO_CONTEXT)
+    assert result["thesis_private_asset_types"] == [
+        "Private equity",
+        "Venture capital (e.g., angel checks, early-stage startups, high-growth tech)",
+    ]
+    assert "thesis_private_asset_types_other" not in result
+    assert "thesis_institutional_asset_types" not in result
+
+
+def test_classify_thesis_checklist_fields_disambiguates_institutional_column():
+    """Both sections ask the identical question -- the row-builder disambiguates the
+    duplicate header by appending ' (Institutional)' (see itf_ingestion_service.py);
+    this rule must read each section's answer into its own distinct target field."""
+    row = {
+        ASSET_TYPES_ALIAS: "Private equity",
+        ASSET_TYPES_ALIAS_INSTITUTIONAL: "Fund-of-funds",
+    }
+    result = classify_thesis_checklist_fields(row, NO_CONTEXT)
+    assert result["thesis_private_asset_types"] == ["Private equity"]
+    assert result["thesis_institutional_asset_types"] == ["Fund-of-funds"]
+
+
+def test_classify_thesis_checklist_fields_unrecognized_overflow_goes_to_other():
+    row = {ASSET_TYPES_ALIAS: "Private equity, Timber"}
+    result = classify_thesis_checklist_fields(row, NO_CONTEXT)
+    assert result["thesis_private_asset_types"] == ["Private equity"]
+    assert result["thesis_private_asset_types_other"] == "Timber"
+
+
+def test_classify_thesis_checklist_fields_missing_column_produces_no_keys():
+    result = classify_thesis_checklist_fields({"First Name": "Ada"}, NO_CONTEXT)
+    assert result == {}
+
+
+def test_classify_thesis_checklist_fields_deal_stage_pair():
+    row = {
+        "During which deal stages are you open to investing?": (
+            "Seed (product in market, early customers or pilots), "
+            "Friends & Family (idea or concept stage, often pre-incorporation)"
+        )
+    }
+    result = classify_thesis_checklist_fields(row, NO_CONTEXT)
+    assert result["thesis_private_deal_stages"] == [
+        "Seed (product in market, early customers or pilots)",
+        "Friends & Family (idea or concept stage, often pre-incorporation)",
+    ]
+
+
+def test_classify_thesis_checklist_fields_demographic_preferences_private_and_institutional_are_not_byte_identical():
+    """Verified 2026-08-11 against the real Sheet: the institutional wording drops
+    the word 'any' -- these two headers never collide in _disambiguate_headers at
+    all, so each needs its own explicit alias rather than an auto-derived suffix."""
+    row = {
+        "Do you have any demographic preferences for the people whose companies you invest in?": (
+            "I'm open to investing in anyone"
+        ),
+        "Do you have demographic preferences for the people whose companies you invest in?": (
+            "I prefer female fundraisers"
+        ),
+    }
+    result = classify_thesis_checklist_fields(row, NO_CONTEXT)
+    assert result["thesis_private_demographic_preferences"] == ["I'm open to investing in anyone"]
+    assert result["thesis_institutional_demographic_preferences"] == ["I prefer female fundraisers"]
+
+
+def test_classify_dietary_preferences_reads_the_real_itf_question_wording():
+    row = {"Do you have dietary preferences?": "Vegan"}
+    result = classify_dietary_preferences(row, NO_CONTEXT)
+    assert result == {"thesis_dietary_preferences": ["Vegan"]}

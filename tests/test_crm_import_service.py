@@ -9,6 +9,7 @@ import pytest
 
 from app.models.crm import CrmImportBatchStatus, CrmImportRowStatus, CustomFieldType
 from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
+from app.services.crm_classification_rules import build_classification_context
 from app.services.crm_import_service import CrmImportService, suggest_mapping
 from app.services.crm_service import CrmService
 
@@ -1664,3 +1665,106 @@ async def test_dietary_preferences_never_overwrites_a_prior_contacts_value_with_
     contacts = {c.email: c for c in (await import_service.crm_service.list_contacts()).items}
     assert contacts["existing@example.com"].thesis_dietary_preferences == ["Halal"]
     assert contacts["nova@example.com"].thesis_dietary_preferences == ["Vegan"]
+
+
+# --- import_one_row (2026-08-10 ITF intake design) ---
+
+
+@pytest.mark.asyncio
+async def test_import_one_row_creates_a_new_contact(import_service):
+    context = await build_classification_context(import_service.crm_service.custom_field_store)
+    status, contact, matched_on, mapped = await import_service.import_one_row(
+        {"Email": "new@example.com", "First Name": "Ada"},
+        {"Email": "email", "First Name": "first_name"},
+        context,
+    )
+    assert status == CrmImportRowStatus.NEW
+    assert contact is not None
+    assert contact.email == "new@example.com"
+    assert mapped["email"] == "new@example.com"
+
+    stored = await import_service.crm_service.contact_store.get(contact.crm_contact_id)
+    assert stored is not None
+
+
+@pytest.mark.asyncio
+async def test_import_one_row_updates_an_existing_contact(import_service):
+    existing = await import_service.crm_service.create_contact_from_import(
+        {"email": "existing@example.com", "first_name": "Ada"}
+    )
+    context = await build_classification_context(import_service.crm_service.custom_field_store)
+
+    status, contact, matched_on, mapped = await import_service.import_one_row(
+        {"Email": "existing@example.com", "First Name": "Ada", "Last Name": "Lovelace"},
+        {"Email": "email", "First Name": "first_name", "Last Name": "last_name"},
+        context,
+    )
+    assert status == CrmImportRowStatus.EXISTING
+    assert matched_on == "email"
+    assert contact.crm_contact_id == existing.crm_contact_id
+    assert contact.last_name == "Lovelace"  # filled in, since it was empty
+
+    stored = await import_service.crm_service.contact_store.get(existing.crm_contact_id)
+    assert stored.last_name == "Lovelace"
+
+
+@pytest.mark.asyncio
+async def test_import_one_row_dry_run_never_writes(import_service):
+    context = await build_classification_context(import_service.crm_service.custom_field_store)
+    status, contact, matched_on, mapped = await import_service.import_one_row(
+        {"Email": "new@example.com"}, {"Email": "email"}, context, dry_run=True,
+    )
+    assert status == CrmImportRowStatus.NEW
+    assert contact is None  # never created
+    assert (await import_service.crm_service.list_contacts()).items == []
+
+
+@pytest.mark.asyncio
+async def test_import_one_row_dry_run_reports_the_matched_existing_contact_without_updating(import_service):
+    existing = await import_service.crm_service.create_contact_from_import(
+        {"email": "existing@example.com", "last_name": "Original"}
+    )
+    context = await build_classification_context(import_service.crm_service.custom_field_store)
+
+    status, contact, matched_on, mapped = await import_service.import_one_row(
+        {"Email": "existing@example.com", "Last Name": "Changed"},
+        {"Email": "email", "Last Name": "last_name"},
+        context,
+        dry_run=True,
+    )
+    assert status == CrmImportRowStatus.EXISTING
+    assert contact.crm_contact_id == existing.crm_contact_id
+    assert contact.last_name == "Original"  # unmerged -- dry run never writes
+
+    stored = await import_service.crm_service.contact_store.get(existing.crm_contact_id)
+    assert stored.last_name == "Original"
+
+
+@pytest.mark.asyncio
+async def test_import_one_row_extra_fields_merge_in_after_classification(import_service):
+    context = await build_classification_context(import_service.crm_service.custom_field_store)
+    status, contact, matched_on, mapped = await import_service.import_one_row(
+        {"Email": "new@example.com"},
+        {"Email": "email"},
+        context,
+        extra_fields={"source": "itf"},
+    )
+    assert mapped["source"] == "itf"
+    assert contact.source == "itf"
+
+
+@pytest.mark.asyncio
+async def test_import_one_row_extra_fields_source_never_overwrites_existing_contacts_source(import_service):
+    existing = await import_service.crm_service.create_contact_from_import(
+        {"email": "existing@example.com", "source": "manual"}
+    )
+    context = await build_classification_context(import_service.crm_service.custom_field_store)
+
+    status, contact, matched_on, mapped = await import_service.import_one_row(
+        {"Email": "existing@example.com"},
+        {"Email": "email"},
+        context,
+        extra_fields={"source": "itf"},
+    )
+    assert status == CrmImportRowStatus.EXISTING
+    assert contact.source == "manual"  # fill-only-if-empty -- untouched

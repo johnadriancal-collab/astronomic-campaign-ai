@@ -69,6 +69,26 @@ UNION_MERGE_THESIS_LIST_FIELDS = frozenset({"thesis_dietary_preferences"})
 UNION_MERGE_DELIMITED_TEXT_FIELDS = frozenset({"thesis_dietary_preferences_other"})
 DELIMITED_TEXT_SEPARATOR = "; "
 
+# 2026-08-10 ITF intake design -- a second, distinct opt-in exception, this time for
+# custom fields whose entire purpose is "the most recent value we were told", not "a
+# value worth protecting once set". itf_submitted_at must always reflect the latest
+# Google Form submission timestamp for a returning respondent -- fill-only-if-empty
+# would freeze it at whatever the first submission said, which is exactly wrong for a
+# field meant to answer "when did this person last submit the ITF". Scoped to custom
+# fields only (checked in _apply_custom_field below); core/thesis fields have no such
+# field today and keep the fill-only rule unconditionally.
+LATEST_WINS_CUSTOM_FIELDS = frozenset({"itf_submitted_at"})
+
+# A third, distinct exception -- "source" (provenance of contact CREATION,
+# e.g. "itf") must be set on a brand-new contact but NEVER touched on an
+# update, even if it's currently empty. This is stricter than the default
+# fill-only-if-empty rule (which WOULD fill it in from empty on an update --
+# wrong here, since an existing contact's source describes how it was
+# ORIGINALLY created, not how it was most recently touched). is_new=True
+# already sets every mapped field directly (see apply_import_mapping above),
+# so this set only changes behavior on the is_new=False path.
+CREATE_ONLY_FIELD_NAMES = frozenset({"source"})
+
 
 def _union_merge_list(existing: list[str], incoming: list[str]) -> list[str]:
     """Order-preserving, deduplicated list union -- the exact logic
@@ -534,6 +554,11 @@ class CrmService:
                     updates[field_name] = incoming_value
                 continue
 
+            # See CREATE_ONLY_FIELD_NAMES above -- never set on an update, regardless
+            # of whether the existing value is currently empty.
+            if field_name in CREATE_ONLY_FIELD_NAMES:
+                continue
+
             # thesis_dietary_preferences (and its _other companion) are the one
             # exception to "fill only when empty" -- see UNION_MERGE_THESIS_LIST_FIELDS
             # above. Checked before the generic rule so every other thesis/external
@@ -597,6 +622,13 @@ class CrmService:
             merged = _union_merge_list(existing_list, incoming_value)
             if merged != existing_list:
                 updates["custom_fields"] = {**base, field_key: merged}
+            return
+
+        # See LATEST_WINS_CUSTOM_FIELDS above -- these always take the incoming value
+        # (when non-empty), never gated on whether one is already set.
+        if field_key in LATEST_WINS_CUSTOM_FIELDS:
+            if not _is_empty(incoming_value) and incoming_value != current:
+                updates["custom_fields"] = {**base, field_key: incoming_value}
             return
 
         if _is_empty(current) and not _is_empty(incoming_value):

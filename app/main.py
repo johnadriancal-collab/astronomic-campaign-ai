@@ -19,6 +19,7 @@ Endpoints:
     GET  /campaign/{campaign_id}/messages/{message_id}/events        - a message's synced open/click events
     POST /campaign/{campaign_id}/messages/{message_id}/sync-events   - explicit manual event sync for one message
     POST /sync/campaigns             - discovers/updates/archives campaigns from Apollo's current sequence list
+    POST /sync/itf-contact           - webhook target for the Apps Script ITF bridge, one Form submission per call (dry_run supported)
 
 Campaign routes themselves live in app/api/campaign.py (see
 docs/ARCHITECTURE.md) -- this module only owns app-level concerns: the
@@ -49,6 +50,7 @@ from app.repositories.sqlite_email_message_event_store import SQLiteEmailMessage
 from app.repositories.sqlite_email_message_store import SQLiteEmailMessageStore
 from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenceStepStore
 from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStore
+from app.repositories.sqlite_itf_ingestion_log_store import SQLiteItfIngestionLogStore
 from app.repositories.sqlite_lead_store import SQLiteLeadStore
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -56,6 +58,7 @@ from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
+from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 
 
@@ -74,6 +77,7 @@ async def lifespan(app: FastAPI):
     crm_contact_store = SQLiteCrmContactStore(settings.database_path)
     crm_custom_field_store = SQLiteCrmCustomFieldStore(settings.database_path)
     crm_import_batch_store = SQLiteCrmImportBatchStore(settings.database_path)
+    itf_ingestion_log_store = SQLiteItfIngestionLogStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -84,6 +88,7 @@ async def lifespan(app: FastAPI):
     await crm_contact_store.connect()
     await crm_custom_field_store.connect()
     await crm_import_batch_store.connect()
+    await itf_ingestion_log_store.connect()
 
     lead_service = LeadService(store=lead_store, campaign_lead_store=campaign_lead_store, campaign_store=campaign_store)
     app.state.lead_service = lead_service
@@ -109,7 +114,16 @@ async def lifespan(app: FastAPI):
 
     crm_service = CrmService(contact_store=crm_contact_store, custom_field_store=crm_custom_field_store)
     app.state.crm_service = crm_service
-    app.state.crm_import_service = CrmImportService(crm_service=crm_service, batch_store=crm_import_batch_store)
+    crm_import_service = CrmImportService(crm_service=crm_service, batch_store=crm_import_batch_store)
+    app.state.crm_import_service = crm_import_service
+
+    # ITF (Investor Thesis Form) intake -- no Google credentials involved, so this
+    # is always constructed; POST /sync/itf-contact's own auth dependency (not this
+    # wiring) is what returns a clear 503 when ITF_WEBHOOK_TOKEN isn't configured.
+    app.state.itf_ingestion_service = ItfIngestionService(
+        import_service=crm_import_service,
+        log_store=itf_ingestion_log_store,
+    )
 
     yield
     await campaign_store.close()
@@ -122,6 +136,7 @@ async def lifespan(app: FastAPI):
     await crm_contact_store.close()
     await crm_custom_field_store.close()
     await crm_import_batch_store.close()
+    await itf_ingestion_log_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)

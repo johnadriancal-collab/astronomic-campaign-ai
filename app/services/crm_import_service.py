@@ -350,6 +350,67 @@ class CrmImportService:
         await self.batch_store.save(batch)
         return batch
 
+    async def import_one_row(
+        self,
+        raw_row: dict[str, str],
+        column_mapping: dict[str, str],
+        classification_context: dict[str, Any],
+        extra_fields: dict[str, Any] | None = None,
+        dry_run: bool = False,
+    ) -> tuple[CrmImportRowStatus, CrmContact | None, str | None, dict[str, Any]]:
+        """
+        Single-row equivalent of preview()+commit() combined, for any caller
+        ingesting one row at a time against the LIVE contact store rather than
+        a CrmImportBatch -- today, ItfIngestionService (see
+        app/services/itf_ingestion_service.py). Reuses _apply_mapping,
+        crm_service.classify_match, crm_service.create_contact_from_import, and
+        crm_service.apply_import_mapping VERBATIM -- no ITF-specific
+        classification/dedup/merge logic exists anywhere.
+
+        `extra_fields` are merged into `mapped` AFTER classification rules run
+        (so a rule can never silently override them) but BEFORE
+        classify_match/apply_import_mapping -- e.g. the ITF caller passes
+        {"source": "itf", "custom:itf_submitted_at": ...} here, letting them
+        flow through the exact same merge rule as every other field (fill-only
+        for "source" since it's in EXTERNAL_FIELD_NAMES; always-latest for the
+        custom field per LATEST_WINS_CUSTOM_FIELDS in crm_service.py) with zero
+        special-casing in this method.
+
+        No within-run dedup bookkeeping (unlike preview(), which tracks
+        confident keys across a whole CrmImportBatch) -- each call sees the
+        CRM's actual current state, so a contact created by an earlier call in
+        the same run is already visible to this call's classify_match. The one
+        gap this leaves: two Sheet rows sharing an email/LinkedIn/Apollo id
+        within a SINGLE dry_run=True call would both independently report NEW,
+        since a dry run never writes the first one for the second to see --
+        self-corrects on the next real (non-dry) run regardless, and is
+        visible in the dry run's own row-by-row report (both rows list the
+        same email) rather than hidden.
+
+        Never writes when `dry_run=True`, regardless of status -- returns
+        classification only, so the caller can report exactly what WOULD
+        happen without touching the CRM.
+        """
+        mapped = await self._apply_mapping(raw_row, column_mapping, classification_context)
+        if extra_fields:
+            mapped.update(extra_fields)
+
+        status, matched_contact, matched_on = await self.crm_service.classify_match(mapped)
+
+        if dry_run:
+            return status, matched_contact, matched_on, mapped
+
+        if status == CrmImportRowStatus.NEW:
+            contact = await self.crm_service.create_contact_from_import(mapped)
+            return status, contact, matched_on, mapped
+        if status == CrmImportRowStatus.EXISTING:
+            assert matched_contact is not None
+            merged = self.crm_service.apply_import_mapping(matched_contact, mapped, is_new=False)
+            await self.crm_service.contact_store.save(merged)
+            return status, merged, matched_on, mapped
+
+        return status, matched_contact, matched_on, mapped
+
     @staticmethod
     def _default_decision(status: CrmImportRowStatus) -> str:
         # POSSIBLE_DUPLICATE defaults to skip -- "never silently create duplicates"

@@ -7,14 +7,18 @@ just read them back out, so route modules don't each need their own
 import-time singleton.
 """
 
-from fastapi import Request
+import hmac
 
+from fastapi import Header, HTTPException, Request
+
+from app.config import settings
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
+from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 
 
@@ -44,3 +48,27 @@ async def get_crm_service(request: Request) -> CrmService:
 
 async def get_crm_import_service(request: Request) -> CrmImportService:
     return request.app.state.crm_import_service
+
+
+async def get_itf_ingestion_service(request: Request) -> ItfIngestionService:
+    return request.app.state.itf_ingestion_service
+
+
+async def verify_itf_webhook_token(authorization: str | None = Header(default=None)) -> None:
+    """
+    Shared-secret bearer-token check for POST /sync/itf-contact. Runs as a
+    route dependency, so a missing/invalid token is rejected before the
+    route body -- which touches the CRM and the ingestion ledger -- ever
+    runs. Never logs the token and never echoes it back in an error detail.
+
+    503 (not 401) when ITF_WEBHOOK_TOKEN itself isn't configured -- that's
+    an operator/deployment gap, not a caller authentication failure, and
+    the two should be distinguishable in Apps Script's logs.
+    """
+    if not settings.itf_webhook_token:
+        raise HTTPException(status_code=503, detail="ITF webhook is not configured.")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(token, settings.itf_webhook_token):
+        raise HTTPException(status_code=401, detail="Invalid token.")

@@ -1,0 +1,351 @@
+"""
+ItfIngestionService -- turns one Google Apps Script webhook call (one ITF
+Form submission) into a call to CrmImportService.import_one_row(), reusing
+the exact same classification/dedup/merge pipeline CSV import uses (see
+crm_import_service.py/crm_service.py/crm_classification_rules.py). No
+ITF-specific classification, dedup, or merge logic exists anywhere -- the
+only ITF-specific code in this whole pipeline is: turning the Apps Script
+payload into a raw_row dict, the dietary-preferences delimiter bridge
+(_normalize_dietary_preferences_delimiter -- see its docstring; it
+retargets one column's format only, never touches classify_dietary_
+preferences itself or anything CSV import relies on), and the idempotency
+ledger below.
+
+No Google credentials of any kind live in this backend -- a Google Apps
+Script bound to the ITF response Sheet (an installable onFormSubmit
+trigger) does the only reading of the Sheet, and POSTs the result to
+POST /sync/itf-contact (app/api/sync.py), authenticated by a shared-secret
+bearer token (ITF_WEBHOOK_TOKEN). This service never talks to Google.
+
+Header disambiguation
+----------------------
+Section 2 (private) and Section 3 (institutional) of the real Investor
+Thesis Form ask several questions with IDENTICAL wording (asset types,
+business models, industries, deal stages, meeting preferences, demographic
+preferences, and likely others) -- the Sheet therefore has two columns
+sharing the exact same header text. Apps Script sends `headers`/`values` as
+POSITIONAL parallel arrays specifically to avoid this collision (its own
+e.namedValues is a plain object keyed by header text and would silently
+drop one section's answer). _disambiguate_headers() below resolves it the
+same way the original polling design did, with no hardcoded assumption
+about exactly which questions repeat or where Section 3 starts/ends:
+scanning left to right, the FIRST time a header text is seen it's used
+as-is; every later time the exact same text is seen, " (Institutional)" is
+appended before it's used as a dict key. This is the same convention
+crm_classification_rules.py's classify_check_size already uses for "Check
+Size" / "Check Size (Institutional)" -- any rule that needs to distinguish
+the two sections' answers for a shared question just declares both alias
+spellings (see classify_thesis_checklist_fields).
+
+The header wording below (both in _SCALAR_COLUMN_ALIASES and in the
+classification rules' own aliases) was verified 2026-08-11 against the real
+Sheet's actual header row (26 columns, A-Z, read via a live read-only audit
+-- see that audit for the full column-by-column comparison). Confirmed real
+duplicate pairs (byte-identical private/institutional wording): asset
+types, business models, industries, check size, deal stages, and meeting
+preferences. Demographic preferences is NOT a byte-identical duplicate --
+the institutional wording drops the word "any" -- so its two column keys
+never collide in _disambiguate_headers() at all; classify_thesis_
+checklist_fields declares both exact strings explicitly rather than relying
+on the auto-suffix pattern for that one field. A wrong alias is still
+self-correcting and never silently wrong: it just leaves that field
+unmapped for every row (visible in a dry run's `warnings`), never a value
+written to the wrong field.
+"""
+
+import hashlib
+from datetime import datetime, timezone
+from typing import Any
+
+from app.models.crm import CrmImportRowStatus, CustomFieldType
+from app.models.itf import ItfIngestionLogEntry, ItfRowStatus, ItfWebhookResult
+from app.repositories.itf_ingestion_log_store import ItfIngestionLogStore
+from app.services.crm_classification_rules import _normalize_header, build_classification_context
+from app.services.crm_import_service import CrmImportService
+from app.services.crm_service import CrmDuplicateFieldKeyError
+
+# Best-effort scalar column_mapping -- see module docstring. Multi-select/checklist/
+# check-size/dietary-preference fields are deliberately NOT here; those are handled
+# by classification rules (crm_classification_rules.py), which read directly from
+# the raw row independent of this mapping.
+_SCALAR_COLUMN_ALIASES: dict[str, str] = {
+    "First Name": "first_name",
+    "Last Name": "last_name",
+    "Email Address": "email",
+    "LinkedIn Profile URL": "linkedin_url",
+    "Which city/cities do you live in or frequent?": "thesis_cities",
+    "Do you invest privately or institutionally (or both)?": "thesis_investor_mode",
+    "Do you have any other criteria or feedback?": "thesis_private_other_criteria",
+    "Do you also invest institutionally (via a fund)?": "thesis_also_invests_institutionally",
+    "Do you have any other criteria or feedback? (Institutional)": "thesis_institutional_other_criteria",
+    "Want us to invite/include other investor-friends? If so, enter their email(s) here.": "thesis_referral_emails",
+}
+
+_TIMESTAMP_COLUMN_ALIASES = ("Timestamp",)
+# Best-effort Google Forms timestamp formats -- exact format/timezone is one of the
+# explicit field-mapping-audit verification items. An unparseable value is never
+# guessed at: the submission is still processed, itf_submitted_at is simply left
+# unset for it, and a warning is added to the result so this list can be corrected
+# once the real format is seen.
+_TIMESTAMP_FORMATS = ("%m/%d/%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M")
+
+_STATUS_STRINGS = {
+    CrmImportRowStatus.NEW: ItfRowStatus.CREATED,
+    CrmImportRowStatus.EXISTING: ItfRowStatus.UPDATED,
+    CrmImportRowStatus.POSSIBLE_DUPLICATE: ItfRowStatus.POSSIBLE_DUPLICATE,
+    CrmImportRowStatus.ERROR: ItfRowStatus.ERROR,
+}
+
+ITF_SUBMITTED_AT_FIELD_KEY = "itf_submitted_at"
+
+
+def _content_hash(header_ordered_values: list[str]) -> str:
+    """Stable hash of a submission's raw cell values (in header order) --
+    detects a resubmission with genuinely different content vs. a retry of
+    the exact same trigger firing. \\x1f (unit separator) is used as the
+    join delimiter specifically because it can't be typed into a normal
+    Sheet cell -- and even in the vanishingly unlikely case of a collision,
+    the only consequence is an unnecessary reprocess, never a wrongly-
+    skipped one, so exact delimiter safety isn't security-critical here."""
+    return hashlib.sha256("\x1f".join(header_ordered_values).encode("utf-8")).hexdigest()
+
+
+def _disambiguate_headers(headers: list[str]) -> list[str]:
+    """See module docstring. The FIRST occurrence of a header text is used
+    as-is; every later occurrence gets ' (Institutional)' appended before
+    use, so both sections' answers survive as distinct dict keys."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw_header in headers:
+        header = raw_header.strip()
+        if header in seen:
+            header = f"{header} (Institutional)"
+        seen.add(header)
+        result.append(header)
+    return result
+
+
+def _zip_row(headers: list[str], values: list[str]) -> dict[str, str]:
+    """Builds the raw_row dict CrmImportService expects from `headers`
+    (already disambiguated) and `values` (Apps Script's e.values, positional
+    and parallel to the ORIGINAL header row) -- a `values` shorter than
+    `headers` (Google Sheets omits trailing empty cells) is treated as blank
+    for its missing trailing columns."""
+    row: dict[str, str] = {}
+    for i, header in enumerate(headers):
+        value = values[i] if i < len(values) else ""
+        if value and value.strip():
+            row[header] = value.strip()
+    return row
+
+
+def _build_column_mapping(headers: list[str]) -> dict[str, str]:
+    """Matches each real header against _SCALAR_COLUMN_ALIASES by normalized
+    text -- an unmatched real header is simply left out of column_mapping,
+    never guessed."""
+    normalized_aliases = {_normalize_header(k): v for k, v in _SCALAR_COLUMN_ALIASES.items()}
+    mapping: dict[str, str] = {}
+    for header in headers:
+        target = normalized_aliases.get(_normalize_header(header))
+        if target:
+            mapping[header] = target
+    return mapping
+
+
+def _find_raw(raw_row: dict[str, str], *aliases: str) -> str | None:
+    normalized_aliases = {_normalize_header(a) for a in aliases}
+    for header, value in raw_row.items():
+        if _normalize_header(header) in normalized_aliases and value:
+            return value
+    return None
+
+
+def _parse_submitted_at(raw_row: dict[str, str]) -> str | None:
+    raw = _find_raw(raw_row, *_TIMESTAMP_COLUMN_ALIASES)
+    if not raw:
+        return None
+    for fmt in _TIMESTAMP_FORMATS:
+        try:
+            return datetime.strptime(raw.strip(), fmt).isoformat()
+        except ValueError:
+            continue
+    return None
+
+
+_DIETARY_COLUMN_ALIASES = ("Do you have dietary preferences?", "Dietary Preferences", "Dietary Restrictions")
+
+
+def _normalize_dietary_preferences_delimiter(raw_row: dict[str, str]) -> dict[str, str]:
+    """
+    ITF-only pre-classifier bridge -- deliberately NOT a change to
+    classify_dietary_preferences (crm_classification_rules.py), which stays
+    exactly as CSV import already relies on it: every other multi-select
+    thesis field in this codebase uses a ';'-separated CSV cell (see
+    crm_import_service.py's module docstring -- the convention exists
+    because several Investor Thesis option lists contain literal commas,
+    and it's applied uniformly across every such field, dietary preferences
+    included, rather than decided per-field). CSV behavior must not change.
+
+    Google Forms, on the other hand, joins a checkbox question's selections
+    with ', ' -- confirmed live against 6 other multi-select ITF questions
+    in the real Sheet (2026-08-11 audit); no real non-blank example existed
+    for dietary preferences specifically, so this is the same, consistently-
+    observed Google Forms behavior applied to the one question that
+    happened to be left blank in the only real response so far.
+
+    This function retargets ONLY the dietary-preferences column (if
+    present) from ITF's ', '-joined format into the ';'-joined format the
+    shared classifier expects, then lets that classifier do everything else
+    unchanged: recognition against DIETARY_PREFERENCE_OPTIONS, "Other"
+    overflow handling, all of it. It uses greedy known-option matching
+    (_split_known_options) rather than a blind comma-split specifically so a
+    human's free-typed "Other" answer that happens to contain its own comma
+    (e.g. "No pork, no shellfish") is never shredded into two garbage
+    fragments -- DIETARY_PREFERENCE_OPTIONS itself has no internal commas,
+    so every recognized option still matches cleanly regardless. A no-op
+    (returns raw_row unchanged) for any row without a dietary-preferences
+    column at all -- i.e. this function is never reachable from CSV import,
+    which never calls it.
+    """
+    from app.models.crm import DIETARY_PREFERENCE_OPTIONS
+    from app.services.crm_classification_rules import _split_known_options
+
+    normalized_aliases = {_normalize_header(a) for a in _DIETARY_COLUMN_ALIASES}
+    key = next((h for h in raw_row if _normalize_header(h) in normalized_aliases), None)
+    if key is None or not raw_row[key]:
+        return raw_row
+
+    matched, leftover = _split_known_options(raw_row[key], list(DIETARY_PREFERENCE_OPTIONS))
+    segments = list(matched)
+    if leftover:
+        segments.append(leftover)
+    if not segments:
+        return raw_row
+
+    return {**raw_row, key: "; ".join(segments)}
+
+
+class ItfIngestionService:
+    """
+    process_submission() is the whole surface area: one Apps Script webhook
+    call in, one ItfWebhookResult out. Skips (reports ALREADY_PROCESSED,
+    never re-processes) a row whose ingestion-log entry already has a
+    matching content_hash and a non-error status -- see
+    ItfIngestionLogEntry's docstring for the full skip/retry/reprocess rule.
+    Never writes to the CRM, the ingestion log, or the itf_submitted_at
+    custom field definition when `dry_run=True`.
+    """
+
+    def __init__(self, import_service: CrmImportService, log_store: ItfIngestionLogStore):
+        self.import_service = import_service
+        self.log_store = log_store
+
+    async def process_submission(
+        self,
+        headers: list[str],
+        values: list[str],
+        row_number: int,
+        response_id: str | None = None,
+        dry_run: bool = False,
+    ) -> ItfWebhookResult:
+        disambiguated_headers = _disambiguate_headers(headers)
+        raw_row = _zip_row(disambiguated_headers, values)
+        # Hash the ORIGINAL submitted content, before the dietary-preferences
+        # delimiter bridge below -- idempotency should reflect what was actually
+        # submitted, not a normalized derivative of it (the two are equivalent for
+        # correctness either way, since normalization is deterministic, but hashing
+        # the original keeps the ledger's content_hash meaningful for debugging).
+        content_hash = _content_hash([raw_row.get(h, "") for h in disambiguated_headers])
+        raw_row = _normalize_dietary_preferences_delimiter(raw_row)
+
+        prior = await self.log_store.get(row_number)
+        if prior is not None and prior.status != ItfRowStatus.ERROR and prior.content_hash == content_hash:
+            return ItfWebhookResult(
+                status=ItfRowStatus.ALREADY_PROCESSED.value,
+                dry_run=dry_run,
+                contact_id=prior.crm_contact_id,
+            )
+
+        if not dry_run:
+            await self._ensure_submitted_at_field_exists()
+
+        column_mapping = _build_column_mapping(disambiguated_headers)
+        classification_context = await build_classification_context(self.import_service.crm_service.custom_field_store)
+
+        warnings: list[str] = []
+        submitted_at = _parse_submitted_at(raw_row)
+        extra_fields: dict[str, Any] = {"source": "itf"}
+        if submitted_at:
+            extra_fields[f"custom:{ITF_SUBMITTED_AT_FIELD_KEY}"] = submitted_at
+        else:
+            warnings.append(f"Timestamp value not recognized -- {ITF_SUBMITTED_AT_FIELD_KEY} left unset")
+
+        unmapped = [
+            alias
+            for alias in _SCALAR_COLUMN_ALIASES
+            if _normalize_header(alias) not in {_normalize_header(h) for h in disambiguated_headers}
+        ]
+        if unmapped:
+            warnings.append(
+                "No matching column found for expected question(s) -- verify exact wording against "
+                f"the real header row: {', '.join(unmapped)}"
+            )
+
+        now = datetime.now(timezone.utc)
+        mapped: dict[str, Any] = {}
+        error_message: str | None = None
+        try:
+            status, contact, matched_on, mapped = await self.import_service.import_one_row(
+                raw_row, column_mapping, classification_context, extra_fields=extra_fields, dry_run=dry_run
+            )
+            itf_status = _STATUS_STRINGS[status]
+        except Exception as e:
+            itf_status, contact, matched_on = ItfRowStatus.ERROR, None, None
+            error_message = str(e)
+
+        if not dry_run:
+            await self.log_store.save(
+                ItfIngestionLogEntry(
+                    row_number=row_number,
+                    content_hash=content_hash,
+                    status=itf_status,
+                    response_id=response_id,
+                    crm_contact_id=contact.crm_contact_id if contact else None,
+                    email=mapped.get("email"),
+                    error_message=error_message,
+                    processed_at=now,
+                )
+            )
+
+        return ItfWebhookResult(
+            status=itf_status.value,
+            dry_run=dry_run,
+            contact_id=contact.crm_contact_id if contact else None,
+            matched_on=matched_on,
+            mapped_fields=mapped if dry_run else None,
+            warnings=warnings,
+            error=error_message,
+        )
+
+    async def _ensure_submitted_at_field_exists(self) -> None:
+        """
+        Get-or-create for the itf_submitted_at custom field DEFINITION (DATE
+        type) -- needed only so it shows up in the CRM's admin UI / More
+        Filters registry; the underlying data write (custom_fields dict key)
+        works regardless of whether a definition exists. Idempotent, and
+        deliberately never called when dry_run=True -- a dry run must never
+        write anything to the CRM, including a field definition.
+        """
+        custom_field_store = self.import_service.crm_service.custom_field_store
+        existing = await custom_field_store.get_by_field_key(ITF_SUBMITTED_AT_FIELD_KEY)
+        if existing is not None:
+            return
+        try:
+            await self.import_service.crm_service.create_custom_field(
+                field_key=ITF_SUBMITTED_AT_FIELD_KEY,
+                label="ITF Submitted At",
+                field_type=CustomFieldType.DATE,
+                description="Timestamp of this contact's most recent Investor Thesis Form submission.",
+            )
+        except CrmDuplicateFieldKeyError:
+            pass  # created concurrently by another request -- harmless, already exists
