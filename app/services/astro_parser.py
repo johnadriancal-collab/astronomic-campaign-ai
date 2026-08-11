@@ -42,8 +42,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
-from app.models.crm import INDUSTRY_OPTIONS, FilterCondition
+from app.models.crm import INDUSTRY_OPTIONS, FilterCondition, FilterQuery
 
 INVESTOR_TYPE_FIELD_KEY = "custom:investor_type"
 INVESTMENT_INDUSTRY_FIELD_KEY = "custom:investment_industry"
@@ -55,6 +56,15 @@ SUPPORTED_FIELDS_MESSAGE = (
     "Investor Mode, City/State, and archived status."
 )
 
+FIELD_LABELS: dict[str, str] = {
+    "city": "City",
+    "state": "State",
+    INVESTOR_TYPE_FIELD_KEY: "Investor Type",
+    INVESTMENT_INDUSTRY_FIELD_KEY: "Investment Industry",
+    CHECK_SIZE_PERSONAL_FIELD_KEY: "Check Size Personal",
+    INVESTOR_MODE_FIELD_KEY: "Investor Mode",
+}
+
 
 @dataclass
 class ParsedCommand:
@@ -62,6 +72,15 @@ class ParsedCommand:
     filters: list[FilterCondition]
     include_archived: bool
     understood_as: str
+    # Populated ONLY for a resolved Phase 1.1 refinement turn (never for a
+    # standalone Phase 1 command) -- see attempt_refinement() below.
+    operation: str | None = None  # "add" | "replace" | "remove" | "reset" | "change_intent"
+    changed_field: str | None = None
+    # Deterministic message-builder: the parser knows WHAT happened and HOW to
+    # phrase it, but not the result count (it has no DB access) -- the route
+    # calls this with the real `total` from CrmService.query_contacts() to
+    # produce the final user-facing string. Never touches Claude/Anthropic.
+    message_template: Callable[[int], str] | None = None
 
 
 @dataclass
@@ -69,6 +88,11 @@ class UnresolvedCommand:
     understood: dict[str, str] = field(default_factory=dict)
     unresolved_phrase: str = ""
     message: str = ""
+    # Populated ONLY when this Unresolved came from a refinement attempt (not
+    # a standalone Phase 1 parse) -- the exact, byte-for-byte unchanged query
+    # the caller had before this turn, so the route can prove/report that an
+    # ambiguous refinement never mutated anything.
+    unchanged_query: FilterQuery | None = None
 
 
 # --- normalization ---
@@ -408,3 +432,401 @@ def parse(
 
     understood_as = ", ".join(f"{k} = {v}" for k, v in understood.items()) or "(no filters -- showing all contacts)"
     return ParsedCommand(intent=intent, filters=filters, include_archived=include_archived, understood_as=understood_as)
+
+
+# =====================================================================
+# Phase 1.1 (2026-08-13): conversational query refinement.
+#
+# Architecture: the frontend holds ALL conversation state (the last
+# resolved FilterQuery + intent) and resends it as `context` on every
+# follow-up request -- see app/models/astro.py's AstroCommandContext and
+# app/api/astro.py's dispatch. This module has NO session store, no
+# session id, no persistence of any kind; attempt_refinement() below is a
+# pure function of (text, current_filters, current_include_archived,
+# current_intent, live options) -> a new ParsedCommand/UnresolvedCommand,
+# exactly like parse() above.
+#
+# app/api/astro.py always tries the STANDALONE parse() first; only when
+# that returns Unresolved (most commonly: no recognized verb, e.g. "Only
+# Austin" has no "find"/"show"/"how many") AND a `context` was supplied
+# does it fall back to attempt_refinement(). This is what makes Phase 1
+# standalone commands behave identically whether or not `context` is
+# present (requirement: never change existing behavior) -- a fully
+# well-formed sentence like "Find investors in Aerospace" always resolves
+# via the plain parse() above and is treated as a brand-new query,
+# discarding any prior context.
+#
+# Single refinement operation per message only (2026-08-13, approved
+# scope limit) -- a message that resolves to changes on more than one
+# field in one go (e.g. hypothetically "Only Austin and family offices")
+# is deliberately treated as Unresolved with a "one filter at a time"
+# message, rather than guessing which combination was intended. Compound
+# refinements are an explicit non-goal for this phase.
+# =====================================================================
+
+
+def _contacts_word(total: int) -> str:
+    return "contact" if total == 1 else "contacts"
+
+
+def _format_understood(understood: dict[str, str]) -> str:
+    return ", ".join(f"{k} = {v}" for k, v in understood.items()) or "no filters"
+
+
+def _filters_to_understood(filters: list[FilterCondition]) -> dict[str, str]:
+    """Same rendering convention parse() uses, but built FROM an existing filter
+    list (for describing what's still active before/after a refinement) rather
+    than accumulated during extraction."""
+    understood: dict[str, str] = {}
+    for condition in filters:
+        label = FIELD_LABELS.get(condition.field, condition.field)
+        if condition.field == CHECK_SIZE_PERSONAL_FIELD_KEY:
+            understood[label] = f">= {condition.value}"
+        elif isinstance(condition.value, list):
+            understood[label] = ", ".join(str(v) for v in condition.value)
+        else:
+            understood[label] = str(condition.value)
+    return understood
+
+
+# --- FilterQuery mutation helpers (pure, deterministic) ---
+
+
+def _remove_fields(filters: list[FilterCondition], field_keys: list[str]) -> list[FilterCondition]:
+    return [c for c in filters if c.field not in field_keys]
+
+
+def _replace_field(filters: list[FilterCondition], condition: FilterCondition) -> list[FilterCondition]:
+    kept = [c for c in filters if c.field != condition.field]
+    kept.append(condition)
+    return kept
+
+
+def _union_field(filters: list[FilterCondition], field_key: str, operator: str, new_values: list[str]) -> tuple[list[FilterCondition], list[str]]:
+    """Extends the existing condition's value list (deduplicated) rather than
+    adding a second AND'd condition -- a second condition on the same
+    contains_any field would mean INTERSECTION, not the union "show X too"
+    semantics ADD is supposed to have. Returns (new_filters, values_actually_added)."""
+    existing = next((c for c in filters if c.field == field_key), None)
+    if existing is None:
+        return filters + [FilterCondition(field=field_key, operator=operator, value=list(new_values))], list(new_values)
+    existing_values = existing.value if isinstance(existing.value, list) else [existing.value]
+    added = [v for v in new_values if v not in existing_values]
+    merged_values = existing_values + added
+    kept = [c for c in filters if c.field != field_key]
+    kept.append(FilterCondition(field=field_key, operator=operator, value=merged_values))
+    return kept, added
+
+
+# --- message templates (deterministic; `total` supplied later by the route) ---
+
+
+def _format_threshold_display(bucket: str) -> str:
+    lower = _bucket_lower_bound(bucket)
+    if lower is None:
+        return bucket
+    if lower % 1_000_000 == 0:
+        return f"${int(lower // 1_000_000)}M+"
+    return f"${int(lower // 1_000)}k+"
+
+
+def _msg_location(value: str) -> Callable[[int], str]:
+    return lambda total: f"Showing {total} {_contacts_word(total)} in {value}. Your other filters are unchanged."
+
+
+def _msg_check_size(display: str, had_prior: bool) -> Callable[[int], str]:
+    if had_prior:
+        return lambda total: f"Updated the check-size filter to {display}. {total} {_contacts_word(total)} match."
+    return lambda total: f"Added a {display} check-size filter. {total} {_contacts_word(total)} match."
+
+
+def _msg_remove_field(label: str) -> Callable[[int], str]:
+    return lambda total: f"Removed the {label} filter. {total} {_contacts_word(total)} match."
+
+
+def _msg_remove_value(label: str, values: list[str]) -> Callable[[int], str]:
+    joined = " and ".join(values)
+    return lambda total: f"Removed {joined} from your {label} filter. {total} {_contacts_word(total)} match."
+
+
+def _msg_add_values(label: str, values: list[str]) -> Callable[[int], str]:
+    joined = " and ".join(values)
+    return lambda total: f"Added {joined} to your {label} filter. {total} {_contacts_word(total)} match."
+
+
+def _msg_replace_multiselect(label: str, values: list[str]) -> Callable[[int], str]:
+    joined = " or ".join(values)
+    return lambda total: f"Showing {total} {_contacts_word(total)} matching {label} = {joined}. Your other filters are unchanged."
+
+
+def _msg_investor_mode(desc: str) -> Callable[[int], str]:
+    return lambda total: f"Showing {total} {_contacts_word(total)} who invest {desc}. Your other filters are unchanged."
+
+
+def _msg_reset() -> Callable[[int], str]:
+    return lambda total: f"Cleared all filters. Showing {total} {_contacts_word(total)}."
+
+
+def _msg_change_intent(new_intent: str) -> Callable[[int], str]:
+    if new_intent == "count_contacts":
+        return lambda total: f"{total} {_contacts_word(total)} match your current filters."
+    return lambda total: f"Showing {total} {_contacts_word(total)} matching your current filters."
+
+
+def _msg_archived(included: bool) -> Callable[[int], str]:
+    if included:
+        return lambda total: f"Now including archived contacts. {total} {_contacts_word(total)} match."
+    return lambda total: f"Excluding archived contacts again. {total} {_contacts_word(total)} match."
+
+
+# --- concept vocabulary for whole-field REMOVE (distinct from the VALUE alias
+# tables above -- "remove check size" names the FIELD, not a value) ---
+
+_CONCEPT_TO_FIELDS: dict[str, list[str]] = {
+    "check size": [CHECK_SIZE_PERSONAL_FIELD_KEY],
+    "check-size": [CHECK_SIZE_PERSONAL_FIELD_KEY],
+    "location": ["city", "state"],
+    "city": ["city"],
+    "state": ["state"],
+    "investor type": [INVESTOR_TYPE_FIELD_KEY],
+    "investment industry": [INVESTMENT_INDUSTRY_FIELD_KEY],
+    "industry": [INVESTMENT_INDUSTRY_FIELD_KEY],
+    "investor mode": [INVESTOR_MODE_FIELD_KEY],
+}
+
+_RESET_TRIGGERS = ("start over", "reset the search", "reset", "clear all filters", "clear filters", "show everyone again", "show all again")
+_REFINEMENT_ONLY_STOPWORDS = {"them", "it", "again", "left", "still", "everyone", "all", "over"}
+
+
+def attempt_refinement(
+    text: str,
+    current_filters: list[FilterCondition],
+    current_include_archived: bool,
+    current_intent: str,
+    investor_type_options: list[str],
+    check_size_ordered_options: list[str],
+) -> ParsedCommand | UnresolvedCommand:
+    """
+    Called ONLY as a fallback when the standalone parse() above returned
+    Unresolved AND the caller supplied an existing (filters, include_archived,
+    intent) context -- see the module docstring above this section. Never
+    called for a fully-formed standalone command; see app/api/astro.py.
+    """
+    normalized = _normalize(text)
+    unchanged_query = FilterQuery(filters=list(current_filters), include_archived=current_include_archived)
+
+    def unresolved(unresolved_phrase: str) -> UnresolvedCommand:
+        current_desc = _format_understood(_filters_to_understood(current_filters))
+        return UnresolvedCommand(
+            understood={},
+            unresolved_phrase=unresolved_phrase,
+            message=(
+                f"Your current filters are unchanged ({current_desc}). I don't know what you mean by "
+                f"'{unresolved_phrase}'. " + SUPPORTED_FIELDS_MESSAGE
+            ),
+            unchanged_query=unchanged_query,
+        )
+
+    # 1. RESET -- checked before anything else; "show everyone/all again" must
+    # not be mistaken for the filters-preserving "show them/it again" below.
+    for trigger in _RESET_TRIGGERS:
+        if trigger in normalized:
+            return ParsedCommand(
+                intent="search_contacts",
+                filters=[],
+                include_archived=False,
+                understood_as="(reset -- showing all contacts)",
+                operation="reset",
+                changed_field=None,
+                message_template=_msg_reset(),
+            )
+
+    # 2. Intent-only change ("How many are left?", "Show them again") -- if,
+    # after stripping intent triggers + the generic Phase 1 STOPWORDS + a
+    # small set of refinement-only pronouns, nothing meaningful remains.
+    detected_intent = _detect_intent(normalized)
+    intent_stripped = normalized
+    for trigger in _COUNT_TRIGGERS + _SEARCH_TRIGGERS:
+        intent_stripped = intent_stripped.replace(trigger, " ")
+    leftover_after_intent = [
+        t for t in intent_stripped.split() if t not in _STOPWORDS and t not in _REFINEMENT_ONLY_STOPWORDS
+    ]
+    if detected_intent is not None and not leftover_after_intent:
+        return ParsedCommand(
+            intent=detected_intent,
+            filters=list(current_filters),
+            include_archived=current_include_archived,
+            understood_as="(unchanged filters)",
+            operation="change_intent",
+            changed_field=None,
+            message_template=_msg_change_intent(detected_intent),
+        )
+
+    # 3. REMOVE
+    remove_match = re.search(r"\b(remove|drop|clear|without)\b", normalized)
+    if remove_match:
+        remainder = normalized[remove_match.end() :].strip()
+
+        for concept in sorted(_CONCEPT_TO_FIELDS, key=len, reverse=True):
+            if re.search(r"\b" + re.escape(concept) + r"\b", remainder):
+                field_keys = _CONCEPT_TO_FIELDS[concept]
+                new_filters = _remove_fields(current_filters, field_keys)
+                label = " / ".join(FIELD_LABELS.get(k, k) for k in field_keys)
+                return ParsedCommand(
+                    intent=current_intent,
+                    filters=new_filters,
+                    include_archived=current_include_archived,
+                    understood_as=f"(removed {label})",
+                    operation="remove",
+                    changed_field=",".join(field_keys),
+                    message_template=_msg_remove_field(label),
+                )
+
+        if re.search(r"\barchived\b", remainder):
+            return ParsedCommand(
+                intent=current_intent,
+                filters=list(current_filters),
+                include_archived=False,
+                understood_as="(archived excluded)",
+                operation="remove",
+                changed_field="include_archived",
+                message_template=_msg_archived(included=False),
+            )
+
+        for field_key, alias_map in (
+            (INVESTOR_TYPE_FIELD_KEY, _investor_type_aliases(investor_type_options)),
+            (INVESTMENT_INDUSTRY_FIELD_KEY, _INDUSTRY_ALIASES),
+        ):
+            _, matched_values = _find_all_and_consume(remainder, alias_map)
+            if matched_values:
+                existing = next((c for c in current_filters if c.field == field_key), None)
+                if existing is None:
+                    continue
+                existing_values = existing.value if isinstance(existing.value, list) else [existing.value]
+                remaining_values = [v for v in existing_values if v not in matched_values]
+                if remaining_values:
+                    new_filters = _replace_field(
+                        current_filters, FilterCondition(field=field_key, operator=existing.operator, value=remaining_values)
+                    )
+                else:
+                    new_filters = _remove_fields(current_filters, [field_key])
+                label = FIELD_LABELS[field_key]
+                return ParsedCommand(
+                    intent=current_intent,
+                    filters=new_filters,
+                    include_archived=current_include_archived,
+                    understood_as=f"(removed {', '.join(matched_values)} from {label})",
+                    operation="remove",
+                    changed_field=field_key,
+                    message_template=_msg_remove_value(label, matched_values),
+                )
+
+        return unresolved(remainder or "that")
+
+    # 4/5/6. ONLY (replace) / ADD (union) / bare phrase (defaults to replace)
+    only_match = re.match(r"^only\b\s*(.*)", normalized)
+    add_match = re.match(r"^(?:add|also|include)\b\s*(.*)", normalized)
+    is_add = False
+    if only_match:
+        phrase = only_match.group(1)
+    elif add_match:
+        phrase = add_match.group(1)
+        is_add = True
+    else:
+        phrase = normalized
+
+    phrase = re.sub(r"\btoo\b", " ", phrase).strip()
+
+    remainder = phrase
+    remainder, check_size_bucket = _extract_check_size(remainder, check_size_ordered_options)
+    remainder, matched_investor_types = _find_all_and_consume(remainder, _investor_type_aliases(investor_type_options))
+    remainder, mode_conditions, mode_labels = _extract_investor_mode(remainder)
+    remainder, matched_industries = _find_all_and_consume(remainder, _INDUSTRY_ALIASES)
+    remainder, location_conditions = _extract_locations(remainder)
+    remainder, archived_flag = _extract_archived(remainder)
+
+    leftover_tokens = [t for t in remainder.split() if t not in _STOPWORDS]
+    leftover_phrase = " ".join(leftover_tokens).strip()
+    if leftover_phrase:
+        return unresolved(leftover_phrase)
+
+    changes: list[tuple[list[FilterCondition], bool, str, str, Callable[[int], str]]] = []
+    # each entry: (new_filters, new_include_archived, operation, changed_field, message_template)
+
+    if check_size_bucket:
+        had_prior = any(c.field == CHECK_SIZE_PERSONAL_FIELD_KEY for c in current_filters)
+        new_filters = _replace_field(
+            current_filters, FilterCondition(field=CHECK_SIZE_PERSONAL_FIELD_KEY, operator="gte", value=check_size_bucket)
+        )
+        display = _format_threshold_display(check_size_bucket)
+        changes.append((new_filters, current_include_archived, "replace", CHECK_SIZE_PERSONAL_FIELD_KEY, _msg_check_size(display, had_prior)))
+
+    if matched_investor_types:
+        if is_add:
+            new_filters, added = _union_field(current_filters, INVESTOR_TYPE_FIELD_KEY, "contains_any", matched_investor_types)
+            changes.append(
+                (new_filters, current_include_archived, "add", INVESTOR_TYPE_FIELD_KEY,
+                 _msg_add_values(FIELD_LABELS[INVESTOR_TYPE_FIELD_KEY], added or matched_investor_types))
+            )
+        else:
+            new_filters = _replace_field(
+                current_filters, FilterCondition(field=INVESTOR_TYPE_FIELD_KEY, operator="contains_any", value=matched_investor_types)
+            )
+            changes.append(
+                (new_filters, current_include_archived, "replace", INVESTOR_TYPE_FIELD_KEY,
+                 _msg_replace_multiselect(FIELD_LABELS[INVESTOR_TYPE_FIELD_KEY], matched_investor_types))
+            )
+
+    if matched_industries:
+        if is_add:
+            new_filters, added = _union_field(current_filters, INVESTMENT_INDUSTRY_FIELD_KEY, "contains_any", matched_industries)
+            changes.append(
+                (new_filters, current_include_archived, "add", INVESTMENT_INDUSTRY_FIELD_KEY,
+                 _msg_add_values(FIELD_LABELS[INVESTMENT_INDUSTRY_FIELD_KEY], added or matched_industries))
+            )
+        else:
+            new_filters = _replace_field(
+                current_filters, FilterCondition(field=INVESTMENT_INDUSTRY_FIELD_KEY, operator="contains_any", value=matched_industries)
+            )
+            changes.append(
+                (new_filters, current_include_archived, "replace", INVESTMENT_INDUSTRY_FIELD_KEY,
+                 _msg_replace_multiselect(FIELD_LABELS[INVESTMENT_INDUSTRY_FIELD_KEY], matched_industries))
+            )
+
+    if mode_conditions:
+        new_filters = _remove_fields(current_filters, [INVESTOR_MODE_FIELD_KEY]) + mode_conditions
+        if "institutionally" in mode_labels and "privately" in mode_labels:
+            desc = "both privately and institutionally"
+        elif "institutionally" in mode_labels:
+            desc = "institutionally"
+        else:
+            desc = "privately"
+        changes.append((new_filters, current_include_archived, "replace", INVESTOR_MODE_FIELD_KEY, _msg_investor_mode(desc)))
+
+    if location_conditions:
+        new_filters = current_filters
+        for condition in location_conditions:
+            new_filters = _replace_field(new_filters, condition)
+        primary = location_conditions[0]
+        changes.append((new_filters, current_include_archived, "replace", primary.field, _msg_location(str(primary.value))))
+
+    if archived_flag:
+        changes.append((list(current_filters), True, "add" if is_add else "replace", "include_archived", _msg_archived(included=True)))
+
+    if not changes:
+        return unresolved(phrase.strip() or text.strip())
+
+    if len(changes) > 1:
+        fields_touched = ", ".join(FIELD_LABELS.get(c[3], c[3]) for c in changes)
+        return unresolved(f"multiple filters at once ({fields_touched}) -- please change one at a time")
+
+    new_filters, new_include_archived, operation, changed_field, message_template = changes[0]
+    return ParsedCommand(
+        intent=current_intent,
+        filters=new_filters,
+        include_archived=new_include_archived,
+        understood_as=f"(refined {FIELD_LABELS.get(changed_field, changed_field)})",
+        operation=operation,
+        changed_field=changed_field,
+        message_template=message_template,
+    )
