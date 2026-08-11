@@ -8,6 +8,7 @@ import { cn } from "@/lib/utils";
 const SECTIONS = [
   { href: "/crm", label: "Contacts", icon: Users, exact: true },
   { href: "/crm/filters", label: "More Filters", icon: ListFilter },
+  { href: "/astro", label: "Astro Search", icon: MessageCircle },
   { href: "/crm/import", label: "Import CSV", icon: ListPlus },
   { href: "/crm/fields", label: "Custom Fields", icon: SlidersHorizontal },
 ];
@@ -40,13 +41,6 @@ export function CrmSidebar() {
           <Contact className="h-4 w-4" />
           CRM
         </div>
-        <Link
-          href="/astro"
-          className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-        >
-          <MessageCircle className="h-4 w-4" />
-          Astro Search
-        </Link>
       </div>
 
       <div className="px-3">

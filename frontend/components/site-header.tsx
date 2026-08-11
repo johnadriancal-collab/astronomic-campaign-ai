@@ -9,7 +9,6 @@ const TOP_LEVEL_AREAS = [
   { href: "/", label: "Astro AI" },
   { href: "/manager", label: "Campaign Manager" },
   { href: "/crm", label: "CRM" },
-  { href: "/astro", label: "Astro Search" },
 ];
 
 function isAreaActive(pathname: string, href: string) {
