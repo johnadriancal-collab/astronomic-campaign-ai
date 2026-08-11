@@ -392,6 +392,13 @@ async def test_full_real_row_dry_run_maps_every_column_with_no_warnings(itf_serv
     ]
     assert mapped["thesis_institutional_business_models"] == ["Brokerages", "Community-based / Network-led growth"]
     assert mapped["thesis_institutional_industries"] == ["Creative Industries (Media, Music, Photo, etc.)", "Cybersecurity"]
+    # investment_industry (custom field) -- ordered, deduplicated union of the private
+    # and institutional industries above, populated by classify_industry (not
+    # classify_thesis_checklist_fields), reusing the SAME ITF header lookups
+    assert mapped["custom:investment_industry"] == [
+        "Aerospace & Defense", "AgTech & Food Production",
+        "Creative Industries (Media, Music, Photo, etc.)", "Cybersecurity",
+    ]
     assert mapped["thesis_institutional_deal_stages"] == ["Growth Equity (post-Series B+, but still private)"]
     assert mapped["thesis_institutional_meeting_preferences"] == ["I'd host a dinner at my house"]
     # W IS a duplicate of N (both byte-identical, auto-suffixed by _disambiguate_headers) --

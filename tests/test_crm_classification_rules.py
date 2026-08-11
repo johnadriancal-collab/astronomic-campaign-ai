@@ -96,6 +96,92 @@ def test_blank_values_are_treated_as_missing():
     assert result["custom:investment_industry"] == ["Biotech"]
 
 
+# --- investment_industry <- ITF private/institutional industries (2026-08-12) ---
+
+
+def test_investment_industry_populated_from_itf_private_industries_only():
+    row = {
+        "Which industries do you invest in or are you interested in?": (
+            "Aerospace & Defense, AgTech & Food Production"
+        )
+    }
+    result = classify_industry(row, NO_CONTEXT)
+    assert result["custom:investment_industry"] == ["Aerospace & Defense", "AgTech & Food Production"]
+    # thesis_private_industries/thesis_institutional_industries are a different rule's
+    # responsibility (classify_thesis_checklist_fields) -- classify_industry never sets them
+    assert "thesis_private_industries" not in result
+    assert "thesis_institutional_industries" not in result
+
+
+def test_investment_industry_populated_from_itf_institutional_industries_only():
+    row = {
+        "Which industries do you invest in or are you interested in? (Institutional)": (
+            "Cybersecurity, Fintech (Finance & Insurance)"
+        )
+    }
+    result = classify_industry(row, NO_CONTEXT)
+    assert result["custom:investment_industry"] == ["Cybersecurity", "Fintech (Finance & Insurance)"]
+
+
+def test_investment_industry_unions_itf_private_and_institutional_deduplicated():
+    row = {
+        "Which industries do you invest in or are you interested in?": (
+            "Aerospace & Defense, AgTech & Food Production, Cybersecurity"
+        ),
+        "Which industries do you invest in or are you interested in? (Institutional)": (
+            "Cybersecurity, Fintech (Finance & Insurance)"
+        ),
+    }
+    result = classify_industry(row, NO_CONTEXT)
+    assert result["custom:investment_industry"] == [
+        "Aerospace & Defense",
+        "AgTech & Food Production",
+        "Cybersecurity",
+        "Fintech (Finance & Insurance)",
+    ]
+
+
+def test_investment_industry_csv_only_regression_unaffected_by_itf_change():
+    """Defensive regression: a plain CSV row (no ITF headers present at all) must
+    produce byte-identical output to before this change -- confirms the ITF lookups
+    added to classify_industry are a true no-op on the CSV import path."""
+    row = {"Industry": "Information Technology & Services", "Main Industry": "Healthcare, Fintech", "Sub-industry": "Biotech"}
+    result = classify_industry(row, NO_CONTEXT)
+    assert result["industry"] == "Information Technology & Services"
+    assert result["custom:investment_industry"] == ["Healthcare", "Fintech", "Biotech"]
+
+
+def test_investment_industry_combines_csv_and_itf_sources_when_both_present():
+    """Defensive/hypothetical case: CSV legacy columns and ITF checklist columns on
+    the same row (never happens in practice -- CSV rows never carry ITF headers, and
+    vice versa) still union cleanly with no crash and no cross-contamination, CSV
+    tokens preserved verbatim (unvalidated) and ITF tokens preserved verbatim
+    (validated against INDUSTRY_OPTIONS, matching exactly, no translation)."""
+    row = {
+        "Main Industry": "Healthcare",
+        "Sub-industry": "Biotech",
+        "Which industries do you invest in or are you interested in?": "Cybersecurity",
+        "Which industries do you invest in or are you interested in? (Institutional)": "Cybersecurity, Fintech (Finance & Insurance)",
+    }
+    result = classify_industry(row, NO_CONTEXT)
+    assert result["custom:investment_industry"] == [
+        "Healthcare",
+        "Biotech",
+        "Cybersecurity",
+        "Fintech (Finance & Insurance)",
+    ]
+
+
+def test_investment_industry_unrecognized_itf_leftover_text_is_never_invented_or_stored():
+    """The ITF industries question is closed-vocabulary -- unlike the free-text CSV
+    Main/Sub Industry columns, an unrecognized/leftover fragment (an "Other:" free
+    text, or anything not in INDUSTRY_OPTIONS) must never be guessed at or stored
+    under investment_industry."""
+    row = {"Which industries do you invest in or are you interested in?": "Something entirely made up"}
+    result = classify_industry(row, NO_CONTEXT)
+    assert "custom:investment_industry" not in result
+
+
 # --- classify_investor_mode ---
 
 

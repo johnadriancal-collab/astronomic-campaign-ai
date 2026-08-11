@@ -123,11 +123,22 @@ def classify_industry(raw_row: dict[str, str], context: dict[str, Any]) -> dict[
     interest data, a different concept from company industry.
 
     investment_industry (custom field) <- ordered, deduplicated union of
-    Main Industry tokens (comma-split, original order preserved) then
-    Sub-industry tokens (comma-split, original order preserved). New/unseen
-    values are stored as-is -- there is no predefined option list to
-    validate against, by design.
+    Main Industry tokens (comma-split, original order preserved), Sub-
+    industry tokens (comma-split, original order preserved), then the
+    ITF's private and institutional "Which industries do you invest in or
+    are you interested in?" answers (matched against INDUSTRY_OPTIONS via
+    _split_known_options, same as classify_thesis_checklist_fields uses for
+    thesis_private_industries/thesis_institutional_industries -- this is an
+    ADDITIONAL consolidated field, not a replacement for those two).
+    New/unseen CSV values are stored as-is -- there is no predefined option
+    list to validate against there, by design; the ITF values ARE validated
+    against INDUSTRY_OPTIONS (never translated/invented) since that's a
+    closed-vocabulary question, unlike the free-text CSV columns. A plain
+    CSV row has neither ITF header, so this is a no-op for the CSV import
+    path -- exact prior behavior preserved.
     """
+    from app.models import crm as crm_models
+
     result: dict[str, Any] = {}
 
     industry = _find_column(raw_row, "Industry")
@@ -136,7 +147,16 @@ def classify_industry(raw_row: dict[str, str], context: dict[str, Any]) -> dict[
 
     main_tokens = _split_tokens(_find_column(raw_row, "Main Industry"))
     sub_tokens = _split_tokens(_find_column(raw_row, "Sub-industry", "Sub Industry", "Subindustry"))
-    merged = _ordered_dedup(main_tokens, sub_tokens)
+
+    itf_private_raw = _find_column(raw_row, "Which industries do you invest in or are you interested in?")
+    itf_private_tokens, _ = _split_known_options(itf_private_raw or "", crm_models.INDUSTRY_OPTIONS)
+
+    itf_institutional_raw = _find_column(
+        raw_row, "Which industries do you invest in or are you interested in? (Institutional)"
+    )
+    itf_institutional_tokens, _ = _split_known_options(itf_institutional_raw or "", crm_models.INDUSTRY_OPTIONS)
+
+    merged = _ordered_dedup(main_tokens, sub_tokens, itf_private_tokens, itf_institutional_tokens)
     if merged:
         result["custom:investment_industry"] = merged
 

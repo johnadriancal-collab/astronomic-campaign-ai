@@ -619,6 +619,27 @@ async def test_multi_select_custom_field_merge_fills_from_empty(service):
 
 
 @pytest.mark.asyncio
+async def test_investment_industry_union_merges_itf_values_into_existing_contact(service):
+    """The generic multi-select custom-field union-merge rule (already proven above
+    for dinner_subscriptions/dinners_attended) applies to investment_industry too,
+    with zero field-specific code -- an existing CSV-derived Investment Industry
+    selection is never dropped when an ITF submission adds new industries."""
+    contact = await service.create_contact({})
+    contact = await service.update_contact(
+        contact.crm_contact_id,
+        {"custom_fields": {"investment_industry": ["Information Technology (IT)", "Real Estate"]}},
+    )
+    merged = service.apply_import_mapping(
+        contact,
+        {"custom:investment_industry": ["Cybersecurity", "Real Estate"]},  # "Real Estate" is an exact repeat
+        is_new=False,
+    )
+    assert merged.custom_fields["investment_industry"] == [
+        "Information Technology (IT)", "Real Estate", "Cybersecurity",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_multi_select_custom_field_never_removes_existing_values(service):
     """Even if the incoming list is a STRICT SUBSET of the existing one (e.g. an
     older/incomplete CSV re-imported after a richer one), nothing already stored is
