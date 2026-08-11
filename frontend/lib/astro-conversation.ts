@@ -68,3 +68,15 @@ export function applyAstroResponse(
 export function contextForRequest(state: AstroConversationState): AstroCommandContext | undefined {
   return state.context?.query ? state.context : undefined;
 }
+
+// Whether the page should clear its bulk-selection state (and any cached
+// full-matching-set) after this response. A resolved search_contacts turn
+// changes the visible result set -- a selection made against the PRIOR set
+// no longer means anything, so it resets. count_contacts and unresolved
+// turns leave the query/results exactly as they were (see applyAstroResponse
+// above), so the selection stays exactly as it was too -- selecting is never
+// silently dropped just because the user asked "how many are left?" or typed
+// something Astro didn't understand.
+export function shouldResetSelectionOnAstroResponse(response: AstroCommandResponse): boolean {
+  return response.intent === "search_contacts";
+}

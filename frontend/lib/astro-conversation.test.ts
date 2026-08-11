@@ -5,6 +5,7 @@ import {
   composeAstroMessage,
   contextForRequest,
   INITIAL_ASTRO_CONVERSATION_STATE,
+  shouldResetSelectionOnAstroResponse,
   type AstroConversationState,
 } from "./astro-conversation.ts";
 import type { AstroCommandResponse, CrmContact } from "./api.ts";
@@ -165,4 +166,60 @@ test("contextForRequest is never derived from an unresolved response (integratio
   };
   const afterUnresolved = applyAstroResponse(prior, response({ intent: "unresolved", query: prior.context!.query, total: 1 }));
   assert.deepEqual(contextForRequest(afterUnresolved), prior.context);
+});
+
+// --- shouldResetSelectionOnAstroResponse (bulk-selection reset rules) ---
+
+test("a resolved search_contacts response resets selection -- the result set changed", () => {
+  assert.equal(shouldResetSelectionOnAstroResponse(response({ intent: "search_contacts", total: 89 })), true);
+});
+
+test("a count_contacts response preserves selection -- the visible/matching set didn't change", () => {
+  assert.equal(shouldResetSelectionOnAstroResponse(response({ intent: "count_contacts", total: 14 })), false);
+});
+
+test("an unresolved response preserves selection -- nothing about the query changed", () => {
+  assert.equal(
+    shouldResetSelectionOnAstroResponse(
+      response({ intent: "unresolved", total: 1, message: "I don't know what you mean by 'good ones'." })
+    ),
+    false
+  );
+});
+
+// --- 127 -> 89 refinement: the query a "select all matching"/export action
+// would use changes to the NEW, refined query, not the stale original one ---
+
+test("refining a search updates context.query to the narrower refined query, which is what select-all/export-all must use next", () => {
+  const foundInTexas: AstroConversationState = applyAstroResponse(
+    INITIAL_ASTRO_CONVERSATION_STATE,
+    response({
+      intent: "search_contacts",
+      query: { filters: [{ field: "state", operator: "eq", value: "Texas" }], logic: "AND" },
+      total: 127,
+      contacts: [contact("a"), contact("b")],
+    })
+  );
+  assert.equal(foundInTexas.total, 127);
+
+  const refinedToAustin = applyAstroResponse(
+    foundInTexas,
+    response({
+      intent: "search_contacts",
+      operation: "add",
+      query: {
+        filters: [
+          { field: "state", operator: "eq", value: "Texas" },
+          { field: "city", operator: "eq", value: "Austin" },
+        ],
+        logic: "AND",
+      },
+      total: 89,
+      contacts: [contact("a")],
+    })
+  );
+  assert.equal(refinedToAustin.total, 89);
+  assert.deepEqual(refinedToAustin.context?.query?.filters.map((f) => f.field), ["state", "city"]);
+  // Selection must reset here too -- the result set just changed from 127 to 89.
+  assert.equal(shouldResetSelectionOnAstroResponse(response({ intent: "search_contacts", total: 89 })), true);
 });

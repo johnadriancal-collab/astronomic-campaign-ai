@@ -9,50 +9,64 @@ import {
 } from "./contact-results-view.ts";
 
 // --- contactResultsMode ---
-// Requirement 1: Astro Search (simple=true) hides pagination/selection chrome.
+// Requirement 1: Astro Search hides pagination but (as of the full-
+// selection/export feature) DOES show selection chrome -- the two are
+// independent, not one combined "simple" flag.
 
-test("simple mode (Astro Search) hides both selection chrome and pagination", () => {
-  const mode = contactResultsMode(true);
-  assert.equal(mode.showSelectionChrome, false);
+test("Astro Search shows selection controls but still hides pagination", () => {
+  const mode = contactResultsMode({ hidePagination: true });
+  assert.equal(mode.showSelectionChrome, true);
   assert.equal(mode.showPagination, false);
 });
 
-// Requirement 2: the normal Contacts/More Filters usage (simple=false, the
-// default -- those pages never pass `simple`) keeps its existing controls.
+test("hiding selection alone leaves pagination visible", () => {
+  const mode = contactResultsMode({ hideSelection: true });
+  assert.equal(mode.showSelectionChrome, false);
+  assert.equal(mode.showPagination, true);
+});
 
-test("normal mode (CRM Contacts / More Filters) shows both selection chrome and pagination", () => {
-  const mode = contactResultsMode(false);
+// Requirement 2: the normal Contacts/More Filters usage (no flags passed --
+// those pages pass neither) keeps its existing controls.
+
+test("normal mode (CRM Contacts / More Filters, no flags) shows both selection chrome and pagination", () => {
+  const mode = contactResultsMode();
   assert.equal(mode.showSelectionChrome, true);
   assert.equal(mode.showPagination, true);
 });
 
 // --- contactResultsSummaryText ---
-// Result count must still display in BOTH modes (just worded differently --
-// simple mode has no real page to report a range within).
+// Result count must still display regardless of pagination visibility (just
+// worded differently -- hidden pagination has no real page to report a
+// range within).
 
-test("simple mode reports a plain count, not a page range", () => {
-  const text = contactResultsSummaryText({ simple: true, total: 4, page: 1, pageSize: 50 });
+test("hidden-pagination mode reports a plain count when everything matching is rendered", () => {
+  const text = contactResultsSummaryText({ hidePagination: true, total: 4, page: 1, pageSize: 50, renderedCount: 4 });
   assert.equal(text, "4 contacts");
 });
 
-test("simple mode pluralizes a single contact correctly", () => {
-  const text = contactResultsSummaryText({ simple: true, total: 1, page: 1, pageSize: 50 });
+test("hidden-pagination mode notes how many are shown when fewer than the total are rendered (Astro Search)", () => {
+  const text = contactResultsSummaryText({ hidePagination: true, total: 127, page: 1, pageSize: 50, renderedCount: 50 });
+  assert.equal(text, "127 contacts (showing the first 50)");
+});
+
+test("hidden-pagination mode pluralizes a single contact correctly", () => {
+  const text = contactResultsSummaryText({ hidePagination: true, total: 1, page: 1, pageSize: 50, renderedCount: 1 });
   assert.equal(text, "1 contact");
 });
 
 test("normal mode reports the paginated range", () => {
-  const text = contactResultsSummaryText({ simple: false, total: 89, page: 1, pageSize: 50 });
+  const text = contactResultsSummaryText({ hidePagination: false, total: 89, page: 1, pageSize: 50 });
   assert.equal(text, "Showing 1–50 of 89 contacts");
 });
 
 test("normal mode's range reflects the current page, not always page 1", () => {
-  const text = contactResultsSummaryText({ simple: false, total: 89, page: 2, pageSize: 50 });
+  const text = contactResultsSummaryText({ hidePagination: false, total: 89, page: 2, pageSize: 50 });
   assert.equal(text, "Showing 51–89 of 89 contacts");
 });
 
 test("both modes report nothing when there are zero total contacts", () => {
-  assert.equal(contactResultsSummaryText({ simple: true, total: 0, page: 1, pageSize: 50 }), null);
-  assert.equal(contactResultsSummaryText({ simple: false, total: 0, page: 1, pageSize: 50 }), null);
+  assert.equal(contactResultsSummaryText({ hidePagination: true, total: 0, page: 1, pageSize: 50, renderedCount: 0 }), null);
+  assert.equal(contactResultsSummaryText({ hidePagination: false, total: 0, page: 1, pageSize: 50 }), null);
 });
 
 // --- Contact rendering fields ---

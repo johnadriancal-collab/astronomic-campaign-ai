@@ -51,7 +51,8 @@ export function ContactResults({
   onChangePageSize,
   emptyStateAction,
   showSelectAllMatching = true,
-  simple = false,
+  hideSelection = false,
+  hidePagination = false,
 }: {
   contacts: CrmContact[] | null;
   total: number;
@@ -76,21 +77,31 @@ export function ContactResults({
   // filtered-set behavior. More Filters passes false rather than show a button whose
   // label ("Select all N matching") would overpromise what it actually selects.
   showSelectAllMatching?: boolean;
-  // Read-only callers (Astro Search): hides bulk-selection chrome and the
-  // pagination footer entirely, and drops the per-card checkbox/left-padding.
-  // Astro only ever holds the first page_size matches returned by the backend
-  // and has no export/write action to attach a selection to -- showing either
-  // would imply a capability (paging further, exporting a selection) that
-  // doesn't exist yet. The Contacts and More Filters pages don't pass this,
-  // so their behavior is unchanged. See app/astro/page.tsx.
-  simple?: boolean;
+  // Hides bulk-selection chrome (checkboxes, "Select all" bar) entirely.
+  // Neither Contacts, More Filters, nor Astro Search pass this today -- all
+  // three support bulk selection/export -- but it stays available as an
+  // independent flag for any future read-only caller.
+  hideSelection?: boolean;
+  // Hides the rows-per-page + Previous/Next footer, independent of selection
+  // chrome. Astro Search passes this: it only ever holds the first
+  // page_size matches the backend returned and cannot page through more,
+  // so showing paging controls would imply a capability that doesn't exist
+  // -- but it DOES support bulk selection/export against its full matching
+  // set, so selection chrome stays visible. See app/crm/astro/page.tsx.
+  hidePagination?: boolean;
 }) {
   const effectivePage = page ?? 1;
   const effectivePageSize = pageSize ?? Math.max(total, 1);
   const totalPages = Math.max(1, Math.ceil(total / effectivePageSize));
   const pageIds = contacts?.map((c) => c.crm_contact_id) ?? [];
-  const mode = contactResultsMode(simple);
-  const summaryText = contactResultsSummaryText({ simple, total, page: effectivePage, pageSize: effectivePageSize });
+  const mode = contactResultsMode({ hideSelection, hidePagination });
+  const summaryText = contactResultsSummaryText({
+    hidePagination,
+    total,
+    page: effectivePage,
+    pageSize: effectivePageSize,
+    renderedCount: contacts?.length ?? 0,
+  });
 
   return (
     <>

@@ -18,9 +18,11 @@ import {
   type CrmCustomFieldDefinition,
   type FilterCondition,
   type FilterFieldMeta,
+  type FilterQuery,
   type FilterSort,
 } from "@/lib/api";
-import { clearSelection, isPageFullySelected, isPagePartiallySelected, toggleOne, toggleSelectAllOnPage } from "@/lib/contact-selection";
+import { clearSelection, isPageFullySelected, isPagePartiallySelected, selectAllMatching, toggleOne, toggleSelectAllOnPage } from "@/lib/contact-selection";
+import { fetchAllMatchingContacts, resolveContactsForExport } from "@/lib/crm-bulk-selection";
 import { buildCsv, buildExportColumns, downloadCsv, exportFilename } from "@/lib/csv-export";
 import { allConditionsComplete } from "@/lib/filter-conditions";
 import { decodeFilterQuery, encodeFilterQuery } from "@/lib/filter-query-url";
@@ -63,6 +65,12 @@ function CrmFiltersPageInner() {
   const [hasSearched, setHasSearched] = useState(conditions.length > 0);
 
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Every contact matching the current query, fetched only when the user
+  // asks for "Select all N matching"/"Export all matching" -- normal
+  // browsing stays server-paginated (`contacts` above holds just one page).
+  // Cleared whenever a new/refreshed search runs, same as `selected`.
+  const [matchingContacts, setMatchingContacts] = useState<CrmContact[] | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const selectAllCheckboxRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -87,6 +95,7 @@ function CrmFiltersPageInner() {
         setContacts(result.items);
         setTotal(result.total);
         setSelected(clearSelection());
+        setMatchingContacts(null);
         setError(null);
       } catch (err) {
         setError(err instanceof ApiError ? `Couldn't run this query (${err.status}): ${err.message}` : "Couldn't reach the backend.");
@@ -127,6 +136,8 @@ function CrmFiltersPageInner() {
     setContacts(null);
     setTotal(0);
     setHasSearched(false);
+    setSelected(clearSelection());
+    setMatchingContacts(null);
     setError(null);
     router.replace("/crm/filters");
   }
@@ -167,12 +178,61 @@ function CrmFiltersPageInner() {
     }
   }, [somePartiallySelectedOnPage]);
 
-  function handleExport() {
-    if (!contacts || !exportFields || !customFields || selected.size === 0) return;
-    const columns = buildExportColumns(exportFields, customFields);
-    const selectedContacts = contacts.filter((c) => selected.has(c.crm_contact_id));
-    const csv = buildCsv(columns, selectedContacts);
-    downloadCsv(csv, exportFilename(new Date()));
+  // The active query's filters/logic/sort, with no page/page_size -- the
+  // shared helper always overrides those itself to fetch the COMPLETE
+  // matching set, regardless of whatever page the user is currently on.
+  function currentContentQuery(): FilterQuery {
+    return { filters: conditions, logic, sort };
+  }
+
+  async function selectAllMatchingResults() {
+    if (bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const all = await fetchAllMatchingContacts(currentContentQuery(), queryCrmContacts);
+      setMatchingContacts(all);
+      setSelected(selectAllMatching(all.map((c) => c.crm_contact_id)));
+    } catch (err) {
+      setError(err instanceof ApiError ? `Couldn't select all matching contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  // Selection can include ids beyond the current page (from "Select all N
+  // matching", or a hand-picked selection carried across page changes) --
+  // resolveContactsForExport fetches the full matching set on demand only
+  // when that's actually the case, rather than silently exporting just
+  // whatever happens to be on the current page.
+  async function handleExportSelected() {
+    if (!exportFields || !customFields || selected.size === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const knownContacts = matchingContacts ?? contacts ?? [];
+      const selectedContacts = await resolveContactsForExport(selected, knownContacts, currentContentQuery(), queryCrmContacts);
+      const columns = buildExportColumns(exportFields, customFields);
+      downloadCsv(buildCsv(columns, selectedContacts), exportFilename(new Date()));
+    } catch (err) {
+      setError(err instanceof ApiError ? `Couldn't export contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  // Exports every contact matching the current query, independent of
+  // selection -- doesn't require "Select all matching" to be clicked first.
+  async function handleExportAllMatching() {
+    if (!exportFields || !customFields || total === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    try {
+      const all = matchingContacts ?? (await fetchAllMatchingContacts(currentContentQuery(), queryCrmContacts));
+      const columns = buildExportColumns(exportFields, customFields);
+      downloadCsv(buildCsv(columns, all), exportFilename(new Date()));
+    } catch (err) {
+      setError(err instanceof ApiError ? `Couldn't export contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setBulkBusy(false);
+    }
   }
 
   return (
@@ -185,15 +245,26 @@ function CrmFiltersPageInner() {
             segmentation.
           </p>
         </div>
-        <button
-          type="button"
-          onClick={handleExport}
-          disabled={selected.size === 0}
-          className={cn(buttonVariants({ size: "sm", variant: "outline" }), "shrink-0 gap-1.5 disabled:cursor-not-allowed disabled:opacity-40")}
-        >
-          <Download className="h-4 w-4" />
-          Export{selected.size > 0 ? ` (${selected.size})` : ""}
-        </button>
+        <div className="flex shrink-0 gap-2">
+          <button
+            type="button"
+            onClick={handleExportSelected}
+            disabled={selected.size === 0 || bulkBusy}
+            className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1.5 disabled:cursor-not-allowed disabled:opacity-40")}
+          >
+            <Download className="h-4 w-4" />
+            Export selected{selected.size > 0 ? ` (${selected.size})` : ""}
+          </button>
+          <button
+            type="button"
+            onClick={handleExportAllMatching}
+            disabled={total === 0 || bulkBusy}
+            className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1.5 disabled:cursor-not-allowed disabled:opacity-40")}
+          >
+            <Download className="h-4 w-4" />
+            Export all matching
+          </button>
+        </div>
       </div>
 
       {fieldsError && <p className="mb-4 text-sm text-destructive">{fieldsError}</p>}
@@ -234,8 +305,11 @@ function CrmFiltersPageInner() {
             selectAllCheckboxRef={selectAllCheckboxRef}
             allSelectedOnPage={allSelectedOnPage}
             onToggleSelectPage={() => setSelected((prev) => toggleSelectAllOnPage(prev, pageIds))}
-            showSelectAllMatching={false}
-            onClearSelection={() => setSelected(clearSelection())}
+            onSelectAllMatching={selectAllMatchingResults}
+            onClearSelection={() => {
+              setSelected(clearSelection());
+              setMatchingContacts(null);
+            }}
             onGoToPage={goToPage}
             onChangePageSize={changePageSize}
             emptyStateAction={
