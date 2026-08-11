@@ -133,6 +133,115 @@ async def test_turning_override_back_off_resumes_automation(service):
     assert resumed.thesis_investor_mode == "Privately"
 
 
+# --- thesis_investor_mode must NOT recompute on unrelated edits (2026-08-12 fix) ---
+# Root cause: before this fix, update_contact() recomputed thesis_investor_mode from
+# custom_fields["investor_type"] on EVERY call where manual_override was False,
+# regardless of whether the patch touched investor_type at all. For an ITF-created
+# contact -- whose custom_fields never has an "investor_type" key at all, since ITF
+# derives thesis_investor_mode from a different question entirely -- this meant ANY
+# unrelated edit (Notes, Investment Industry, Check Size, Company, ...), including via
+# the frontend's normal full-object save, silently erased a valid thesis_investor_mode
+# by recomputing derive_investor_mode(None) -> None.
+
+
+@pytest.mark.asyncio
+async def test_patching_investment_industry_does_not_touch_investor_mode(service):
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}})
+    assert contact.thesis_investor_mode == "Privately"
+
+    updated = await service.update_contact(
+        contact.crm_contact_id,
+        {"custom_fields": {"investment_industry": ["Aerospace & Defense"]}},
+    )
+    assert updated.thesis_investor_mode == "Privately"
+    assert updated.custom_fields["investor_type"] == ["Angel Investor"]  # preserved, not touched either
+
+
+@pytest.mark.asyncio
+async def test_patching_unrelated_scalar_field_does_not_touch_investor_mode(service):
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}, "company": "Acme"})
+    assert contact.thesis_investor_mode == "Privately"
+
+    updated = await service.update_contact(contact.crm_contact_id, {"company": "New Co"})
+    assert updated.thesis_investor_mode == "Privately"
+    assert updated.company == "New Co"
+
+
+@pytest.mark.asyncio
+async def test_patching_unrelated_custom_field_does_not_touch_investor_mode(service):
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}})
+    assert contact.thesis_investor_mode == "Privately"
+
+    updated = await service.update_contact(contact.crm_contact_id, {"custom_fields": {"notes": "Met at conference"}})
+    assert updated.thesis_investor_mode == "Privately"
+    assert updated.custom_fields["notes"] == "Met at conference"
+    assert updated.custom_fields["investor_type"] == ["Angel Investor"]
+
+
+@pytest.mark.asyncio
+async def test_patching_investor_type_itself_still_recomputes_investor_mode(service):
+    """The one thing that SHOULD still trigger recomputation -- confirms the fix didn't
+    accidentally disable the feature entirely, only scope it to when it's warranted."""
+    contact = await service.create_contact({"custom_fields": {"investor_type": ["Angel Investor"]}})
+    assert contact.thesis_investor_mode == "Privately"
+
+    updated = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"investor_type": ["Angel Investor", "Venture Capital"]}}
+    )
+    assert updated.thesis_investor_mode == "Both"
+
+
+@pytest.mark.asyncio
+async def test_manual_override_true_plus_investor_type_change_keeps_manual_value(service):
+    contact = await service.create_contact(
+        {
+            "custom_fields": {"investor_type": ["Angel Investor"]},
+            "thesis_investor_mode_manual_override": True,
+            "thesis_investor_mode": "Institutionally",
+        }
+    )
+    assert contact.thesis_investor_mode == "Institutionally"
+
+    updated = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"investor_type": ["Angel Investor", "Family Office"]}}
+    )
+    assert updated.thesis_investor_mode == "Institutionally"  # untouched -- override still True
+    assert updated.thesis_investor_mode_manual_override is True
+
+
+@pytest.mark.asyncio
+async def test_itf_contact_with_no_investor_type_can_be_edited_without_losing_investor_mode(service):
+    """The exact real-world shape of contact 5aa964d0-7923-49c6-95bc-c0f8f11dea6a: an
+    ITF-created contact with thesis_investor_mode set directly (never through
+    investor_type) and NO "investor_type" key in custom_fields at all. Before this fix,
+    this edit would have silently nulled thesis_investor_mode.
+
+    Uses create_contact_from_import (not create_contact) deliberately: that's the
+    actual code path real ITF submissions go through (via CrmImportService.import_one_row
+    -> create_contact_from_import), and unlike create_contact, it does NOT recompute
+    thesis_investor_mode at creation time -- it applies whatever value the caller (ITF's
+    "Do you invest privately or institutionally?" question, in the real case) already
+    supplied. This is what makes contact 5aa964d0-7923-49c6-95bc-c0f8f11dea6a's exact
+    real shape (thesis_investor_mode="Privately", no investor_type key at all)
+    reproducible in a test."""
+    contact = await service.create_contact_from_import(
+        {
+            "thesis_investor_mode": "Privately",
+            "custom:check_size_personal": ["$1k - $10k"],
+        }
+    )
+    assert contact.thesis_investor_mode == "Privately"
+    assert "investor_type" not in contact.custom_fields
+
+    updated = await service.update_contact(
+        contact.crm_contact_id,
+        {"custom_fields": {"investment_industry": ["Aerospace & Defense", "AgTech & Food Production"]}},
+    )
+    assert updated.thesis_investor_mode == "Privately"  # preserved
+    assert updated.custom_fields["investment_industry"] == ["Aerospace & Defense", "AgTech & Food Production"]
+    assert updated.custom_fields["check_size_personal"] == ["$1k - $10k"]  # preserved
+
+
 @pytest.mark.asyncio
 async def test_archive_is_soft_delete(service):
     contact = await service.create_contact({"first_name": "Ada"})

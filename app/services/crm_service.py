@@ -199,17 +199,27 @@ class CrmService:
         service layer too, not just a property of how the UI happens to
         submit its state today.
 
-        thesis_investor_mode gets the same treatment as custom_fields, for
-        the same reason: while thesis_investor_mode_manual_override is
-        False (the default), this method recomputes thesis_investor_mode
-        from the *effective* (post-merge) custom_fields on every call --
-        regardless of whether the caller's patch even mentions
-        thesis_investor_mode or investor_type -- rather than trying to
-        detect "did the human just change this specific field," which the
-        frontend's full-object save makes impossible to tell apart from
-        "this field happened to already hold that value." Flipping
-        thesis_investor_mode_manual_override to True is the one explicit,
-        unambiguous way to make this method leave the field alone.
+        thesis_investor_mode gets similar treatment, but recomputes ONLY
+        when there's an actual reason to -- either (a) the effective
+        (post-merge) `investor_type` value genuinely differs from what the
+        contact already had, or (b) `thesis_investor_mode_manual_override`
+        is transitioning True -> False this call (the documented "resume
+        automation" moment -- see test_turning_override_back_off_resumes_automation).
+        A PATCH that never mentions custom_fields, or whose custom_fields
+        doesn't change investor_type (e.g. editing Notes, Investment
+        Industry, Check Size, Company -- anything else), must never
+        recompute at all. This matters most for ITF-created contacts, whose
+        custom_fields has no "investor_type" key in the first place
+        (ITF sets thesis_investor_mode from a different question entirely,
+        never through investor_type): before this guard, ANY unrelated edit
+        to such a contact -- via this method directly OR via the frontend's
+        full-object PATCH /crm/contacts/{id} save, which always resubmits
+        the complete custom_fields dict -- would silently recompute
+        derive_investor_mode(None) -> None and erase a valid
+        thesis_investor_mode, with zero relationship to what was actually
+        edited. Flipping thesis_investor_mode_manual_override to True
+        remains the one explicit, unambiguous way to make this method leave
+        the field alone entirely, regardless of any of the above.
         """
         contact = await self._require_contact(crm_contact_id)
         if "custom_fields" in patch:
@@ -217,7 +227,12 @@ class CrmService:
         manual_override = patch.get("thesis_investor_mode_manual_override", contact.thesis_investor_mode_manual_override)
         if not manual_override:
             effective_custom_fields = patch.get("custom_fields", contact.custom_fields)
-            patch = {**patch, "thesis_investor_mode": derive_investor_mode(effective_custom_fields.get("investor_type"))}
+            investor_type_changed = (
+                effective_custom_fields.get("investor_type") != contact.custom_fields.get("investor_type")
+            )
+            override_just_resumed = contact.thesis_investor_mode_manual_override and not manual_override
+            if investor_type_changed or override_just_resumed:
+                patch = {**patch, "thesis_investor_mode": derive_investor_mode(effective_custom_fields.get("investor_type"))}
         updated = contact.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
         await self.contact_store.save(updated)
         return updated
