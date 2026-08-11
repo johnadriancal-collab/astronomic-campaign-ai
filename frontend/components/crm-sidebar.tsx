@@ -8,7 +8,7 @@ import { cn } from "@/lib/utils";
 const SECTIONS = [
   { href: "/crm", label: "Contacts", icon: Users, exact: true },
   { href: "/crm/filters", label: "More Filters", icon: ListFilter },
-  { href: "/astro", label: "Astro Search", icon: MessageCircle },
+  { href: "/crm/astro", label: "Astro Search", icon: MessageCircle },
   { href: "/crm/import", label: "Import CSV", icon: ListPlus },
   { href: "/crm/fields", label: "Custom Fields", icon: SlidersHorizontal },
 ];
