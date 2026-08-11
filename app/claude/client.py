@@ -13,6 +13,22 @@ ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
 
+class ClaudeNotConfiguredError(RuntimeError):
+    """
+    Raised instead of attempting the HTTP call when no Anthropic API key is
+    configured (Phase 0, 2026-08-12: ANTHROPIC_API_KEY is now optional at the
+    Settings level -- see app/config.py -- so the app can boot without it).
+    Callers (CampaignAgent.generate_campaign_plan, ProspectRanker.rank, and
+    therefore the /campaign/preview and /campaign/search routes) should let
+    this propagate rather than swallow it -- app/api/campaign.py catches it
+    specifically to return a clear 503 ("Claude unavailable/not configured")
+    instead of the generic 502 used for an actual Anthropic-side failure.
+    Deliberately raised BEFORE the retry loop below: retrying a call that is
+    guaranteed to fail auth 3 times in a row wastes time and produces a
+    confusing generic error instead of this precise one.
+    """
+
+
 class ClaudeClient:
     def __init__(self, api_key: str | None = None, model: str | None = None):
         self.api_key = api_key or settings.anthropic_api_key
@@ -46,6 +62,13 @@ class ClaudeClient:
         (see prospect_ranker.py). Retries on transient HTTP errors or
         malformed JSON.
         """
+        if not self.api_key:
+            raise ClaudeNotConfiguredError(
+                "Claude is not configured (ANTHROPIC_API_KEY is unset) -- the Campaign "
+                "Builder is unavailable until it's set. This does not affect the CRM, "
+                "ITF intake, or any other part of the application."
+            )
+
         last_error: Exception | None = None
 
         async with httpx.AsyncClient(timeout=60.0) as client:

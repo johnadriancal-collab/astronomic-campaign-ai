@@ -8,7 +8,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    anthropic_api_key: str
+    # Optional (Phase 0, 2026-08-12): the Campaign Builder ("Astro")'s Claude
+    # plan-generation/ranking calls are the ONLY thing that needs this -- see
+    # app/claude/client.py's ClaudeNotConfiguredError. Leaving it unset must
+    # never prevent the rest of the app (CRM, ITF intake, /health, etc.) from
+    # booting; that's exactly what making this Optional (rather than a bare
+    # `str`, which pydantic-settings would fail app startup on) fixes.
+    anthropic_api_key: str | None = None
     apollo_api_key: str
 
     claude_model: str = "claude-sonnet-4-5"

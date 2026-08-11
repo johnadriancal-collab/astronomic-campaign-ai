@@ -21,6 +21,7 @@ in both cases nothing was persisted.
 from fastapi import APIRouter, Depends, HTTPException
 from loguru import logger
 
+from app.claude.client import ClaudeNotConfiguredError
 from app.dependencies import (
     get_campaign_service,
     get_email_message_sync_service,
@@ -80,9 +81,18 @@ async def preview_campaign(
     Generates a CampaignPlan -- the ONE and ONLY Claude call for this
     campaign's plan -- creates a new Campaign, stores it, and returns it.
     Every later endpoint operates on this campaign's id instead.
+
+    ClaudeNotConfiguredError (Phase 0, 2026-08-12: ANTHROPIC_API_KEY is now
+    optional) is caught BEFORE the generic Exception handler below and
+    mapped to 503 -- "Claude unavailable/not configured," distinguishable
+    from a genuine 502 (Claude reachable but the call itself failed). Only
+    the Campaign Builder is affected; the CRM, ITF intake, and everything
+    else keep working regardless of this branch.
     """
     try:
         return await service.preview(req.prompt, req.desired_prospect_count)
+    except ClaudeNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Preview failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))
@@ -97,11 +107,16 @@ async def search_prospects(
     never regenerates it. One Apollo search, one Claude ranking call.
     Calling this again on an already-searched campaign returns the cached
     result rather than re-searching.
+
+    See preview_campaign's docstring above for why ClaudeNotConfiguredError
+    gets its own 503 branch, ahead of the generic 502 one.
     """
     try:
         return await service.search(req.campaign_id)
     except CampaignNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ClaudeNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     except Exception as e:
         logger.error(f"Search failed: {e}")
         raise HTTPException(status_code=502, detail=str(e))
