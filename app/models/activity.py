@@ -31,6 +31,7 @@ class ActivityCategory(str, Enum):
     LISTS = "lists"
     EXPORTS = "exports"
     CAMPAIGNS = "campaigns"
+    EMAIL_INTAKE = "email_intake"
     ERRORS = "errors"
 
 
@@ -47,6 +48,7 @@ class ActivitySource(str, Enum):
     MORE_FILTERS = "more_filters"
     ASTRO_SEARCH = "astro_search"
     CAMPAIGN_SYSTEM = "campaign_system"
+    EMAIL_INTAKE = "email_intake"
     SYSTEM = "system"
 
 

@@ -22,6 +22,12 @@ Endpoints:
     POST /sync/itf-contact           - webhook target for the Apps Script ITF bridge, one Form submission per call (dry_run supported)
     GET  /crm/activity                - the CRM Activity Log, newest first (category/search/date filter + pagination)
     POST /crm/activity/exports        - records a client-side CSV export as an Activity Log event (best-effort, write-only)
+    POST /sync/email-intake                 - webhook target for a (Phase 2, not yet activated) Apps Script Gmail bridge, idempotent on gmail_message_id
+    GET  /crm/email-intake                  - the Email Intake review queue, newest first (status/search filter + pagination)
+    GET  /crm/email-intake/{intake_id}      - one intake item's full detail (source email, match, proposal)
+    POST /crm/email-intake/{intake_id}/match   - reviewer-selected CRM contact for a NEEDS_MATCH item
+    POST /crm/email-intake/{intake_id}/approve - applies ONLY the checked proposed fields via CrmService.update_contact()
+    POST /crm/email-intake/{intake_id}/reject  - marks the item Rejected; never touches the CRM
 
 Campaign routes themselves live in app/api/campaign.py (see
 docs/ARCHITECTURE.md) -- this module only owns app-level concerns: the
@@ -42,6 +48,8 @@ from app.api.activity import router as activity_router
 from app.api.astro import router as astro_router
 from app.api.campaign import router as campaign_router
 from app.api.crm import router as crm_router
+from app.api.email_intake import crm_router as email_intake_crm_router
+from app.api.email_intake import sync_router as email_intake_sync_router
 from app.api.leads import router as leads_router
 from app.api.sync import router as sync_router
 from app.config import settings
@@ -53,6 +61,7 @@ from app.repositories.sqlite_crm_contact_list_store import SQLiteCrmContactListS
 from app.repositories.sqlite_crm_contact_store import SQLiteCrmContactStore
 from app.repositories.sqlite_crm_custom_field_store import SQLiteCrmCustomFieldStore
 from app.repositories.sqlite_crm_import_batch_store import SQLiteCrmImportBatchStore
+from app.repositories.sqlite_email_intake_store import SQLiteEmailIntakeStore
 from app.repositories.sqlite_email_message_event_store import SQLiteEmailMessageEventStore
 from app.repositories.sqlite_email_message_store import SQLiteEmailMessageStore
 from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenceStepStore
@@ -64,6 +73,7 @@ from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
+from app.services.email_intake_service import EmailIntakeService
 from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
@@ -89,6 +99,7 @@ async def lifespan(app: FastAPI):
     crm_contact_list_member_store = SQLiteCrmContactListMemberStore(settings.database_path)
     itf_ingestion_log_store = SQLiteItfIngestionLogStore(settings.database_path)
     activity_event_store = SQLiteActivityEventStore(settings.database_path)
+    email_intake_store = SQLiteEmailIntakeStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -103,6 +114,7 @@ async def lifespan(app: FastAPI):
     await crm_contact_list_member_store.connect()
     await itf_ingestion_log_store.connect()
     await activity_event_store.connect()
+    await email_intake_store.connect()
 
     activity_log_service = ActivityLogService(store=activity_event_store)
     app.state.activity_log_service = activity_log_service
@@ -153,6 +165,17 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
     )
 
+    # Email -> CRM Intake (Phase 1) -- no Gmail credentials involved (the
+    # Phase 2 Apps Script bridge is NOT activated), so this is always
+    # constructed; POST /sync/email-intake's own auth dependency (not this
+    # wiring) is what returns a clear 503 when EMAIL_INTAKE_WEBHOOK_TOKEN
+    # isn't configured.
+    app.state.email_intake_service = EmailIntakeService(
+        store=email_intake_store,
+        crm_service=crm_service,
+        activity_log=activity_log_service,
+    )
+
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -168,6 +191,7 @@ async def lifespan(app: FastAPI):
     await crm_contact_list_member_store.close()
     await itf_ingestion_log_store.close()
     await activity_event_store.close()
+    await email_intake_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
@@ -177,6 +201,8 @@ app.include_router(sync_router)
 app.include_router(crm_router)
 app.include_router(astro_router)
 app.include_router(activity_router)
+app.include_router(email_intake_sync_router)
+app.include_router(email_intake_crm_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">

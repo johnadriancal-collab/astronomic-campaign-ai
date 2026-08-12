@@ -845,7 +845,15 @@ export function removeCrmListContact(listId: string, crmContactId: string): Prom
 
 // --- Activity Log ---
 
-export type ActivityCategory = "itf" | "contacts" | "imports" | "lists" | "exports" | "campaigns" | "errors";
+export type ActivityCategory =
+  | "itf"
+  | "contacts"
+  | "imports"
+  | "lists"
+  | "exports"
+  | "campaigns"
+  | "email_intake"
+  | "errors";
 
 export type ActivitySource =
   | "manual_crm"
@@ -856,6 +864,7 @@ export type ActivitySource =
   | "more_filters"
   | "astro_search"
   | "campaign_system"
+  | "email_intake"
   | "system";
 
 export interface ActivityEvent {
@@ -929,4 +938,105 @@ export function logCrmExportSafely(payload: {
   logCrmExport(payload).catch(() => {
     // Intentionally ignored -- see this module's docstring above.
   });
+}
+
+// --- Email Intake (Phase 1 -- review/approval only, no live Gmail) ---
+
+export type EmailIntakeStatus = "pending_review" | "needs_match" | "approved" | "rejected" | "error";
+
+export type EmailFieldChangeOperation = "set" | "union_add" | "append";
+
+export interface EmailAttachmentMeta {
+  filename: string;
+  content_type: string | null;
+  size_bytes: number | null;
+}
+
+export interface EmailCrmFieldChange {
+  field_key: string;
+  field_label: string;
+  operation: EmailFieldChangeOperation;
+  current_value: unknown;
+  proposed_value: unknown;
+  source_text: string | null;
+}
+
+export interface EmailIntakeItem {
+  intake_id: string;
+  gmail_message_id: string;
+  gmail_thread_id: string | null;
+  received_at: string;
+  sender: string;
+  recipients: string[];
+  subject: string;
+  body_text: string;
+  attachments: EmailAttachmentMeta[];
+  status: EmailIntakeStatus;
+  matched_contact_id: string | null;
+  matched_contact_name: string | null;
+  matched_on: string | null;
+  proposal: EmailCrmFieldChange[];
+  error_message: string | null;
+  created_at: string;
+  reviewed_at: string | null;
+}
+
+export interface EmailIntakeItemPage {
+  items: EmailIntakeItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface EmailIntakeFilters {
+  status?: EmailIntakeStatus;
+  q?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export function listEmailIntakeItems(filters: EmailIntakeFilters = {}): Promise<EmailIntakeItemPage> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const query = params.toString();
+  return request<EmailIntakeItemPage>(`/crm/email-intake${query ? `?${query}` : ""}`);
+}
+
+export function getEmailIntakeItem(intakeId: string): Promise<EmailIntakeItem> {
+  return request<EmailIntakeItem>(`/crm/email-intake/${intakeId}`);
+}
+
+// Reviewer-selected CRM contact for a NEEDS_MATCH item -- generates the
+// proposal against the chosen contact and moves it to PENDING_REVIEW.
+// Never creates a new contact.
+export function matchEmailIntakeItem(intakeId: string, crmContactId: string): Promise<EmailIntakeItem> {
+  return post<EmailIntakeItem>(`/crm/email-intake/${intakeId}/match`, { crm_contact_id: crmContactId });
+}
+
+export interface StaleFieldConflict {
+  field_key: string;
+  field_label: string;
+  reviewed_value: unknown;
+  live_value: unknown;
+  proposed_value: unknown;
+}
+
+export interface ApproveEmailIntakeResult {
+  status: "approved" | "stale";
+  item: EmailIntakeItem;
+  conflicts: StaleFieldConflict[];
+}
+
+// Applies ONLY the checked field_keys. If any of them drifted from what
+// this proposal originally reviewed, nothing is written -- result.status
+// is "stale" and result.conflicts lists exactly what changed; result.item
+// already reflects the refreshed current values, ready to re-render.
+export function approveEmailIntakeItem(intakeId: string, fieldKeys: string[]): Promise<ApproveEmailIntakeResult> {
+  return post<ApproveEmailIntakeResult>(`/crm/email-intake/${intakeId}/approve`, { field_keys: fieldKeys });
+}
+
+export function rejectEmailIntakeItem(intakeId: string): Promise<EmailIntakeItem> {
+  return post<EmailIntakeItem>(`/crm/email-intake/${intakeId}/reject`, {});
 }

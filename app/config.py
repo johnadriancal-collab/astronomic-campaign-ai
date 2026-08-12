@@ -42,5 +42,15 @@ class Settings(BaseSettings):
     # at startup when it's unset.
     itf_webhook_token: str | None = None
 
+    # Email -> CRM Intake (Phase 1, 2026-08-12) -- see
+    # app/services/email_intake_service.py. Same shared-secret pattern as
+    # itf_webhook_token above: a future Apps Script bridge (Phase 2, NOT
+    # activated yet) would POST each new data@astronomic.com message to
+    # POST /sync/email-intake, authenticated by this token. No Gmail
+    # credentials of any kind live in this backend. None until that Phase 2
+    # activation is deliberately configured -- the webhook returns a clear
+    # 503 rather than crashing at startup when it's unset, same as ITF's.
+    email_intake_webhook_token: str | None = None
+
 
 settings = Settings()

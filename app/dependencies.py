@@ -17,6 +17,7 @@ from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
+from app.services.email_intake_service import EmailIntakeService
 from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
@@ -57,6 +58,24 @@ async def get_itf_ingestion_service(request: Request) -> ItfIngestionService:
 
 async def get_activity_log_service(request: Request) -> ActivityLogService:
     return request.app.state.activity_log_service
+
+
+async def get_email_intake_service(request: Request) -> EmailIntakeService:
+    return request.app.state.email_intake_service
+
+
+async def verify_email_intake_webhook_token(authorization: str | None = Header(default=None)) -> None:
+    """Same shared-secret bearer-token check as verify_itf_webhook_token
+    below -- 503 when EMAIL_INTAKE_WEBHOOK_TOKEN itself isn't configured
+    (an operator/deployment gap), 401 for a missing/invalid token. Never
+    logs the token and never echoes it back in an error detail."""
+    if not settings.email_intake_webhook_token:
+        raise HTTPException(status_code=503, detail="Email intake webhook is not configured.")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(token, settings.email_intake_webhook_token):
+        raise HTTPException(status_code=401, detail="Invalid token.")
 
 
 async def verify_itf_webhook_token(authorization: str | None = Header(default=None)) -> None:

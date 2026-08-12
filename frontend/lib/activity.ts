@@ -12,6 +12,7 @@ export const CATEGORY_OPTIONS: { value: ActivityCategory | "all"; label: string 
   { value: "lists", label: "Lists" },
   { value: "exports", label: "Exports" },
   { value: "campaigns", label: "Campaigns" },
+  { value: "email_intake", label: "Email Intake" },
   { value: "errors", label: "Errors" },
 ];
 
@@ -41,6 +42,11 @@ const EVENT_TITLES: Record<string, string> = {
   "campaign.activated": "Campaign activated",
   "campaign.paused": "Campaign paused",
   "campaign.sync_completed": "Campaign sync completed",
+  "email_intake.proposal_created": "Email intake proposal created",
+  "email_intake.needs_match": "Email intake needs match",
+  "email_intake.approved": "Email intake approved",
+  "email_intake.rejected": "Email intake rejected",
+  "email_intake.processing_failed": "Email intake processing failed",
 };
 
 export function titleCaseEventType(eventType: string): string {
@@ -93,6 +99,8 @@ export function entityLink(event: ActivityEvent): EntityLink | null {
       return { href: `/crm/lists/${event.entity_id}`, label: "View list" };
     case "campaign":
       return { href: `/manager/campaigns/${event.entity_id}`, label: "View campaign" };
+    case "email_intake_item":
+      return { href: `/crm/settings/email-intake/${event.entity_id}`, label: "View email intake item" };
     default:
       return null;
   }
