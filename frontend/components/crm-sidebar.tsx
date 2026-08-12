@@ -2,13 +2,14 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Contact, LayoutDashboard, ListFilter, ListPlus, MessageCircle, SlidersHorizontal, Sparkles, Users } from "lucide-react";
+import { Contact, LayoutDashboard, ListChecks, ListFilter, ListPlus, MessageCircle, SlidersHorizontal, Sparkles, Users } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const SECTIONS = [
   { href: "/crm", label: "Contacts", icon: Users, exact: true },
   { href: "/crm/filters", label: "More Filters", icon: ListFilter },
   { href: "/crm/astro", label: "Astro Search", icon: MessageCircle },
+  { href: "/crm/lists", label: "Lists", icon: ListChecks },
   { href: "/crm/import", label: "Import CSV", icon: ListPlus },
   { href: "/crm/fields", label: "Custom Fields", icon: SlidersHorizontal },
 ];

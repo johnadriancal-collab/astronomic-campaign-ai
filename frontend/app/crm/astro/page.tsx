@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { Download, Loader2, SendHorizontal, Sparkles } from "lucide-react";
+import { AddToListPanel } from "@/components/add-to-list-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ContactResults } from "@/components/crm-contact-results";
@@ -146,7 +147,9 @@ export default function AstroSearchPage() {
     setBulkBusy(true);
     try {
       const knownContacts = matchingContacts ?? contacts ?? [];
-      const selectedContacts = await resolveContactsForExport(selected, knownContacts, currentQuery, queryCrmContacts);
+      const selectedContacts = await resolveContactsForExport(selected, knownContacts, () =>
+        fetchAllMatchingContacts(currentQuery, queryCrmContacts)
+      );
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, selectedContacts), exportFilename(new Date()));
     } catch (err) {
@@ -264,6 +267,7 @@ export default function AstroSearchPage() {
       {state.total !== null && (
         <div>
           <div className="mb-3 flex flex-wrap items-center justify-end gap-2">
+            <AddToListPanel selectedIds={[...selected]} />
             <Button
               type="button"
               size="sm"

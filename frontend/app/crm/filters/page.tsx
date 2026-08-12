@@ -4,6 +4,7 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { Download } from "lucide-react";
+import { AddToListPanel } from "@/components/add-to-list-panel";
 import { buttonVariants } from "@/components/ui/button";
 import { ContactResults } from "@/components/crm-contact-results";
 import { FilterBuilder } from "@/components/crm-filter-builder";
@@ -209,7 +210,9 @@ function CrmFiltersPageInner() {
     setBulkBusy(true);
     try {
       const knownContacts = matchingContacts ?? contacts ?? [];
-      const selectedContacts = await resolveContactsForExport(selected, knownContacts, currentContentQuery(), queryCrmContacts);
+      const selectedContacts = await resolveContactsForExport(selected, knownContacts, () =>
+        fetchAllMatchingContacts(currentContentQuery(), queryCrmContacts)
+      );
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, selectedContacts), exportFilename(new Date()));
     } catch (err) {
@@ -246,6 +249,7 @@ function CrmFiltersPageInner() {
           </p>
         </div>
         <div className="flex shrink-0 gap-2">
+          <AddToListPanel selectedIds={[...selected]} />
           <button
             type="button"
             onClick={handleExportSelected}

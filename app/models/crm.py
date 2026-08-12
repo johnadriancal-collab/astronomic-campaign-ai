@@ -691,3 +691,57 @@ class FilterQuery(BaseModel):
     page: int = 1
     page_size: int = 50
     sort: FilterSort | None = None
+
+
+# --- Lists (2026-08-11): named, persistent groupings of existing CRM
+# contacts -- e.g. "Austin Family Offices" -- with no upper bound on how
+# many lists a contact belongs to. Deliberately NOT a custom field: a
+# contact's list memberships are a many-to-many relationship (see
+# crm_contact_list_member_store.py for the join-table side), never stored
+# on CrmContact itself, so a contact never needs editing just because it
+# joined or left a list, and the same underlying CrmContact is shared,
+# never copied, across every list it's in.
+#
+# V1 deliberately ignores the historical "Lists" columns that exist in some
+# already-imported CSVs -- those are untouched here; migrating that data is
+# a separate, later project.
+class CrmContactList(BaseModel):
+    list_id: str
+    name: str
+    description: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class CrmContactListMembership(BaseModel):
+    """One row of the list<->contact join -- see crm_contact_list_member_store.py.
+    Internal to the store layer; never returned directly from an API route (routes
+    return CrmContactListSummary/CrmContactPage instead)."""
+
+    list_id: str
+    crm_contact_id: str
+    added_at: datetime
+
+
+class CrmContactListSummary(CrmContactList):
+    """CrmContactList plus its member count -- what GET /crm/lists and
+    GET /crm/lists/{id} return. `contact_count` is always computed from the
+    membership join table at read time, never stored on the list itself,
+    so it can never drift out of sync with actual membership."""
+
+    contact_count: int
+
+
+class CrmListBulkAddResult(BaseModel):
+    """`added` + `already_member` always sum to the number of valid contact_ids
+    requested; `not_found` is however many of the requested ids didn't match a
+    real CrmContact (silently skipped, not a hard failure -- see
+    CrmService.bulk_add_to_list)."""
+
+    added: int
+    already_member: int
+    not_found: int
+
+
+class CrmListBulkRemoveResult(BaseModel):
+    removed: int

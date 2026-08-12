@@ -211,3 +211,159 @@ def test_repair_comma_delimited_custom_fields_route(test_client):
 
     fixed = test_client.get(f"/crm/contacts/{contact_id}").json()
     assert fixed["custom_fields"]["investor_type"] == ["Private Equity", "Venture Capital"]
+
+
+# --- Lists ---
+
+
+def test_list_crud_lifecycle(test_client):
+    resp = test_client.post("/crm/lists", json={"name": "Austin Family Offices", "description": "Prospecting"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["name"] == "Austin Family Offices"
+    assert body["contact_count"] == 0
+    list_id = body["list_id"]
+
+    resp = test_client.get(f"/crm/lists/{list_id}")
+    assert resp.status_code == 200
+    assert resp.json()["description"] == "Prospecting"
+
+    resp = test_client.patch(f"/crm/lists/{list_id}", json={"name": "Renamed", "description": "New desc"})
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Renamed"
+    assert resp.json()["description"] == "New desc"
+
+    resp = test_client.get("/crm/lists")
+    assert resp.status_code == 200
+    assert any(l["list_id"] == list_id for l in resp.json())
+
+    resp = test_client.delete(f"/crm/lists/{list_id}")
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "Renamed"  # the pre-deletion summary
+
+    resp = test_client.get(f"/crm/lists/{list_id}")
+    assert resp.status_code == 404
+
+
+def test_get_missing_list_returns_404(test_client):
+    resp = test_client.get("/crm/lists/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_delete_missing_list_returns_404(test_client):
+    resp = test_client.delete("/crm/lists/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_bulk_add_and_get_list_contacts(test_client):
+    ids = []
+    for name in ["Ada", "Grace"]:
+        resp = test_client.post("/crm/contacts", json={"first_name": name})
+        ids.append(resp.json()["crm_contact_id"])
+
+    list_resp = test_client.post("/crm/lists", json={"name": "Test List"})
+    list_id = list_resp.json()["list_id"]
+
+    resp = test_client.post(f"/crm/lists/{list_id}/contacts/bulk-add", json={"contact_ids": ids})
+    assert resp.status_code == 200
+    assert resp.json() == {"added": 2, "already_member": 0, "not_found": 0}
+
+    resp = test_client.get(f"/crm/lists/{list_id}/contacts")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 2
+    assert {c["first_name"] for c in body["items"]} == {"Ada", "Grace"}
+
+    resp = test_client.get(f"/crm/lists/{list_id}")
+    assert resp.json()["contact_count"] == 2
+
+
+def test_bulk_add_repeat_reports_already_member_not_duplicated(test_client):
+    resp = test_client.post("/crm/contacts", json={"first_name": "Ada"})
+    contact_id = resp.json()["crm_contact_id"]
+    list_resp = test_client.post("/crm/lists", json={"name": "Test List"})
+    list_id = list_resp.json()["list_id"]
+
+    test_client.post(f"/crm/lists/{list_id}/contacts/bulk-add", json={"contact_ids": [contact_id]})
+    resp = test_client.post(f"/crm/lists/{list_id}/contacts/bulk-add", json={"contact_ids": [contact_id]})
+
+    assert resp.json() == {"added": 0, "already_member": 1, "not_found": 0}
+    assert test_client.get(f"/crm/lists/{list_id}").json()["contact_count"] == 1
+
+
+def test_bulk_add_to_missing_list_returns_404(test_client):
+    resp = test_client.post("/crm/lists/does-not-exist/contacts/bulk-add", json={"contact_ids": []})
+    assert resp.status_code == 404
+
+
+def test_remove_one_contact_from_list(test_client):
+    resp = test_client.post("/crm/contacts", json={"first_name": "Ada"})
+    contact_id = resp.json()["crm_contact_id"]
+    list_resp = test_client.post("/crm/lists", json={"name": "Test List"})
+    list_id = list_resp.json()["list_id"]
+    test_client.post(f"/crm/lists/{list_id}/contacts/bulk-add", json={"contact_ids": [contact_id]})
+
+    resp = test_client.delete(f"/crm/lists/{list_id}/contacts/{contact_id}")
+    assert resp.status_code == 200
+    assert resp.json()["contact_count"] == 0
+    assert test_client.get(f"/crm/lists/{list_id}").json()["contact_count"] == 0
+
+    # Underlying contact must still exist, unarchived.
+    still_there = test_client.get(f"/crm/contacts/{contact_id}")
+    assert still_there.status_code == 200
+    assert still_there.json()["archived"] is False
+
+
+def test_bulk_remove_from_list(test_client):
+    ids = []
+    for name in ["Ada", "Grace", "Marie"]:
+        resp = test_client.post("/crm/contacts", json={"first_name": name})
+        ids.append(resp.json()["crm_contact_id"])
+    list_resp = test_client.post("/crm/lists", json={"name": "Test List"})
+    list_id = list_resp.json()["list_id"]
+    test_client.post(f"/crm/lists/{list_id}/contacts/bulk-add", json={"contact_ids": ids})
+
+    resp = test_client.post(f"/crm/lists/{list_id}/contacts/bulk-remove", json={"contact_ids": ids[:2]})
+    assert resp.status_code == 200
+    assert resp.json() == {"removed": 2}
+    assert test_client.get(f"/crm/lists/{list_id}").json()["contact_count"] == 1
+
+
+def test_delete_list_does_not_delete_contacts(test_client):
+    resp = test_client.post("/crm/contacts", json={"first_name": "Ada"})
+    contact_id = resp.json()["crm_contact_id"]
+    list_resp = test_client.post("/crm/lists", json={"name": "Test List"})
+    list_id = list_resp.json()["list_id"]
+    test_client.post(f"/crm/lists/{list_id}/contacts/bulk-add", json={"contact_ids": [contact_id]})
+
+    resp = test_client.delete(f"/crm/lists/{list_id}")
+    assert resp.status_code == 200
+
+    still_there = test_client.get(f"/crm/contacts/{contact_id}")
+    assert still_there.status_code == 200
+    assert still_there.json()["archived"] is False
+
+
+def test_same_contact_in_multiple_lists_via_api(test_client):
+    resp = test_client.post("/crm/contacts", json={"first_name": "Jane"})
+    contact_id = resp.json()["crm_contact_id"]
+    list_a = test_client.post("/crm/lists", json={"name": "Austin Family Offices"}).json()["list_id"]
+    list_b = test_client.post("/crm/lists", json={"name": "AI Investors"}).json()["list_id"]
+
+    test_client.post(f"/crm/lists/{list_a}/contacts/bulk-add", json={"contact_ids": [contact_id]})
+    test_client.post(f"/crm/lists/{list_b}/contacts/bulk-add", json={"contact_ids": [contact_id]})
+
+    assert test_client.get(f"/crm/lists/{list_a}").json()["contact_count"] == 1
+    assert test_client.get(f"/crm/lists/{list_b}").json()["contact_count"] == 1
+
+
+def test_adding_to_list_does_not_change_contact_updated_at(test_client):
+    resp = test_client.post("/crm/contacts", json={"first_name": "Ada"})
+    contact_id = resp.json()["crm_contact_id"]
+    before = test_client.get(f"/crm/contacts/{contact_id}").json()
+
+    list_id = test_client.post("/crm/lists", json={"name": "Test List"}).json()["list_id"]
+    test_client.post(f"/crm/lists/{list_id}/contacts/bulk-add", json={"contact_ids": [contact_id]})
+
+    after = test_client.get(f"/crm/contacts/{contact_id}").json()
+    assert after == before

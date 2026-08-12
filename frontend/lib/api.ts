@@ -757,3 +757,88 @@ export interface AstroCommandResponse {
 export function sendAstroCommand(text: string, context?: AstroCommandContext): Promise<AstroCommandResponse> {
   return post<AstroCommandResponse>("/astro/command", context ? { text, context } : { text });
 }
+
+// --- Lists: named, persistent groupings of existing CRM contacts ---
+//
+// A list never holds contact data of its own -- GET .../contacts always
+// returns live CrmContact rows (the same CrmContactPage shape used
+// everywhere else), never a stored copy. See app/services/crm_service.py's
+// "--- Lists ---" section for the backend side of this contract.
+
+export interface CrmContactList {
+  list_id: string;
+  name: string;
+  description: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CrmContactListSummary extends CrmContactList {
+  contact_count: number;
+}
+
+export interface CrmListBulkAddResult {
+  added: number;
+  already_member: number;
+  not_found: number;
+}
+
+export interface CrmListBulkRemoveResult {
+  removed: number;
+}
+
+export function listCrmLists(): Promise<CrmContactListSummary[]> {
+  return request<CrmContactListSummary[]>("/crm/lists");
+}
+
+export function createCrmList(payload: { name: string; description?: string }): Promise<CrmContactListSummary> {
+  return post<CrmContactListSummary>("/crm/lists", payload);
+}
+
+export function getCrmList(listId: string): Promise<CrmContactListSummary> {
+  return request<CrmContactListSummary>(`/crm/lists/${listId}`);
+}
+
+export function updateCrmList(listId: string, patch: { name?: string; description?: string }): Promise<CrmContactListSummary> {
+  return request<CrmContactListSummary>(`/crm/lists/${listId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+// Returns the summary as it was immediately before deletion -- the list
+// itself is gone (permanently -- see the backend docstring for why that's
+// safe here), but its own contacts are never touched.
+export function deleteCrmList(listId: string): Promise<CrmContactListSummary> {
+  return request<CrmContactListSummary>(`/crm/lists/${listId}`, { method: "DELETE" });
+}
+
+export function listCrmListContacts(
+  listId: string,
+  params: { page?: number; page_size?: number } = {}
+): Promise<CrmContactPage> {
+  const query = new URLSearchParams();
+  if (params.page !== undefined) query.set("page", String(params.page));
+  if (params.page_size !== undefined) query.set("page_size", String(params.page_size));
+  const qs = query.toString();
+  return request<CrmContactPage>(`/crm/lists/${listId}/contacts${qs ? `?${qs}` : ""}`);
+}
+
+// The ONE call made regardless of whether 1 contact or every currently
+// selected contact (which may already be thousands, from Contacts/More
+// Filters/Astro Search's existing "Select all N matching") is being added --
+// never one request per contact. Duplicate membership is idempotent, never
+// an error -- see CrmListBulkAddResult for how a repeat is reported.
+export function bulkAddToCrmList(listId: string, contactIds: string[]): Promise<CrmListBulkAddResult> {
+  return post<CrmListBulkAddResult>(`/crm/lists/${listId}/contacts/bulk-add`, { contact_ids: contactIds });
+}
+
+export function bulkRemoveFromCrmList(listId: string, contactIds: string[]): Promise<CrmListBulkRemoveResult> {
+  return post<CrmListBulkRemoveResult>(`/crm/lists/${listId}/contacts/bulk-remove`, { contact_ids: contactIds });
+}
+
+// Returns the list's updated summary (contact_count reflects the removal).
+export function removeCrmListContact(listId: string, crmContactId: string): Promise<CrmContactListSummary> {
+  return request<CrmContactListSummary>(`/crm/lists/${listId}/contacts/${crmContactId}`, { method: "DELETE" });
+}

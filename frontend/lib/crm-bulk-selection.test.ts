@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fetchAllMatchingContacts, resolveContactsForExport } from "./crm-bulk-selection.ts";
+import { fetchAllListContacts, fetchAllMatchingContacts, resolveContactsForExport } from "./crm-bulk-selection.ts";
 import type { CrmContact, CrmContactPage, FilterQuery } from "./api.ts";
 
 function contact(id: string): CrmContact {
@@ -56,47 +56,80 @@ test("fetchAllMatchingContacts ignores whatever page/page_size the caller's quer
   assert.deepEqual(seenPages, [1]); // always probes page 1, regardless of the caller's own page state
 });
 
+// --- fetchAllListContacts ---
+
+test("fetchAllListContacts probes then re-fetches everything when the list spans multiple pages", async () => {
+  const ids = Array.from({ length: 5 }, (_, i) => `c${i}`);
+  let calls = 0;
+  const listContacts = async (listId: string, params: { page: number; page_size: number }): Promise<CrmContactPage> => {
+    calls++;
+    return { items: ids.slice(0, params.page_size).map(contact), total: ids.length, page: 1, page_size: params.page_size };
+  };
+  const result = await fetchAllListContacts("l1", listContacts);
+  assert.deepEqual(result.map((c) => c.crm_contact_id), ids);
+  assert.equal(calls, 2);
+});
+
+test("fetchAllListContacts skips the second fetch when the probe already returned everything", async () => {
+  let calls = 0;
+  const listContacts = async (): Promise<CrmContactPage> => {
+    calls++;
+    return { items: [contact("only")], total: 1, page: 1, page_size: 1 };
+  };
+  const result = await fetchAllListContacts("l1", listContacts);
+  assert.deepEqual(result.map((c) => c.crm_contact_id), ["only"]);
+  assert.equal(calls, 1);
+});
+
 // --- resolveContactsForExport ---
 
 test("resolveContactsForExport resolves from knownContacts without fetching when every selected id is already known", async () => {
   const known = [contact("a"), contact("b"), contact("c")];
   let fetchCalls = 0;
-  const queryContacts = async (): Promise<CrmContactPage> => {
+  const fetchAll = async (): Promise<CrmContact[]> => {
     fetchCalls++;
-    return { items: [], total: 0, page: 1, page_size: 1 };
+    return [];
   };
-  const result = await resolveContactsForExport(new Set(["a", "c"]), known, BASE_QUERY, queryContacts);
+  const result = await resolveContactsForExport(new Set(["a", "c"]), known, fetchAll);
   assert.deepEqual(result.map((c) => c.crm_contact_id), ["a", "c"]);
   assert.equal(fetchCalls, 0);
 });
 
 test("resolveContactsForExport fetches the full matching set when selection includes ids outside the current page (export across pages)", async () => {
-  const currentPage = [contact("p1-a"), contact("p1-b")]; // only page 1 is "known" -- simulates More Filters/Astro holding just one page
+  const currentPage = [contact("p1-a"), contact("p1-b")]; // only page 1 is "known" -- simulates More Filters/Astro/a list holding just one page
   const fullMatchingSet = [contact("p1-a"), contact("p1-b"), contact("p2-a"), contact("p2-b")];
-  const queryContacts = async (query: FilterQuery): Promise<CrmContactPage> => {
-    if (query.page_size === 1) return { items: [fullMatchingSet[0]], total: fullMatchingSet.length, page: 1, page_size: 1 };
-    return { items: fullMatchingSet, total: fullMatchingSet.length, page: 1, page_size: query.page_size ?? fullMatchingSet.length };
-  };
+  const fetchAll = async (): Promise<CrmContact[]> => fullMatchingSet;
   const selected = new Set(["p1-a", "p2-a"]); // p2-a is NOT in currentPage
-  const result = await resolveContactsForExport(selected, currentPage, BASE_QUERY, queryContacts);
+  const result = await resolveContactsForExport(selected, currentPage, fetchAll);
   assert.deepEqual(result.map((c) => c.crm_contact_id).sort(), ["p1-a", "p2-a"]);
 });
 
 test("resolveContactsForExport preserves the pool's own order, not Set insertion order", async () => {
   const known = [contact("z"), contact("a"), contact("m")];
   const selected = new Set(["a", "z"]); // insertion order a, z -- pool order is z, a, m
-  const queryContacts = async (): Promise<CrmContactPage> => ({ items: [], total: 0, page: 1, page_size: 1 });
-  const result = await resolveContactsForExport(selected, known, BASE_QUERY, queryContacts);
+  const fetchAll = async (): Promise<CrmContact[]> => [];
+  const result = await resolveContactsForExport(selected, known, fetchAll);
   assert.deepEqual(result.map((c) => c.crm_contact_id), ["z", "a"]);
 });
 
 test("resolveContactsForExport with an empty selection resolves to nothing, without fetching", async () => {
   let fetchCalls = 0;
-  const queryContacts = async (): Promise<CrmContactPage> => {
+  const fetchAll = async (): Promise<CrmContact[]> => {
     fetchCalls++;
-    return { items: [], total: 0, page: 1, page_size: 1 };
+    return [];
   };
-  const result = await resolveContactsForExport(new Set(), [contact("a")], BASE_QUERY, queryContacts);
+  const result = await resolveContactsForExport(new Set(), [contact("a")], fetchAll);
   assert.deepEqual(result, []);
   assert.equal(fetchCalls, 0);
+});
+
+test("resolveContactsForExport works with a list-id-bound fetchAll (list detail page usage)", async () => {
+  const listMembers = [contact("m1"), contact("m2"), contact("m3")];
+  const listContacts = async (): Promise<CrmContactPage> => ({ items: listMembers, total: 3, page: 1, page_size: 3 });
+  const result = await resolveContactsForExport(
+    new Set(["m2"]),
+    [], // nothing known yet -- forces the fetchAll path
+    () => fetchAllListContacts("l1", listContacts)
+  );
+  assert.deepEqual(result.map((c) => c.crm_contact_id), ["m2"]);
 });

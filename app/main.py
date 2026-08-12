@@ -44,6 +44,8 @@ from app.api.sync import router as sync_router
 from app.config import settings
 from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
 from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
+from app.repositories.sqlite_crm_contact_list_member_store import SQLiteCrmContactListMemberStore
+from app.repositories.sqlite_crm_contact_list_store import SQLiteCrmContactListStore
 from app.repositories.sqlite_crm_contact_store import SQLiteCrmContactStore
 from app.repositories.sqlite_crm_custom_field_store import SQLiteCrmCustomFieldStore
 from app.repositories.sqlite_crm_import_batch_store import SQLiteCrmImportBatchStore
@@ -78,6 +80,8 @@ async def lifespan(app: FastAPI):
     crm_contact_store = SQLiteCrmContactStore(settings.database_path)
     crm_custom_field_store = SQLiteCrmCustomFieldStore(settings.database_path)
     crm_import_batch_store = SQLiteCrmImportBatchStore(settings.database_path)
+    crm_contact_list_store = SQLiteCrmContactListStore(settings.database_path)
+    crm_contact_list_member_store = SQLiteCrmContactListMemberStore(settings.database_path)
     itf_ingestion_log_store = SQLiteItfIngestionLogStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
@@ -89,6 +93,8 @@ async def lifespan(app: FastAPI):
     await crm_contact_store.connect()
     await crm_custom_field_store.connect()
     await crm_import_batch_store.connect()
+    await crm_contact_list_store.connect()
+    await crm_contact_list_member_store.connect()
     await itf_ingestion_log_store.connect()
 
     lead_service = LeadService(store=lead_store, campaign_lead_store=campaign_lead_store, campaign_store=campaign_store)
@@ -113,7 +119,12 @@ async def lifespan(app: FastAPI):
         step_store=email_sequence_step_store,
     )
 
-    crm_service = CrmService(contact_store=crm_contact_store, custom_field_store=crm_custom_field_store)
+    crm_service = CrmService(
+        contact_store=crm_contact_store,
+        custom_field_store=crm_custom_field_store,
+        list_store=crm_contact_list_store,
+        list_member_store=crm_contact_list_member_store,
+    )
     app.state.crm_service = crm_service
     crm_import_service = CrmImportService(crm_service=crm_service, batch_store=crm_import_batch_store)
     app.state.crm_import_service = crm_import_service
@@ -137,6 +148,8 @@ async def lifespan(app: FastAPI):
     await crm_contact_store.close()
     await crm_custom_field_store.close()
     await crm_import_batch_store.close()
+    await crm_contact_list_store.close()
+    await crm_contact_list_member_store.close()
     await itf_ingestion_log_store.close()
 
 

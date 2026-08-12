@@ -8,7 +8,7 @@ definitions, search/filter, and Investor Thesis field handling.
 import pytest
 
 from app.models.crm import CrmContact, CrmImportRowStatus, CustomFieldType
-from app.services.crm_service import CrmContactNotFound, CrmDuplicateFieldKeyError, CrmService
+from app.services.crm_service import CrmContactListNotFound, CrmContactNotFound, CrmDuplicateFieldKeyError, CrmService
 
 
 @pytest.fixture
@@ -850,3 +850,262 @@ async def test_update_contact_custom_fields_merge_can_still_overwrite_a_shared_k
     contact = await service.create_contact({"custom_fields": {"gender": "Male"}})
     updated = await service.update_contact(contact.crm_contact_id, {"custom_fields": {"gender": "Female"}})
     assert updated.custom_fields == {"gender": "Female"}
+
+
+# --- Lists: named, persistent groupings of existing contacts ---
+
+
+@pytest.mark.asyncio
+async def test_create_and_get_contact_list(service):
+    created = await service.create_contact_list(name="Austin Family Offices", description="Prospecting")
+    assert created.contact_count == 0
+    fetched = await service.get_contact_list(created.list_id)
+    assert fetched.name == "Austin Family Offices"
+    assert fetched.description == "Prospecting"
+
+
+@pytest.mark.asyncio
+async def test_create_contact_list_without_description(service):
+    created = await service.create_contact_list(name="AI Investors")
+    assert created.description is None
+
+
+@pytest.mark.asyncio
+async def test_get_missing_list_raises(service):
+    with pytest.raises(CrmContactListNotFound):
+        await service.get_contact_list("does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_list_contact_lists_includes_contact_count(service):
+    contact = await service.create_contact({"first_name": "Ada"})
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    summaries = await service.list_contact_lists()
+    summary = next(s for s in summaries if s.list_id == contact_list.list_id)
+    assert summary.contact_count == 1
+
+
+@pytest.mark.asyncio
+async def test_update_contact_list_renames_and_edits_description(service):
+    contact_list = await service.create_contact_list(name="Old Name")
+    updated = await service.update_contact_list(contact_list.list_id, {"name": "New Name", "description": "New desc"})
+    assert updated.name == "New Name"
+    assert updated.description == "New desc"
+
+
+@pytest.mark.asyncio
+async def test_update_contact_list_ignores_disallowed_keys(service):
+    contact_list = await service.create_contact_list(name="Name")
+    updated = await service.update_contact_list(contact_list.list_id, {"list_id": "hacked", "name": "Still Name"})
+    assert updated.list_id == contact_list.list_id
+    assert updated.name == "Still Name"
+
+
+@pytest.mark.asyncio
+async def test_update_missing_list_raises(service):
+    with pytest.raises(CrmContactListNotFound):
+        await service.update_contact_list("does-not-exist", {"name": "X"})
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_to_list_reports_added_and_already_member(service):
+    c1 = await service.create_contact({"first_name": "Ada"})
+    c2 = await service.create_contact({"first_name": "Grace"})
+    contact_list = await service.create_contact_list(name="Test List")
+
+    first = await service.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id, c2.crm_contact_id])
+    assert first.added == 2
+    assert first.already_member == 0
+    assert first.not_found == 0
+
+    second = await service.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id, c2.crm_contact_id])
+    assert second.added == 0
+    assert second.already_member == 2
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_to_list_mixed_new_and_already_member(service):
+    c1 = await service.create_contact({"first_name": "Ada"})
+    c2 = await service.create_contact({"first_name": "Grace"})
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+
+    result = await service.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id, c2.crm_contact_id])
+    assert result.added == 1
+    assert result.already_member == 1
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_to_list_reports_not_found_without_creating_membership(service):
+    contact_list = await service.create_contact_list(name="Test List")
+    result = await service.bulk_add_to_list(contact_list.list_id, ["does-not-exist"])
+    assert result.not_found == 1
+    assert result.added == 0
+    page = await service.get_list_contacts(contact_list.list_id)
+    assert page.total == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_to_list_deduplicates_repeated_ids_in_one_request(service):
+    c1 = await service.create_contact({"first_name": "Ada"})
+    contact_list = await service.create_contact_list(name="Test List")
+    result = await service.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id, c1.crm_contact_id])
+    assert result.added == 1
+    assert result.already_member == 0
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_to_missing_list_raises(service):
+    with pytest.raises(CrmContactListNotFound):
+        await service.bulk_add_to_list("does-not-exist", [])
+
+
+@pytest.mark.asyncio
+async def test_same_contact_can_join_multiple_lists(service):
+    contact = await service.create_contact({"first_name": "Jane"})
+    list_a = await service.create_contact_list(name="Austin Family Offices")
+    list_b = await service.create_contact_list(name="AI Investors")
+
+    await service.bulk_add_to_list(list_a.list_id, [contact.crm_contact_id])
+    await service.bulk_add_to_list(list_b.list_id, [contact.crm_contact_id])
+
+    page_a = await service.get_list_contacts(list_a.list_id)
+    page_b = await service.get_list_contacts(list_b.list_id)
+    assert [c.crm_contact_id for c in page_a.items] == [contact.crm_contact_id]
+    assert [c.crm_contact_id for c in page_b.items] == [contact.crm_contact_id]
+
+
+@pytest.mark.asyncio
+async def test_get_list_contacts_reflects_live_contact_data_not_a_copy(service):
+    """The crux of 'never store full contact copies' -- editing a contact after
+    it's added to a list must change what the list shows, with no re-add needed."""
+    contact = await service.create_contact({"first_name": "Ada", "company": "Old Co"})
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    await service.update_contact(contact.crm_contact_id, {"company": "New Co"})
+
+    page = await service.get_list_contacts(contact_list.list_id)
+    assert page.items[0].company == "New Co"
+
+
+@pytest.mark.asyncio
+async def test_adding_to_a_list_does_not_change_the_contact(service):
+    """List membership is separate from the contact record -- adding to a list
+    must never touch updated_at or any field on the CrmContact itself."""
+    contact = await service.create_contact({"first_name": "Ada"})
+    before = await service.get_contact(contact.crm_contact_id)
+    contact_list = await service.create_contact_list(name="Test List")
+
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    after = await service.get_contact(contact.crm_contact_id)
+    assert after.updated_at == before.updated_at
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_removing_from_a_list_does_not_change_the_contact(service):
+    contact = await service.create_contact({"first_name": "Ada"})
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+    before = await service.get_contact(contact.crm_contact_id)
+
+    await service.remove_contact_from_list(contact_list.list_id, contact.crm_contact_id)
+
+    after = await service.get_contact(contact.crm_contact_id)
+    assert after.updated_at == before.updated_at
+    assert after == before
+
+
+@pytest.mark.asyncio
+async def test_remove_contact_from_list(service):
+    contact = await service.create_contact({"first_name": "Ada"})
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    await service.remove_contact_from_list(contact_list.list_id, contact.crm_contact_id)
+
+    page = await service.get_list_contacts(contact_list.list_id)
+    assert page.total == 0
+
+
+@pytest.mark.asyncio
+async def test_remove_contact_not_a_member_is_a_noop(service):
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.remove_contact_from_list(contact_list.list_id, "never-added")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_bulk_remove_from_list_reports_count(service):
+    c1 = await service.create_contact({"first_name": "Ada"})
+    c2 = await service.create_contact({"first_name": "Grace"})
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id, c2.crm_contact_id])
+
+    result = await service.bulk_remove_from_list(contact_list.list_id, [c1.crm_contact_id, "never-a-member"])
+    assert result.removed == 1
+
+    page = await service.get_list_contacts(contact_list.list_id)
+    assert [c.crm_contact_id for c in page.items] == [c2.crm_contact_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_contact_list_removes_list_and_memberships(service):
+    contact = await service.create_contact({"first_name": "Ada"})
+    contact_list = await service.create_contact_list(name="Test List")
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    await service.delete_contact_list(contact_list.list_id)
+
+    with pytest.raises(CrmContactListNotFound):
+        await service.get_contact_list(contact_list.list_id)
+    # The contact itself must still exist, untouched.
+    still_there = await service.get_contact(contact.crm_contact_id)
+    assert still_there.crm_contact_id == contact.crm_contact_id
+    assert still_there.archived is False
+
+
+@pytest.mark.asyncio
+async def test_delete_contact_list_only_affects_its_own_memberships(service):
+    contact = await service.create_contact({"first_name": "Ada"})
+    list_a = await service.create_contact_list(name="A")
+    list_b = await service.create_contact_list(name="B")
+    await service.bulk_add_to_list(list_a.list_id, [contact.crm_contact_id])
+    await service.bulk_add_to_list(list_b.list_id, [contact.crm_contact_id])
+
+    await service.delete_contact_list(list_a.list_id)
+
+    page_b = await service.get_list_contacts(list_b.list_id)
+    assert [c.crm_contact_id for c in page_b.items] == [contact.crm_contact_id]
+
+
+@pytest.mark.asyncio
+async def test_delete_missing_list_raises(service):
+    with pytest.raises(CrmContactListNotFound):
+        await service.delete_contact_list("does-not-exist")
+
+
+@pytest.mark.asyncio
+async def test_get_list_contacts_paginates(service):
+    contact_list = await service.create_contact_list(name="Test List")
+    ids = []
+    for i in range(5):
+        contact = await service.create_contact({"first_name": f"C{i}"})
+        ids.append(contact.crm_contact_id)
+    await service.bulk_add_to_list(contact_list.list_id, ids)
+
+    page1 = await service.get_list_contacts(contact_list.list_id, page=1, page_size=2)
+    assert page1.total == 5
+    assert len(page1.items) == 2
+
+    page3 = await service.get_list_contacts(contact_list.list_id, page=3, page_size=2)
+    assert len(page3.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_contacts_for_missing_list_raises(service):
+    with pytest.raises(CrmContactListNotFound):
+        await service.get_list_contacts("does-not-exist")

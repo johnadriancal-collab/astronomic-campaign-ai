@@ -33,9 +33,14 @@ from app.models.crm import (
     EXTERNAL_FIELD_NAMES,
     THESIS_FIELD_NAMES,
     CrmContact,
+    CrmContactList,
+    CrmContactListMembership,
+    CrmContactListSummary,
     CrmContactPage,
     CrmCustomFieldDefinition,
     CrmImportRowStatus,
+    CrmListBulkAddResult,
+    CrmListBulkRemoveResult,
     CustomFieldType,
     FilterFieldMeta,
     FilterQuery,
@@ -44,6 +49,11 @@ from app.models.crm import (
     normalize_linkedin_url,
     normalize_name_company,
 )
+from app.repositories.crm_contact_list_member_store import (
+    CrmContactListMemberStore,
+    MemoryCrmContactListMemberStore,
+)
+from app.repositories.crm_contact_list_store import CrmContactListNotFoundError, CrmContactListStore, MemoryCrmContactListStore
 from app.repositories.crm_contact_store import CrmContactNotFoundError, CrmContactStore, MemoryCrmContactStore
 from app.repositories.crm_custom_field_store import (
     CrmCustomFieldNotFoundError,
@@ -134,14 +144,24 @@ class CrmDuplicateFieldKeyError(Exception):
         super().__init__(f"A custom field with key '{field_key}' already exists")
 
 
+class CrmContactListNotFound(Exception):
+    def __init__(self, list_id: str):
+        self.list_id = list_id
+        super().__init__(f"CRM contact list not found: {list_id}")
+
+
 class CrmService:
     def __init__(
         self,
         contact_store: CrmContactStore | None = None,
         custom_field_store: CrmCustomFieldStore | None = None,
+        list_store: CrmContactListStore | None = None,
+        list_member_store: CrmContactListMemberStore | None = None,
     ):
         self.contact_store = contact_store or MemoryCrmContactStore()
         self.custom_field_store = custom_field_store or MemoryCrmCustomFieldStore()
+        self.list_store = list_store or MemoryCrmContactListStore()
+        self.list_member_store = list_member_store or MemoryCrmContactListMemberStore()
 
     # --- Contacts: manual CRUD ---
 
@@ -442,6 +462,123 @@ class CrmService:
         field_by_key = validate_query(query, registry)
         contacts = await self.contact_store.list()
         return _query_contacts(contacts, query, field_by_key)
+
+    # --- Lists: named, persistent groupings of existing contacts (2026-08-11) ---
+    #
+    # A list never holds contact data of its own -- only a reference
+    # (crm_contact_id) via CrmContactListMemberStore. Every method below that
+    # returns contacts re-fetches them live from contact_store, so an edit to
+    # a contact is visible in every list it's in with no extra step, and
+    # neither adding/removing membership nor deleting a list EVER writes to
+    # contact_store -- the contact's own updated_at is never touched by any
+    # of this.
+
+    async def _require_contact_list(self, list_id: str) -> CrmContactList:
+        contact_list = await self.list_store.get(list_id)
+        if contact_list is None:
+            raise CrmContactListNotFound(list_id)
+        return contact_list
+
+    async def list_contact_lists(self) -> list[CrmContactListSummary]:
+        lists = await self.list_store.list()
+        counts = await self.list_member_store.count_by_list()
+        return [
+            CrmContactListSummary(**contact_list.model_dump(), contact_count=counts.get(contact_list.list_id, 0))
+            for contact_list in lists
+        ]
+
+    async def create_contact_list(self, name: str, description: str | None = None) -> CrmContactListSummary:
+        now = datetime.now(timezone.utc)
+        contact_list = CrmContactList(
+            list_id=str(uuid.uuid4()), name=name, description=description, created_at=now, updated_at=now
+        )
+        await self.list_store.create(contact_list)
+        return CrmContactListSummary(**contact_list.model_dump(), contact_count=0)
+
+    async def get_contact_list(self, list_id: str) -> CrmContactListSummary:
+        contact_list = await self._require_contact_list(list_id)
+        counts = await self.list_member_store.count_by_list()
+        return CrmContactListSummary(**contact_list.model_dump(), contact_count=counts.get(list_id, 0))
+
+    async def update_contact_list(self, list_id: str, patch: dict[str, Any]) -> CrmContactListSummary:
+        """Rename/description edit only -- `list_id`/`created_at` are never
+        accepted from a patch even if present in the body (model_copy below
+        only ever applies name/description/updated_at)."""
+        contact_list = await self._require_contact_list(list_id)
+        allowed = {k: v for k, v in patch.items() if k in ("name", "description")}
+        updated = contact_list.model_copy(update={**allowed, "updated_at": datetime.now(timezone.utc)})
+        await self.list_store.save(updated)
+        counts = await self.list_member_store.count_by_list()
+        return CrmContactListSummary(**updated.model_dump(), contact_count=counts.get(list_id, 0))
+
+    async def delete_contact_list(self, list_id: str) -> CrmContactListSummary:
+        """Permanently deletes the list and every membership row that pointed at
+        it. Never touches crm_contacts -- every contact that was a member
+        continues to exist, unarchived and unedited, exactly as before.
+        Returns the summary as it was immediately before deletion (the route
+        has nothing else to hand back, and every other route in this API
+        returns JSON on success -- no 204s)."""
+        summary = await self.get_contact_list(list_id)
+        await self.list_member_store.remove_all_for_list(list_id)
+        await self.list_store.delete(list_id)
+        return summary
+
+    async def get_list_contacts(self, list_id: str, page: int = 1, page_size: int = 50) -> CrmContactPage:
+        """Same server-side pagination convention as list_contacts()/query_contacts()
+        above -- the caller never has to fetch more than the one page it asked for.
+        No sort applied (same as GET /crm/contacts) -- items come back in
+        contact_store's own (created_at) order, filtered down to this list's members."""
+        await self._require_contact_list(list_id)
+        member_ids = set(await self.list_member_store.list_contact_ids_for_list(list_id))
+        contacts = await self.contact_store.list()
+        matching = [c for c in contacts if c.crm_contact_id in member_ids]
+
+        total = len(matching)
+        page = max(page, 1)
+        page_size = max(page_size, 1)
+        start = (page - 1) * page_size
+        items = matching[start : start + page_size]
+        return CrmContactPage(items=items, total=total, page=page, page_size=page_size)
+
+    async def bulk_add_to_list(self, list_id: str, contact_ids: list[str]) -> CrmListBulkAddResult:
+        """Reports added/already_member/not_found rather than raising on any of
+        those -- a bulk action against hundreds or thousands of ids should never
+        hard-fail the whole request over one bad id or one repeat. `not_found`
+        ids are silently skipped (never create a membership row with no real
+        contact behind it). Duplicate ids within `contact_ids` itself are
+        collapsed first, order-preserving."""
+        await self._require_contact_list(list_id)
+        added = already_member = not_found = 0
+        now = datetime.now(timezone.utc)
+        for contact_id in dict.fromkeys(contact_ids):
+            if await self.contact_store.get(contact_id) is None:
+                not_found += 1
+                continue
+            is_new = await self.list_member_store.add(
+                CrmContactListMembership(list_id=list_id, crm_contact_id=contact_id, added_at=now)
+            )
+            if is_new:
+                added += 1
+            else:
+                already_member += 1
+        return CrmListBulkAddResult(added=added, already_member=already_member, not_found=not_found)
+
+    async def bulk_remove_from_list(self, list_id: str, contact_ids: list[str]) -> CrmListBulkRemoveResult:
+        await self._require_contact_list(list_id)
+        removed = 0
+        for contact_id in dict.fromkeys(contact_ids):
+            if await self.list_member_store.remove(list_id, contact_id):
+                removed += 1
+        return CrmListBulkRemoveResult(removed=removed)
+
+    async def remove_contact_from_list(self, list_id: str, contact_id: str) -> CrmContactListSummary:
+        """Idempotent -- removing a contact that isn't currently a member is a
+        no-op, not a 404, since the end state (not a member) is already true.
+        Returns the list's updated summary (contact_count reflects the removal)
+        so the caller gets a fresh count with no extra request."""
+        await self._require_contact_list(list_id)
+        await self.list_member_store.remove(list_id, contact_id)
+        return await self.get_contact_list(list_id)
 
     # --- Backup/export ---
 

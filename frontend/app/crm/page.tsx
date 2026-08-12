@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { Download, Plus, Search } from "lucide-react";
+import { AddToListPanel } from "@/components/add-to-list-panel";
 import { buttonVariants } from "@/components/ui/button";
 import { ContactResults } from "@/components/crm-contact-results";
 import { Input } from "@/components/ui/input";
@@ -166,20 +167,23 @@ export default function CrmContactsPage() {
             Our own record of known prospects and relationships -- separate from Apollo, separate from Campaign Manager.
           </p>
         </div>
-        <div className="flex shrink-0 flex-col gap-2">
+        <div className="flex shrink-0 flex-col items-end gap-2">
           <Link href="/crm/new" className={cn(buttonVariants({ size: "sm" }), "gap-1.5")}>
             <Plus className="h-4 w-4" />
             New contact
           </Link>
-          <button
-            type="button"
-            onClick={handleExport}
-            disabled={selected.size === 0}
-            className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1.5 disabled:cursor-not-allowed disabled:opacity-40")}
-          >
-            <Download className="h-4 w-4" />
-            Export{selected.size > 0 ? ` (${selected.size})` : ""}
-          </button>
+          <div className="flex gap-2">
+            <AddToListPanel selectedIds={[...selected]} />
+            <button
+              type="button"
+              onClick={handleExport}
+              disabled={selected.size === 0}
+              className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1.5 disabled:cursor-not-allowed disabled:opacity-40")}
+            >
+              <Download className="h-4 w-4" />
+              Export{selected.size > 0 ? ` (${selected.size})` : ""}
+            </button>
+          </div>
         </div>
       </div>
 

@@ -15,10 +15,13 @@ from app.dependencies import get_crm_import_service, get_crm_service
 from app.models.crm import (
     CrmContact,
     CrmContactExportField,
+    CrmContactListSummary,
     CrmContactPage,
     CrmCustomFieldDefinition,
     CrmImportBatch,
     CrmImportReport,
+    CrmListBulkAddResult,
+    CrmListBulkRemoveResult,
     CustomFieldType,
     FilterFieldMeta,
     FilterQuery,
@@ -31,7 +34,13 @@ from app.services.crm_migration import (
     repair_all_contacts_comma_delimited_fields,
     translate_legacy_import_batch,
 )
-from app.services.crm_service import CrmContactNotFound, CrmCustomFieldNotFound, CrmDuplicateFieldKeyError, CrmService
+from app.services.crm_service import (
+    CrmContactListNotFound,
+    CrmContactNotFound,
+    CrmCustomFieldNotFound,
+    CrmDuplicateFieldKeyError,
+    CrmService,
+)
 
 router = APIRouter(prefix="/crm", tags=["crm"])
 
@@ -43,6 +52,15 @@ class CrmCustomFieldCreateRequest(BaseModel):
     description: str | None = None
     options: list[str] = []
     required: bool = False
+
+
+class CrmListCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+
+
+class CrmListBulkContactIdsRequest(BaseModel):
+    contact_ids: list[str]
 
 
 class CrmImportPreviewRequest(BaseModel):
@@ -167,6 +185,112 @@ async def archive_contact(crm_contact_id: str, service: CrmService = Depends(get
     try:
         return await service.archive_contact(crm_contact_id)
     except CrmContactNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Lists: named, persistent groupings of existing contacts ---
+#
+# A list is a real, permanent delete (the one entity in this codebase that
+# isn't archive-only) -- see crm_contact_list_store.py's docstring for why
+# that's safe here. Every route below is read/write only against the list
+# and its memberships; none of them ever create, edit, or archive a
+# CrmContact. Declared ahead of the generic /contacts/{crm_contact_id}
+# routes is unnecessary here since "lists" can't collide with a contact id,
+# but grouped together for readability.
+
+
+@router.get("/lists", response_model=list[CrmContactListSummary])
+async def list_contact_lists(service: CrmService = Depends(get_crm_service)):
+    return await service.list_contact_lists()
+
+
+@router.post("/lists", response_model=CrmContactListSummary)
+async def create_contact_list(req: CrmListCreateRequest, service: CrmService = Depends(get_crm_service)):
+    return await service.create_contact_list(name=req.name, description=req.description)
+
+
+@router.get("/lists/{list_id}", response_model=CrmContactListSummary)
+async def get_contact_list(list_id: str, service: CrmService = Depends(get_crm_service)):
+    try:
+        return await service.get_contact_list(list_id)
+    except CrmContactListNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.patch("/lists/{list_id}", response_model=CrmContactListSummary)
+async def update_contact_list(
+    list_id: str, patch: dict[str, Any] = Body(...), service: CrmService = Depends(get_crm_service)
+):
+    """Rename and/or edit the description. See CrmService.update_contact_list --
+    any other key in the body (e.g. list_id, created_at) is silently ignored."""
+    try:
+        return await service.update_contact_list(list_id, patch)
+    except CrmContactListNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/lists/{list_id}", response_model=CrmContactListSummary)
+async def delete_contact_list(list_id: str, service: CrmService = Depends(get_crm_service)):
+    """Permanently deletes the list and its memberships. Never deletes, archives,
+    or edits any CrmContact -- see CrmService.delete_contact_list. Returns the
+    summary as it was immediately before deletion (every route in this API
+    returns JSON on success, no 204s)."""
+    try:
+        return await service.delete_contact_list(list_id)
+    except CrmContactListNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/lists/{list_id}/contacts", response_model=CrmContactPage)
+async def get_list_contacts(
+    list_id: str, page: int = 1, page_size: int = 50, service: CrmService = Depends(get_crm_service)
+):
+    """Same CrmContactPage shape as GET /contacts and POST /contacts/query --
+    the frontend's shared ContactResults component needs no special-casing to
+    render a list's contacts. Contacts are always fetched live from
+    crm_contacts; this never returns a stored copy."""
+    try:
+        return await service.get_list_contacts(list_id, page=page, page_size=page_size)
+    except CrmContactListNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/lists/{list_id}/contacts/bulk-add", response_model=CrmListBulkAddResult)
+async def bulk_add_to_list(
+    list_id: str, req: CrmListBulkContactIdsRequest, service: CrmService = Depends(get_crm_service)
+):
+    """The ONE call the frontend makes regardless of whether it's adding 1 contact
+    or every contact currently selected (which may already be thousands, from
+    Contacts/More Filters/Astro Search's existing "Select all N matching") --
+    never one request per contact. Duplicate membership is idempotent, never an
+    error; see CrmService.bulk_add_to_list for why the response reports counts
+    instead of raising on a repeat or an unrecognized id."""
+    try:
+        return await service.bulk_add_to_list(list_id, req.contact_ids)
+    except CrmContactListNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/lists/{list_id}/contacts/bulk-remove", response_model=CrmListBulkRemoveResult)
+async def bulk_remove_from_list(
+    list_id: str, req: CrmListBulkContactIdsRequest, service: CrmService = Depends(get_crm_service)
+):
+    try:
+        return await service.bulk_remove_from_list(list_id, req.contact_ids)
+    except CrmContactListNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/lists/{list_id}/contacts/{crm_contact_id}", response_model=CrmContactListSummary)
+async def remove_contact_from_list(
+    list_id: str, crm_contact_id: str, service: CrmService = Depends(get_crm_service)
+):
+    """Idempotent -- removing a contact that isn't currently a member is a
+    no-op, not a 404. Never archives or deletes the contact itself. Returns
+    the list's updated summary (contact_count reflects the removal)."""
+    try:
+        return await service.remove_contact_from_list(list_id, crm_contact_id)
+    except CrmContactListNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
