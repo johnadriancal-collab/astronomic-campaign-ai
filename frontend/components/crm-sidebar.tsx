@@ -14,6 +14,7 @@ import {
   Sparkles,
   Users,
 } from "lucide-react";
+import { BackendStatusRow } from "@/components/backend-status";
 import { cn } from "@/lib/utils";
 
 const SECTIONS = [
@@ -85,7 +86,8 @@ export function CrmSidebar() {
         <div className="h-px bg-sidebar-border" />
       </div>
 
-      <div className="p-3">
+      <div className="flex flex-col gap-1 p-3">
+        <BackendStatusRow />
         <Link
           href="/crm/settings/activity"
           className={cn(
