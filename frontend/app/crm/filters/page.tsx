@@ -13,6 +13,7 @@ import {
   listCrmContactExportFields,
   listCrmCustomFields,
   listCrmFilterableFields,
+  logCrmExportSafely,
   queryCrmContacts,
   type CrmContact,
   type CrmContactExportField,
@@ -215,6 +216,7 @@ function CrmFiltersPageInner() {
       );
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, selectedContacts), exportFilename(new Date()));
+      logCrmExportSafely({ source: "more_filters", contact_count: selectedContacts.length });
     } catch (err) {
       setError(err instanceof ApiError ? `Couldn't export contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
@@ -231,6 +233,7 @@ function CrmFiltersPageInner() {
       const all = matchingContacts ?? (await fetchAllMatchingContacts(currentContentQuery(), queryCrmContacts));
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, all), exportFilename(new Date()));
+      logCrmExportSafely({ source: "more_filters", contact_count: all.length });
     } catch (err) {
       setError(err instanceof ApiError ? `Couldn't export contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {

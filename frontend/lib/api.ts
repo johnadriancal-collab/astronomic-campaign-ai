@@ -842,3 +842,91 @@ export function bulkRemoveFromCrmList(listId: string, contactIds: string[]): Pro
 export function removeCrmListContact(listId: string, crmContactId: string): Promise<CrmContactListSummary> {
   return request<CrmContactListSummary>(`/crm/lists/${listId}/contacts/${crmContactId}`, { method: "DELETE" });
 }
+
+// --- Activity Log ---
+
+export type ActivityCategory = "itf" | "contacts" | "imports" | "lists" | "exports" | "campaigns" | "errors";
+
+export type ActivitySource =
+  | "manual_crm"
+  | "itf_automation"
+  | "csv_import"
+  | "lists"
+  | "contacts_page"
+  | "more_filters"
+  | "astro_search"
+  | "campaign_system"
+  | "system";
+
+export interface ActivityEvent {
+  event_id: string;
+  event_type: string;
+  category: ActivityCategory;
+  created_at: string;
+  source: ActivitySource;
+  actor: string | null;
+  entity_type: string | null;
+  entity_id: string | null;
+  entity_name: string | null;
+  summary: string;
+  metadata: Record<string, unknown>;
+}
+
+export interface ActivityEventPage {
+  items: ActivityEvent[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface ActivityEventFilters {
+  category?: ActivityCategory;
+  q?: string;
+  date_from?: string;
+  date_to?: string;
+  page?: number;
+  page_size?: number;
+}
+
+export function listActivityEvents(filters: ActivityEventFilters = {}): Promise<ActivityEventPage> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value !== undefined && value !== "") params.set(key, String(value));
+  }
+  const query = params.toString();
+  return request<ActivityEventPage>(`/crm/activity${query ? `?${query}` : ""}`);
+}
+
+// The one deliberate exception to "events only come from a backend write path" --
+// CSV export is 100% client-side (see lib/csv-export.ts), so the frontend calls
+// this itself, AFTER the download has already been triggered. Best-effort: a
+// failure here must never surface as an export error, since the file is
+// already on the user's machine by the time this call is made -- callers
+// should fire this and ignore/swallow any rejection (see logCrmExportSafely
+// call sites in app/crm/*), never block or roll back on it.
+export type CrmExportSource = "contacts" | "more_filters" | "astro_search" | "list";
+
+export function logCrmExport(payload: {
+  source: CrmExportSource;
+  contact_count: number;
+  format?: string;
+  list_id?: string;
+  list_name?: string;
+}): Promise<{ status: string }> {
+  return post<{ status: string }>("/crm/activity/exports", { format: "csv", ...payload });
+}
+
+// Fire-and-forget wrapper for logCrmExport -- swallows any failure so a
+// logging hiccup can never be mistaken for (or interfere with) the export
+// itself, which has already completed by the time this is called.
+export function logCrmExportSafely(payload: {
+  source: CrmExportSource;
+  contact_count: number;
+  format?: string;
+  list_id?: string;
+  list_name?: string;
+}): void {
+  logCrmExport(payload).catch(() => {
+    // Intentionally ignored -- see this module's docstring above.
+  });
+}

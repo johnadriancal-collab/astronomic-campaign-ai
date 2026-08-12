@@ -29,6 +29,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from app.models.activity import ActivityCategory, ActivitySource
 from app.models.crm import (
     EXTERNAL_FIELD_NAMES,
     THESIS_FIELD_NAMES,
@@ -49,6 +50,7 @@ from app.models.crm import (
     normalize_linkedin_url,
     normalize_name_company,
 )
+from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.crm_contact_list_member_store import (
     CrmContactListMemberStore,
     MemoryCrmContactListMemberStore,
@@ -60,6 +62,7 @@ from app.repositories.crm_custom_field_store import (
     CrmCustomFieldStore,
     MemoryCrmCustomFieldStore,
 )
+from app.services.activity_log_service import ActivityLogService
 
 CUSTOM_FIELD_PREFIX = "custom:"
 
@@ -117,6 +120,13 @@ def _union_merge_delimited_text(existing: str | None, incoming: str, separator: 
     return separator.join(_union_merge_list(existing_tokens, incoming_tokens))
 
 
+def _contact_display_name(contact: "CrmContact") -> str:
+    """Best-effort human label for the Activity Log -- first/last name if
+    either is present, else email, else the bare contact id (never blank)."""
+    name = " ".join(part for part in (contact.first_name, contact.last_name) if part).strip()
+    return name or contact.email or contact.crm_contact_id
+
+
 def _is_empty(value: Any) -> bool:
     """None, "", [], {} count as empty. False and 0 do NOT -- they're real answers."""
     if value is None:
@@ -157,11 +167,13 @@ class CrmService:
         custom_field_store: CrmCustomFieldStore | None = None,
         list_store: CrmContactListStore | None = None,
         list_member_store: CrmContactListMemberStore | None = None,
+        activity_log: ActivityLogService | None = None,
     ):
         self.contact_store = contact_store or MemoryCrmContactStore()
         self.custom_field_store = custom_field_store or MemoryCrmCustomFieldStore()
         self.list_store = list_store or MemoryCrmContactListStore()
         self.list_member_store = list_member_store or MemoryCrmContactListMemberStore()
+        self.activity_log = activity_log or ActivityLogService(MemoryActivityEventStore())
 
     # --- Contacts: manual CRUD ---
 
@@ -202,6 +214,16 @@ class CrmService:
         now = datetime.now(timezone.utc)
         contact = CrmContact(crm_contact_id=str(uuid.uuid4()), created_at=now, updated_at=now, **fields)
         await self.contact_store.create(contact)
+        name = _contact_display_name(contact)
+        await self.activity_log.record(
+            event_type="contact.created",
+            category=ActivityCategory.CONTACTS,
+            source=ActivitySource.MANUAL_CRM,
+            summary=f"{name} was manually created in the CRM.",
+            entity_type="contact",
+            entity_id=contact.crm_contact_id,
+            entity_name=name,
+        )
         return contact
 
     async def get_contact(self, crm_contact_id: str) -> CrmContact:
@@ -255,7 +277,49 @@ class CrmService:
                 patch = {**patch, "thesis_investor_mode": derive_investor_mode(effective_custom_fields.get("investor_type"))}
         updated = contact.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
         await self.contact_store.save(updated)
+        await self._record_contact_update_activity(contact, updated)
         return updated
+
+    async def _record_contact_update_activity(self, before: CrmContact, after: CrmContact) -> None:
+        """Distinguishes archive/unarchive from a plain edit by diffing the
+        `archived` flag across the save -- there is no separate
+        unarchive_contact() method (unarchiving is just PATCH {"archived":
+        false} through this same method), so this is the one place that
+        transition can be detected. Never fires for CSV import/ITF updates --
+        those go through apply_import_mapping + contact_store.save() directly,
+        never through this method (see import.completed / itf.contact_updated
+        for that path's own events)."""
+        name = _contact_display_name(after)
+        if before.archived == after.archived:
+            await self.activity_log.record(
+                event_type="contact.updated",
+                category=ActivityCategory.CONTACTS,
+                source=ActivitySource.MANUAL_CRM,
+                summary=f"{name} was updated.",
+                entity_type="contact",
+                entity_id=after.crm_contact_id,
+                entity_name=name,
+            )
+        elif after.archived:
+            await self.activity_log.record(
+                event_type="contact.archived",
+                category=ActivityCategory.CONTACTS,
+                source=ActivitySource.MANUAL_CRM,
+                summary=f"{name} was archived.",
+                entity_type="contact",
+                entity_id=after.crm_contact_id,
+                entity_name=name,
+            )
+        else:
+            await self.activity_log.record(
+                event_type="contact.unarchived",
+                category=ActivityCategory.CONTACTS,
+                source=ActivitySource.MANUAL_CRM,
+                summary=f"{name} was unarchived.",
+                entity_type="contact",
+                entity_id=after.crm_contact_id,
+                entity_name=name,
+            )
 
     async def archive_contact(self, crm_contact_id: str) -> CrmContact:
         """Soft-delete only -- never hard-deleted, matching this app's archive convention."""
@@ -493,6 +557,15 @@ class CrmService:
             list_id=str(uuid.uuid4()), name=name, description=description, created_at=now, updated_at=now
         )
         await self.list_store.create(contact_list)
+        await self.activity_log.record(
+            event_type="list.created",
+            category=ActivityCategory.LISTS,
+            source=ActivitySource.LISTS,
+            summary=f'List "{contact_list.name}" was created.',
+            entity_type="list",
+            entity_id=contact_list.list_id,
+            entity_name=contact_list.name,
+        )
         return CrmContactListSummary(**contact_list.model_dump(), contact_count=0)
 
     async def get_contact_list(self, list_id: str) -> CrmContactListSummary:
@@ -508,6 +581,22 @@ class CrmService:
         allowed = {k: v for k, v in patch.items() if k in ("name", "description")}
         updated = contact_list.model_copy(update={**allowed, "updated_at": datetime.now(timezone.utc)})
         await self.list_store.save(updated)
+        renamed = "name" in allowed and allowed["name"] != contact_list.name
+        summary = (
+            f'List renamed from "{contact_list.name}" to "{updated.name}".'
+            if renamed
+            else f'List "{updated.name}" was updated.'
+        )
+        await self.activity_log.record(
+            event_type="list.updated",
+            category=ActivityCategory.LISTS,
+            source=ActivitySource.LISTS,
+            summary=summary,
+            entity_type="list",
+            entity_id=updated.list_id,
+            entity_name=updated.name,
+            metadata={"renamed": renamed},
+        )
         counts = await self.list_member_store.count_by_list()
         return CrmContactListSummary(**updated.model_dump(), contact_count=counts.get(list_id, 0))
 
@@ -521,6 +610,17 @@ class CrmService:
         summary = await self.get_contact_list(list_id)
         await self.list_member_store.remove_all_for_list(list_id)
         await self.list_store.delete(list_id)
+        await self.activity_log.record(
+            event_type="list.deleted",
+            category=ActivityCategory.LISTS,
+            source=ActivitySource.LISTS,
+            summary=f'List "{summary.name}" was deleted ({summary.contact_count} '
+            f'contact{"s" if summary.contact_count != 1 else ""} removed from the list, not the CRM).',
+            entity_type="list",
+            entity_id=list_id,
+            entity_name=summary.name,
+            metadata={"contact_count": summary.contact_count},
+        )
         return summary
 
     async def get_list_contacts(self, list_id: str, page: int = 1, page_size: int = 50) -> CrmContactPage:
@@ -547,7 +647,7 @@ class CrmService:
         ids are silently skipped (never create a membership row with no real
         contact behind it). Duplicate ids within `contact_ids` itself are
         collapsed first, order-preserving."""
-        await self._require_contact_list(list_id)
+        contact_list = await self._require_contact_list(list_id)
         added = already_member = not_found = 0
         now = datetime.now(timezone.utc)
         for contact_id in dict.fromkeys(contact_ids):
@@ -561,14 +661,40 @@ class CrmService:
                 added += 1
             else:
                 already_member += 1
+        # ONE event per bulk call, never one per contact -- and only when something
+        # actually changed. A bulk-add where every id was already a member is a
+        # real no-op: logging it as "N contacts added" would misrepresent what
+        # happened, so no event fires at all in that case.
+        if added > 0:
+            await self.activity_log.record(
+                event_type="list.contacts_added",
+                category=ActivityCategory.LISTS,
+                source=ActivitySource.LISTS,
+                summary=f'{added} contact{"s" if added != 1 else ""} added to "{contact_list.name}".',
+                entity_type="list",
+                entity_id=list_id,
+                entity_name=contact_list.name,
+                metadata={"added": added, "already_member": already_member, "not_found": not_found},
+            )
         return CrmListBulkAddResult(added=added, already_member=already_member, not_found=not_found)
 
     async def bulk_remove_from_list(self, list_id: str, contact_ids: list[str]) -> CrmListBulkRemoveResult:
-        await self._require_contact_list(list_id)
+        contact_list = await self._require_contact_list(list_id)
         removed = 0
         for contact_id in dict.fromkeys(contact_ids):
             if await self.list_member_store.remove(list_id, contact_id):
                 removed += 1
+        if removed > 0:
+            await self.activity_log.record(
+                event_type="list.contacts_removed",
+                category=ActivityCategory.LISTS,
+                source=ActivitySource.LISTS,
+                summary=f'{removed} contact{"s" if removed != 1 else ""} removed from "{contact_list.name}".',
+                entity_type="list",
+                entity_id=list_id,
+                entity_name=contact_list.name,
+                metadata={"removed": removed},
+            )
         return CrmListBulkRemoveResult(removed=removed)
 
     async def remove_contact_from_list(self, list_id: str, contact_id: str) -> CrmContactListSummary:

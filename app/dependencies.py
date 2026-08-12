@@ -12,6 +12,7 @@ import hmac
 from fastapi import Header, HTTPException, Request
 
 from app.config import settings
+from app.services.activity_log_service import ActivityLogService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
 from app.services.crm_import_service import CrmImportService
@@ -52,6 +53,10 @@ async def get_crm_import_service(request: Request) -> CrmImportService:
 
 async def get_itf_ingestion_service(request: Request) -> ItfIngestionService:
     return request.app.state.itf_ingestion_service
+
+
+async def get_activity_log_service(request: Request) -> ActivityLogService:
+    return request.app.state.activity_log_service
 
 
 async def verify_itf_webhook_token(authorization: str | None = Header(default=None)) -> None:

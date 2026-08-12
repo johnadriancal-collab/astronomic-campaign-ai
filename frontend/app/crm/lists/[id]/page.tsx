@@ -17,6 +17,7 @@ import {
   listCrmContactExportFields,
   listCrmCustomFields,
   listCrmListContacts,
+  logCrmExportSafely,
   updateCrmList,
   type CrmContact,
   type CrmContactExportField,
@@ -167,6 +168,12 @@ export default function CrmListDetailPage() {
       const selectedContacts = await resolveContactsForExport(selected, knownContacts, () => fetchAllListContacts(listId, listCrmListContacts));
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, selectedContacts), exportFilename(new Date()));
+      logCrmExportSafely({
+        source: "list",
+        contact_count: selectedContacts.length,
+        list_id: listId,
+        list_name: list?.name,
+      });
     } catch (err) {
       setContactsError(err instanceof ApiError ? `Couldn't export contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
@@ -181,6 +188,7 @@ export default function CrmListDetailPage() {
       const all = matchingContacts ?? (await fetchAllListContacts(listId, listCrmListContacts));
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, all), exportFilename(new Date()));
+      logCrmExportSafely({ source: "list", contact_count: all.length, list_id: listId, list_name: list?.name });
     } catch (err) {
       setContactsError(err instanceof ApiError ? `Couldn't export contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {

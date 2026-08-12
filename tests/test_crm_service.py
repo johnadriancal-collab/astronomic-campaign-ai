@@ -1109,3 +1109,196 @@ async def test_get_list_contacts_paginates(service):
 async def test_get_contacts_for_missing_list_raises(service):
     with pytest.raises(CrmContactListNotFound):
         await service.get_list_contacts("does-not-exist")
+
+
+# --- Activity Log: contacts ---
+
+
+@pytest.mark.asyncio
+async def test_manual_create_contact_emits_contact_created_event(service):
+    contact = await service.create_contact({"first_name": "Ada", "last_name": "Lovelace"})
+    events = await service.activity_log.store.list()
+    assert len(events) == 1
+    assert events[0].event_type == "contact.created"
+    assert events[0].entity_id == contact.crm_contact_id
+    assert events[0].entity_name == "Ada Lovelace"
+
+
+@pytest.mark.asyncio
+async def test_create_contact_from_import_does_not_emit_contact_created(service):
+    """create_contact_from_import() is CSV import's/ITF's own create path --
+    it must never ALSO emit a manual contact.created event, since those
+    callers already produce their own distinct event (import.completed /
+    itf.contact_created) for the exact same write."""
+    await service.create_contact_from_import({"first_name": "Imported", "last_name": "Person"})
+    events = await service.activity_log.store.list()
+    assert events == []
+
+
+@pytest.mark.asyncio
+async def test_update_contact_emits_contact_updated_event(service):
+    contact = await service.create_contact({"first_name": "Ada", "last_name": "Lovelace"})
+    await service.update_contact(contact.crm_contact_id, {"city": "London"})
+    events = await service.activity_log.store.list()
+    event_types = [e.event_type for e in events]
+    assert event_types == ["contact.updated", "contact.created"]  # newest first
+
+
+@pytest.mark.asyncio
+async def test_archive_contact_emits_contact_archived_not_generic_updated(service):
+    contact = await service.create_contact({"first_name": "Ada", "last_name": "Lovelace"})
+    await service.archive_contact(contact.crm_contact_id)
+    events = await service.activity_log.store.list()
+    assert events[0].event_type == "contact.archived"
+
+
+@pytest.mark.asyncio
+async def test_unarchiving_emits_contact_unarchived(service):
+    """Unarchiving goes through the same generic update_contact() path (PATCH
+    {"archived": false}) as any other edit -- the before/after diff inside
+    _record_contact_update_activity is what distinguishes it from a plain
+    contact.updated, per the approved 'option B' design (no separate
+    unarchive_contact() method was added)."""
+    contact = await service.create_contact({"first_name": "Ada", "last_name": "Lovelace"})
+    await service.archive_contact(contact.crm_contact_id)
+    await service.update_contact(contact.crm_contact_id, {"archived": False})
+    events = await service.activity_log.store.list()
+    assert events[0].event_type == "contact.unarchived"
+
+
+@pytest.mark.asyncio
+async def test_logging_never_mutates_the_contact_or_its_updated_at(service):
+    """The activity log is a separate store entirely -- recording an event
+    must never touch CrmContact itself beyond whatever the real action
+    already legitimately changed."""
+    contact = await service.create_contact({"first_name": "Ada", "last_name": "Lovelace"})
+    before = await service.get_contact(contact.crm_contact_id)
+    # A read-only action (listing events) must be a complete no-op against the contact.
+    await service.activity_log.list_events()
+    after = await service.get_contact(contact.crm_contact_id)
+    assert before == after
+    assert before.updated_at == after.updated_at
+
+
+# --- Activity Log: lists ---
+
+
+@pytest.mark.asyncio
+async def test_create_contact_list_emits_list_created_event(service):
+    contact_list = await service.create_contact_list(name="Austin Family Offices")
+    events = await service.activity_log.store.list()
+    assert len(events) == 1
+    assert events[0].event_type == "list.created"
+    assert events[0].entity_id == contact_list.list_id
+    assert events[0].entity_name == "Austin Family Offices"
+
+
+@pytest.mark.asyncio
+async def test_rename_list_emits_list_updated_event(service):
+    contact_list = await service.create_contact_list(name="Old Name")
+    await service.update_contact_list(contact_list.list_id, {"name": "New Name"})
+    events = await service.activity_log.store.list()
+    assert events[0].event_type == "list.updated"
+    assert "New Name" in events[0].summary
+    assert events[0].metadata["renamed"] is True
+
+
+@pytest.mark.asyncio
+async def test_delete_list_emits_list_deleted_event(service):
+    contact_list = await service.create_contact_list(name="Temporary List")
+    await service.delete_contact_list(contact_list.list_id)
+    events = await service.activity_log.store.list()
+    assert events[0].event_type == "list.deleted"
+    assert events[0].entity_name == "Temporary List"
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_list_does_not_delete_its_historical_activity_events(service):
+    """The Activity Log is append-only and independent of CrmContactListStore --
+    deleting the list must never delete list.created/list.updated events
+    recorded before the deletion."""
+    contact_list = await service.create_contact_list(name="Temp List")
+    await service.update_contact_list(contact_list.list_id, {"description": "note"})
+    await service.delete_contact_list(contact_list.list_id)
+
+    events = await service.activity_log.store.list()
+    event_types = {e.event_type for e in events}
+    assert event_types == {"list.created", "list.updated", "list.deleted"}
+    assert len(events) == 3
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_creates_exactly_one_event_regardless_of_contact_count(service):
+    contact_list = await service.create_contact_list(name="Big List")
+    ids = [(await service.create_contact({"first_name": f"C{i}"})).crm_contact_id for i in range(50)]
+
+    result = await service.bulk_add_to_list(contact_list.list_id, ids)
+    assert result.added == 50
+
+    events = await service.activity_log.store.list()
+    add_events = [e for e in events if e.event_type == "list.contacts_added"]
+    assert len(add_events) == 1
+    assert add_events[0].metadata["added"] == 50
+    assert "50" in add_events[0].summary
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_all_already_members_creates_no_misleading_event(service):
+    """If every selected contact is already a member, nothing actually
+    changed -- logging 'N contacts added' would misrepresent what happened,
+    so no list.contacts_added event fires at all."""
+    contact_list = await service.create_contact_list(name="List")
+    contact = await service.create_contact({"first_name": "Solo"})
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    events_before = await service.activity_log.store.list()
+    add_events_before = [e for e in events_before if e.event_type == "list.contacts_added"]
+    assert len(add_events_before) == 1  # the real first add
+
+    result = await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+    assert result.added == 0
+    assert result.already_member == 1
+
+    events_after = await service.activity_log.store.list()
+    add_events_after = [e for e in events_after if e.event_type == "list.contacts_added"]
+    assert len(add_events_after) == 1  # unchanged -- the duplicate add produced no new event
+
+
+@pytest.mark.asyncio
+async def test_bulk_remove_creates_exactly_one_event_regardless_of_contact_count(service):
+    contact_list = await service.create_contact_list(name="List")
+    ids = [(await service.create_contact({"first_name": f"C{i}"})).crm_contact_id for i in range(20)]
+    await service.bulk_add_to_list(contact_list.list_id, ids)
+
+    result = await service.bulk_remove_from_list(contact_list.list_id, ids)
+    assert result.removed == 20
+
+    events = await service.activity_log.store.list()
+    remove_events = [e for e in events if e.event_type == "list.contacts_removed"]
+    assert len(remove_events) == 1
+    assert remove_events[0].metadata["removed"] == 20
+
+
+@pytest.mark.asyncio
+async def test_bulk_remove_of_nothing_creates_no_event(service):
+    contact_list = await service.create_contact_list(name="List")
+    result = await service.bulk_remove_from_list(contact_list.list_id, ["not-a-member"])
+    assert result.removed == 0
+
+    events = await service.activity_log.store.list()
+    remove_events = [e for e in events if e.event_type == "list.contacts_removed"]
+    assert remove_events == []
+
+
+@pytest.mark.asyncio
+async def test_logging_does_not_change_list_membership_state(service):
+    """Recording events must never itself alter list membership or contact
+    records -- verified by fetching state before/after a pure read of the log."""
+    contact_list = await service.create_contact_list(name="List")
+    contact = await service.create_contact({"first_name": "Solo"})
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    before = await service.get_contact_list(contact_list.list_id)
+    await service.activity_log.list_events()
+    after = await service.get_contact_list(contact_list.list_id)
+    assert before.contact_count == after.contact_count == 1

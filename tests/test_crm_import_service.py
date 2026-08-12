@@ -1768,3 +1768,56 @@ async def test_import_one_row_extra_fields_source_never_overwrites_existing_cont
     )
     assert status == CrmImportRowStatus.EXISTING
     assert contact.source == "manual"  # fill-only-if-empty -- untouched
+
+
+# --- Activity Log: one summary event per commit(), never one per row ---
+
+
+@pytest.mark.asyncio
+async def test_commit_emits_exactly_one_import_completed_event(import_service):
+    """437 contacts imported must never produce 437 activity events -- one
+    commit() call, one event, with the real created/updated/skipped/errors
+    counts in its metadata."""
+    rows = "\n".join(f"person{i}@example.com,Person{i}" for i in range(20))
+    batch = await import_service.upload("investors.csv", csv_bytes(f"Email,First Name\n{rows}\n"))
+    await import_service.preview(batch.import_batch_id, {"Email": "email", "First Name": "first_name"})
+    report = await import_service.commit(batch.import_batch_id)
+    assert report.created == 20
+
+    events = await import_service.crm_service.activity_log.store.list()
+    import_events = [e for e in events if e.event_type == "import.completed"]
+    assert len(import_events) == 1
+    assert import_events[0].metadata == {"created": 20, "updated": 0, "skipped": 0, "errors": 0}
+    assert "investors.csv" in import_events[0].summary
+    assert "20 created" in import_events[0].summary
+
+    # And, crucially: no per-contact contact.created events snuck in alongside it --
+    # create_contact_from_import() (CSV import's create path) deliberately does not
+    # emit its own event, since that would double up with this one summary event.
+    assert [e.event_type for e in events] == ["import.completed"]
+
+
+@pytest.mark.asyncio
+async def test_commit_import_completed_event_reports_mixed_outcomes(import_service):
+    existing = await import_service.crm_service.create_contact({"email": "known@example.com"})
+    batch = await import_service.upload(
+        "mixed.csv", csv_bytes("Email,Company\nnew@example.com,NewCo\nknown@example.com,Acme\n")
+    )
+    await import_service.preview(batch.import_batch_id, {"Email": "email", "Company": "company"})
+    report = await import_service.commit(batch.import_batch_id)
+    assert report.created == 1
+    assert report.updated == 1
+
+    events = await import_service.crm_service.activity_log.store.list()
+    import_events = [e for e in events if e.event_type == "import.completed"]
+    assert len(import_events) == 1
+    assert import_events[0].metadata["created"] == 1
+    assert import_events[0].metadata["updated"] == 1
+
+    # The updated contact's own contact.updated event must NOT have fired --
+    # CSV import's "update" decision writes via contact_store.save() directly,
+    # never through CrmService.update_contact() (the manual-edit path). Only
+    # the seed contact's own manual creation (setup, above) plus this one
+    # import.completed summary should exist -- no contact.updated at all.
+    assert existing.crm_contact_id  # sanity
+    assert sorted(e.event_type for e in events) == ["contact.created", "import.completed"]

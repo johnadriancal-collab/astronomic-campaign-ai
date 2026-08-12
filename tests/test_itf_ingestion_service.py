@@ -522,3 +522,82 @@ async def test_csv_import_dietary_preferences_still_uses_semicolons_unaffected_b
         context,
     )
     assert mapped["thesis_dietary_preferences"] == ["Vegan", "Gluten-Free"]
+
+
+# --- Activity Log ---
+
+
+@pytest.mark.asyncio
+async def test_new_contact_submission_emits_submission_received_and_contact_created(itf_service):
+    values = row("8/10/2026 10:00:00", "Amos", "Ben-Meir", "amos@example.com", "", "", "", "")
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "created"
+
+    events = await itf_service.activity_log.store.list()
+    event_types = [e.event_type for e in events]
+    assert event_types == ["itf.contact_created", "itf.submission_received"]  # newest first
+    for event in events:
+        assert event.entity_name == "Amos Ben-Meir"
+        assert event.entity_id == result.contact_id
+
+
+@pytest.mark.asyncio
+async def test_existing_contact_submission_emits_submission_received_and_contact_updated(itf_service, import_service):
+    await import_service.crm_service.create_contact({"email": "amos@example.com", "city": ""})
+    values = row("8/10/2026 10:00:00", "Amos", "Ben-Meir", "amos@example.com", "", "", "", "")
+
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "updated"
+
+    events = await itf_service.activity_log.store.list()
+    event_types = [e.event_type for e in events]
+    assert event_types == ["itf.contact_updated", "itf.submission_received"]
+
+
+@pytest.mark.asyncio
+async def test_processing_failure_emits_processing_failed_not_created_or_updated(itf_service):
+    """A genuine per-row processing exception (import_one_row raising) must
+    surface as itf.processing_failed, in the errors category -- never a
+    contact_created/contact_updated event, since nothing was actually
+    written to the CRM."""
+    from unittest.mock import AsyncMock
+
+    itf_service.import_service.import_one_row = AsyncMock(side_effect=RuntimeError("simulated processing failure"))
+    values = row("8/10/2026 10:00:00", "Amos", "Ben-Meir", "amos@example.com", "", "", "", "")
+
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "error"
+
+    events = await itf_service.activity_log.store.list()
+    event_types = [e.event_type for e in events]
+    assert event_types == ["itf.processing_failed", "itf.submission_received"]
+    failure_event = events[0]
+    from app.models.activity import ActivityCategory
+
+    assert failure_event.category == ActivityCategory.ERRORS
+    assert "simulated processing failure" in failure_event.metadata["error"]
+
+
+@pytest.mark.asyncio
+async def test_already_processed_resubmission_emits_no_new_events(itf_service):
+    """Idempotency at the activity-log level too: a genuine retry of the exact
+    same submission must never create a second submission_received/
+    contact_created pair."""
+    values = row("8/10/2026 10:00:00", "Amos", "Ben-Meir", "amos@example.com", "", "", "", "")
+    await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    events_after_first = await itf_service.activity_log.store.list()
+    assert len(events_after_first) == 2
+
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "already_processed"
+
+    events_after_second = await itf_service.activity_log.store.list()
+    assert len(events_after_second) == 2  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_dry_run_emits_no_activity_events_at_all(itf_service):
+    values = row("8/10/2026 10:00:00", "Amos", "Ben-Meir", "amos@example.com", "", "", "", "")
+    await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=True)
+    events = await itf_service.activity_log.store.list()
+    assert events == []

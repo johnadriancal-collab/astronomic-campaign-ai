@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
+from app.models.activity import ActivityCategory, ActivitySource
 from app.models.crm import (
     CrmContact,
     CrmImportBatch,
@@ -466,4 +467,23 @@ class CrmImportService:
 
         batch.status = CrmImportBatchStatus.COMMITTED
         await self.batch_store.save(batch)
+
+        # ONE summary event per commit() call, never one per row -- reuses
+        # CrmService's own ActivityLogService rather than taking a separate
+        # dependency, since this service is always constructed with a
+        # crm_service that already has one (see app/main.py's lifespan wiring).
+        await self.crm_service.activity_log.record(
+            event_type="import.completed",
+            category=ActivityCategory.IMPORTS,
+            source=ActivitySource.CSV_IMPORT,
+            summary=(
+                f"CSV import completed: {created} created, {updated} updated, "
+                f"{skipped} skipped, {errors} error{'s' if errors != 1 else ''} "
+                f'("{batch.filename}").'
+            ),
+            entity_type="import_batch",
+            entity_id=batch.import_batch_id,
+            entity_name=batch.filename,
+            metadata={"created": created, "updated": updated, "skipped": skipped, "errors": errors},
+        )
         return CrmImportReport(created=created, updated=updated, skipped=skipped, errors=errors)

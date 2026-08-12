@@ -57,9 +57,12 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any
 
-from app.models.crm import CrmImportRowStatus, CustomFieldType
+from app.models.activity import ActivityCategory, ActivitySource
+from app.models.crm import CrmContact, CrmImportRowStatus, CustomFieldType
 from app.models.itf import ItfIngestionLogEntry, ItfRowStatus, ItfWebhookResult
+from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.itf_ingestion_log_store import ItfIngestionLogStore
+from app.services.activity_log_service import ActivityLogService
 from app.services.crm_classification_rules import (
     _normalize_header,
     build_classification_context,
@@ -67,6 +70,13 @@ from app.services.crm_classification_rules import (
 )
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmDuplicateFieldKeyError
+
+
+def _entity_name_from_mapped(mapped: dict[str, Any]) -> str | None:
+    """Best-effort human label for the Activity Log -- first/last name if either is
+    present, else the email, else None (never a blank string)."""
+    name = " ".join(part for part in (mapped.get("first_name"), mapped.get("last_name")) if part).strip()
+    return name or mapped.get("email") or None
 
 # Best-effort scalar column_mapping -- see module docstring. Multi-select/checklist/
 # check-size/dietary-preference fields are deliberately NOT here; those are handled
@@ -240,9 +250,15 @@ class ItfIngestionService:
     custom field definition when `dry_run=True`.
     """
 
-    def __init__(self, import_service: CrmImportService, log_store: ItfIngestionLogStore):
+    def __init__(
+        self,
+        import_service: CrmImportService,
+        log_store: ItfIngestionLogStore,
+        activity_log: ActivityLogService | None = None,
+    ):
         self.import_service = import_service
         self.log_store = log_store
+        self.activity_log = activity_log or ActivityLogService(MemoryActivityEventStore())
 
     async def process_submission(
         self,
@@ -338,6 +354,7 @@ class ItfIngestionService:
                     processed_at=now,
                 )
             )
+            await self._record_activity(itf_status, contact, mapped, error_message)
 
         return ItfWebhookResult(
             status=itf_status.value,
@@ -348,6 +365,67 @@ class ItfIngestionService:
             warnings=warnings,
             error=error_message,
         )
+
+    async def _record_activity(
+        self,
+        itf_status: ItfRowStatus,
+        contact: CrmContact | None,
+        mapped: dict[str, Any],
+        error_message: str | None,
+    ) -> None:
+        """One `itf.submission_received` event for every real (non-dry-run,
+        non-already-processed -- see the early-return above, which happens
+        before this is ever reached) submission, plus exactly one outcome
+        event: `itf.contact_created`/`itf.contact_updated` when a contact was
+        created/matched, or `itf.processing_failed` on error. POSSIBLE_DUPLICATE
+        rows get only the submission_received event -- nothing was actually
+        created or updated, so no contact.* event would be honest here.
+        Best-effort throughout (ActivityLogService.record() never raises)."""
+        name = _entity_name_from_mapped(mapped)
+        await self.activity_log.record(
+            event_type="itf.submission_received",
+            category=ActivityCategory.ITF,
+            source=ActivitySource.ITF_AUTOMATION,
+            summary=f"{name or 'Someone'} submitted the Investor Thesis Form.",
+            entity_type="contact" if contact else None,
+            entity_id=contact.crm_contact_id if contact else None,
+            entity_name=name,
+            metadata={"submitted_at": mapped.get(f"custom:{ITF_SUBMITTED_AT_FIELD_KEY}")},
+        )
+
+        if itf_status == ItfRowStatus.CREATED and contact is not None:
+            await self.activity_log.record(
+                event_type="itf.contact_created",
+                category=ActivityCategory.ITF,
+                source=ActivitySource.ITF_AUTOMATION,
+                summary=f"{name or 'A contact'} was created in the CRM from the Investor Thesis Form.",
+                entity_type="contact",
+                entity_id=contact.crm_contact_id,
+                entity_name=name,
+                metadata={"result": "created"},
+            )
+        elif itf_status == ItfRowStatus.UPDATED and contact is not None:
+            await self.activity_log.record(
+                event_type="itf.contact_updated",
+                category=ActivityCategory.ITF,
+                source=ActivitySource.ITF_AUTOMATION,
+                summary=f"{name or 'An existing contact'} was updated from a new Investor Thesis Form submission.",
+                entity_type="contact",
+                entity_id=contact.crm_contact_id,
+                entity_name=name,
+                metadata={"result": "updated"},
+            )
+        elif itf_status == ItfRowStatus.ERROR:
+            await self.activity_log.record(
+                event_type="itf.processing_failed",
+                category=ActivityCategory.ERRORS,
+                source=ActivitySource.ITF_AUTOMATION,
+                summary=f"ITF submission from {name or 'an unknown submitter'} failed to process.",
+                entity_type="contact" if contact else None,
+                entity_id=contact.crm_contact_id if contact else None,
+                entity_name=name,
+                metadata={"error": error_message},
+            )
 
     async def _ensure_submitted_at_field_exists(self) -> None:
         """

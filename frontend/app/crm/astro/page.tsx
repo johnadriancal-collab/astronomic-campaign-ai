@@ -10,6 +10,7 @@ import {
   ApiError,
   listCrmContactExportFields,
   listCrmCustomFields,
+  logCrmExportSafely,
   queryCrmContacts,
   sendAstroCommand,
   type CrmContact,
@@ -152,6 +153,7 @@ export default function AstroSearchPage() {
       );
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, selectedContacts), exportFilename(new Date()));
+      logCrmExportSafely({ source: "astro_search", contact_count: selectedContacts.length });
     } catch (err) {
       setMessages((prev) => [
         ...prev,
@@ -171,6 +173,7 @@ export default function AstroSearchPage() {
       const all = matchingContacts ?? (await fetchAllMatchingContacts(currentQuery, queryCrmContacts));
       const columns = buildExportColumns(exportFields, customFields);
       downloadCsv(buildCsv(columns, all), exportFilename(new Date()));
+      logCrmExportSafely({ source: "astro_search", contact_count: all.length });
     } catch (err) {
       setMessages((prev) => [
         ...prev,

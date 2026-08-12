@@ -2,7 +2,18 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Contact, LayoutDashboard, ListChecks, ListFilter, ListPlus, MessageCircle, SlidersHorizontal, Sparkles, Users } from "lucide-react";
+import {
+  Contact,
+  LayoutDashboard,
+  ListChecks,
+  ListFilter,
+  ListPlus,
+  MessageCircle,
+  Settings,
+  SlidersHorizontal,
+  Sparkles,
+  Users,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const SECTIONS = [
@@ -22,7 +33,7 @@ export function CrmSidebar() {
   const pathname = usePathname();
 
   return (
-    <aside className="flex w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
+    <aside className="sticky top-16 flex h-[calc(100vh-4rem)] w-60 shrink-0 flex-col overflow-y-auto border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
       <div className="flex flex-col gap-1 p-3">
         <Link
           href="/"
@@ -69,6 +80,25 @@ export function CrmSidebar() {
           );
         })}
       </nav>
+
+      <div className="px-3">
+        <div className="h-px bg-sidebar-border" />
+      </div>
+
+      <div className="p-3">
+        <Link
+          href="/crm/settings/activity"
+          className={cn(
+            "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors",
+            isActive(pathname, "/crm/settings")
+              ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
+              : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+          )}
+        >
+          <Settings className="h-4 w-4" />
+          Settings
+        </Link>
+      </div>
     </aside>
   );
 }

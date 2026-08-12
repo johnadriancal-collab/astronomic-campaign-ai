@@ -12,6 +12,7 @@ import {
   listCrmContactExportFields,
   listCrmContacts,
   listCrmCustomFields,
+  logCrmExportSafely,
   type CrmContact,
   type CrmContactExportField,
   type CrmCustomFieldDefinition,
@@ -156,6 +157,10 @@ export default function CrmContactsPage() {
     const selectedContacts = allContacts.filter((c) => selected.has(c.crm_contact_id));
     const csv = buildCsv(columns, selectedContacts);
     downloadCsv(csv, exportFilename(new Date()));
+    // Logged AFTER the download has already been triggered -- a failure here
+    // must never surface as an export error, since the file is already on
+    // the user's machine by the time this fires. See logCrmExportSafely.
+    logCrmExportSafely({ source: "contacts", contact_count: selectedContacts.length });
   }
 
   return (

@@ -58,12 +58,15 @@ import uuid
 from datetime import datetime, timezone
 
 from app.apollo import ApolloClient
+from app.models.activity import ActivityCategory, ActivitySource
 from app.models.campaign import Campaign, CampaignPlan, CampaignSource, CampaignStatus, Filters, SequenceStep
 from app.models.campaign_sync import CampaignSyncReport
 from app.models.email_sequence import EmailSequence, EmailSequenceStatus, EmailSequenceStep
+from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.campaign_store import CampaignStore
 from app.repositories.email_sequence_step_store import EmailSequenceStepStore
 from app.repositories.email_sequence_store import EmailSequenceStore
+from app.services.activity_log_service import ActivityLogService
 
 MAX_SYNC_PAGES = 100  # safety backstop, not a silent cap -- raises loudly rather than looping unbounded
 
@@ -99,11 +102,13 @@ class CampaignSyncService:
         sequence_store: EmailSequenceStore,
         step_store: EmailSequenceStepStore,
         apollo: ApolloClient | None = None,
+        activity_log: ActivityLogService | None = None,
     ):
         self.campaign_store = campaign_store
         self.sequence_store = sequence_store
         self.step_store = step_store
         self.apollo = apollo or ApolloClient()
+        self.activity_log = activity_log or ActivityLogService(MemoryActivityEventStore())
 
     async def sync(self) -> CampaignSyncReport:
         started = time.monotonic()
@@ -138,7 +143,7 @@ class CampaignSyncService:
         archived = await self._reconcile_archived(seen_apollo_ids)
 
         duration_ms = (time.monotonic() - started) * 1000
-        return CampaignSyncReport(
+        report = CampaignSyncReport(
             found=len(apollo_sequences),
             created=created,
             updated=updated,
@@ -146,6 +151,24 @@ class CampaignSyncService:
             unchanged=unchanged,
             duration_ms=duration_ms,
         )
+        # ONE summary event per sync() call, never one per discovered/updated/
+        # archived sequence -- same "bulk operation, one event" rule as CSV
+        # import and list bulk-add/remove. A run where nothing actually
+        # changed (created=updated=archived=0) is a real no-op and gets no
+        # event, same reasoning as an all-already-members bulk-add.
+        if created or updated or archived:
+            await self.activity_log.record(
+                event_type="campaign.sync_completed",
+                category=ActivityCategory.CAMPAIGNS,
+                source=ActivitySource.CAMPAIGN_SYSTEM,
+                summary=(
+                    f"Campaign sync completed: {created} created, {updated} updated, "
+                    f"{archived} archived ({report.found} found in Apollo)."
+                ),
+                entity_type=None,
+                metadata=report.model_dump(),
+            )
+        return report
 
     async def _fetch_all_sequences(self) -> list[dict]:
         all_sequences: list[dict] = []

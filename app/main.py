@@ -20,6 +20,8 @@ Endpoints:
     POST /campaign/{campaign_id}/messages/{message_id}/sync-events   - explicit manual event sync for one message
     POST /sync/campaigns             - discovers/updates/archives campaigns from Apollo's current sequence list
     POST /sync/itf-contact           - webhook target for the Apps Script ITF bridge, one Form submission per call (dry_run supported)
+    GET  /crm/activity                - the CRM Activity Log, newest first (category/search/date filter + pagination)
+    POST /crm/activity/exports        - records a client-side CSV export as an Activity Log event (best-effort, write-only)
 
 Campaign routes themselves live in app/api/campaign.py (see
 docs/ARCHITECTURE.md) -- this module only owns app-level concerns: the
@@ -36,12 +38,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
+from app.api.activity import router as activity_router
 from app.api.astro import router as astro_router
 from app.api.campaign import router as campaign_router
 from app.api.crm import router as crm_router
 from app.api.leads import router as leads_router
 from app.api.sync import router as sync_router
 from app.config import settings
+from app.repositories.sqlite_activity_event_store import SQLiteActivityEventStore
 from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
 from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
 from app.repositories.sqlite_crm_contact_list_member_store import SQLiteCrmContactListMemberStore
@@ -55,6 +59,7 @@ from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenc
 from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStore
 from app.repositories.sqlite_itf_ingestion_log_store import SQLiteItfIngestionLogStore
 from app.repositories.sqlite_lead_store import SQLiteLeadStore
+from app.services.activity_log_service import ActivityLogService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
 from app.services.crm_import_service import CrmImportService
@@ -83,6 +88,7 @@ async def lifespan(app: FastAPI):
     crm_contact_list_store = SQLiteCrmContactListStore(settings.database_path)
     crm_contact_list_member_store = SQLiteCrmContactListMemberStore(settings.database_path)
     itf_ingestion_log_store = SQLiteItfIngestionLogStore(settings.database_path)
+    activity_event_store = SQLiteActivityEventStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -96,11 +102,18 @@ async def lifespan(app: FastAPI):
     await crm_contact_list_store.connect()
     await crm_contact_list_member_store.connect()
     await itf_ingestion_log_store.connect()
+    await activity_event_store.connect()
+
+    activity_log_service = ActivityLogService(store=activity_event_store)
+    app.state.activity_log_service = activity_log_service
 
     lead_service = LeadService(store=lead_store, campaign_lead_store=campaign_lead_store, campaign_store=campaign_store)
     app.state.lead_service = lead_service
     app.state.campaign_service = CampaignService(
-        store=campaign_store, lead_service=lead_service, campaign_lead_store=campaign_lead_store
+        store=campaign_store,
+        lead_service=lead_service,
+        campaign_lead_store=campaign_lead_store,
+        activity_log=activity_log_service,
     )
     app.state.email_sequence_sync_service = EmailSequenceSyncService(
         campaign_store=campaign_store, store=email_sequence_store, step_store=email_sequence_step_store
@@ -117,6 +130,7 @@ async def lifespan(app: FastAPI):
         campaign_store=campaign_store,
         sequence_store=email_sequence_store,
         step_store=email_sequence_step_store,
+        activity_log=activity_log_service,
     )
 
     crm_service = CrmService(
@@ -124,6 +138,7 @@ async def lifespan(app: FastAPI):
         custom_field_store=crm_custom_field_store,
         list_store=crm_contact_list_store,
         list_member_store=crm_contact_list_member_store,
+        activity_log=activity_log_service,
     )
     app.state.crm_service = crm_service
     crm_import_service = CrmImportService(crm_service=crm_service, batch_store=crm_import_batch_store)
@@ -135,6 +150,7 @@ async def lifespan(app: FastAPI):
     app.state.itf_ingestion_service = ItfIngestionService(
         import_service=crm_import_service,
         log_store=itf_ingestion_log_store,
+        activity_log=activity_log_service,
     )
 
     yield
@@ -151,6 +167,7 @@ async def lifespan(app: FastAPI):
     await crm_contact_list_store.close()
     await crm_contact_list_member_store.close()
     await itf_ingestion_log_store.close()
+    await activity_event_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
@@ -159,6 +176,7 @@ app.include_router(leads_router)
 app.include_router(sync_router)
 app.include_router(crm_router)
 app.include_router(astro_router)
+app.include_router(activity_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
