@@ -6,12 +6,19 @@ const {
   parseActivationInstant_,
   coarseSearchFloorDate_,
   isMessageEligibleByTime_,
+  MAX_CANDIDATES_SCANNED_PER_RUN,
   buildSearchQuery_,
+  shouldContinueScanning_,
+  selectCandidatesToAttempt_,
   hasProcessedOrErrorLabel_,
   findHeader_,
   splitAddressList_,
   findBodyPart_,
   findAttachmentParts_,
+  findBodyPartRawForDiagnostics_,
+  describeBodyPartForDiagnostics_,
+  classifyBodyDataShape_,
+  padBase64_,
   truncateBodyIfNeeded_,
   stripHtmlToPlainText_,
   selectBodyText_,
@@ -122,6 +129,54 @@ test("hasProcessedOrErrorLabel_ is false for an unlabeled eligible message, and 
   assert.equal(hasProcessedOrErrorLabel_(null, "Label_2", "Label_9"), false);
 });
 
+// ---- shouldContinueScanning_ / selectCandidatesToAttempt_ (starvation-bug fix) --
+
+test("shouldContinueScanning_ stops once maxMessagesPerRun eligible attempts are reached", () => {
+  assert.equal(shouldContinueScanning_(0, 0, 1, 100), true);
+  assert.equal(shouldContinueScanning_(1, 5, 1, 100), false);
+});
+
+test("shouldContinueScanning_ stops once the raw scan window is exhausted, regardless of attempted count", () => {
+  assert.equal(shouldContinueScanning_(0, 99, 5, 100), true);
+  assert.equal(shouldContinueScanning_(0, 100, 5, 100), false);
+});
+
+test("shouldContinueScanning_ falls back to the documented default scan window when unset", () => {
+  assert.equal(shouldContinueScanning_(0, MAX_CANDIDATES_SCANNED_PER_RUN - 1, 5, undefined), true);
+  assert.equal(shouldContinueScanning_(0, MAX_CANDIDATES_SCANNED_PER_RUN, 5, undefined), false);
+});
+
+test("regression: a single pre-activation candidate does not starve a newer eligible one (maxMessagesPerRun=1)", () => {
+  // Reproduces the exact live bug report: candidate 0 is before activation
+  // (not eligible), candidate 1 is the controlled test email (eligible).
+  // Before the fix, maxResults was pinned to maxMessagesPerRun (1), so
+  // candidate 1 was never even fetched from Gmail.
+  const isEligible = [false, true];
+  const attempted = selectCandidatesToAttempt_(isEligible, 1, 100);
+  assert.deepEqual(attempted, [1]);
+});
+
+test("regression: several old candidates ahead of a newer eligible one still reach it", () => {
+  const isEligible = [false, false, false, false, false, true]; // 5 pre-activation/already-labeled, then 1 eligible
+  const attempted = selectCandidatesToAttempt_(isEligible, 1, 100);
+  assert.deepEqual(attempted, [5]);
+});
+
+test("selectCandidatesToAttempt_ stops attempting once maxMessagesPerRun eligible candidates are found", () => {
+  const isEligible = [true, true, true, true];
+  assert.deepEqual(selectCandidatesToAttempt_(isEligible, 2, 100), [0, 1]);
+});
+
+test("selectCandidatesToAttempt_ never scans past the bounded window even if maxMessagesPerRun is never satisfied", () => {
+  const isEligible = new Array(10).fill(false); // all ineligible -- must not scan unboundedly looking for enough
+  assert.deepEqual(selectCandidatesToAttempt_(isEligible, 5, 3), []);
+});
+
+test("selectCandidatesToAttempt_ handles a mix of eligible and ineligible within the scan window", () => {
+  const isEligible = [true, false, true, false, true];
+  assert.deepEqual(selectCandidatesToAttempt_(isEligible, 10, 100), [0, 2, 4]);
+});
+
 // ---- findHeader_ -------------------------------------------------------------
 
 test("findHeader_ is case-insensitive and returns '' when absent", () => {
@@ -200,6 +255,190 @@ test("findAttachmentParts_ collects metadata only, never attachment content", ()
 
 test("findAttachmentParts_ returns an empty array when there are no attachments", () => {
   assert.deepEqual(findAttachmentParts_({ mimeType: "text/plain", body: { data: "aGVsbG8" } }), []);
+});
+
+// ---- diagnostic MIME-part description (live-debugging instrumentation) -----
+
+test("describeBodyPartForDiagnostics_ reports a normal string body.data correctly", () => {
+  const payload = { mimeType: "text/plain", body: { data: "aGVsbG8" } }; // length 7, %4 == 3
+  const diag = describeBodyPartForDiagnostics_(payload, "text/plain");
+  assert.deepEqual(diag, {
+    found: true,
+    mimeType: "text/plain",
+    hasBodyData: true,
+    dataType: "string",
+    dataLength: 7,
+    dataLengthMod4: 3,
+    hasAttachmentId: false,
+    isArray: false,
+    firstElementType: "string", // a string's own [0] index access -- expected, not a byte array
+    shape: "string",
+  });
+});
+
+test("describeBodyPartForDiagnostics_ classifies a byte-array body.data and reports Array.isArray/first-element type without logging values", () => {
+  const payload = { mimeType: "text/plain", body: { data: [72, 101, 108, 108, 111] } };
+  const diag = describeBodyPartForDiagnostics_(payload, "text/plain");
+  assert.equal(diag.dataType, "object");
+  assert.equal(diag.isArray, true);
+  assert.equal(diag.firstElementType, "number");
+  assert.equal(diag.dataLength, 5);
+  assert.equal(diag.shape, "byte_array");
+});
+
+test("describeBodyPartForDiagnostics_ reports found=false when the part doesn't exist at all", () => {
+  const payload = { mimeType: "text/html", body: { data: "abc" } };
+  assert.deepEqual(describeBodyPartForDiagnostics_(payload, "text/plain"), { found: false, mimeType: "text/plain" });
+});
+
+test("describeBodyPartForDiagnostics_ reveals a part that exists but has NO body.data (unlike findBodyPart_, which would just skip past it)", () => {
+  const payload = { mimeType: "text/plain", body: {} };
+  const diag = describeBodyPartForDiagnostics_(payload, "text/plain");
+  assert.equal(diag.found, true);
+  assert.equal(diag.hasBodyData, false);
+  assert.equal(diag.dataType, "undefined");
+  assert.equal(diag.dataLength, null);
+});
+
+test("describeBodyPartForDiagnostics_ flags the hypothesis: body.data is not a string at runtime (e.g. an object/array instead)", () => {
+  const payload = { mimeType: "text/plain", body: { data: { unexpected: "shape" } } };
+  const diag = describeBodyPartForDiagnostics_(payload, "text/plain");
+  assert.equal(diag.dataType, "object");
+  assert.equal(diag.hasBodyData, true);
+});
+
+test("describeBodyPartForDiagnostics_ flags a part that looks like an attachment reference (has attachmentId)", () => {
+  const payload = { mimeType: "text/plain", body: { attachmentId: "att-123", size: 500 } };
+  const diag = describeBodyPartForDiagnostics_(payload, "text/plain");
+  assert.equal(diag.hasAttachmentId, true);
+  assert.equal(diag.hasBodyData, false);
+});
+
+test("describeBodyPartForDiagnostics_ finds a part nested inside multipart structure", () => {
+  const payload = {
+    mimeType: "multipart/alternative",
+    parts: [{ mimeType: "text/plain", body: { data: "YQ" } }, { mimeType: "text/html", body: { data: "YWI" } }],
+  };
+  assert.equal(describeBodyPartForDiagnostics_(payload, "text/html").dataLength, 3);
+});
+
+test("findBodyPartRawForDiagnostics_ returns the actual part object (not a copy), unlike findBodyPart_", () => {
+  const part = { mimeType: "text/plain", body: { data: "x", attachmentId: "a1" } };
+  const payload = { mimeType: "multipart/mixed", parts: [part] };
+  assert.equal(findBodyPartRawForDiagnostics_(payload, "text/plain"), part);
+});
+
+// ---- classifyBodyDataShape_ (regression: real production runtime-shape bug) --
+
+test("classifyBodyDataShape_ classifies a base64url string as 'string'", () => {
+  assert.equal(classifyBodyDataShape_("VGVzdGluZw"), "string");
+});
+
+test("classifyBodyDataShape_ classifies a plain array of byte integers as 'byte_array'", () => {
+  assert.equal(classifyBodyDataShape_([84, 101, 115, 116]), "byte_array");
+});
+
+test("classifyBodyDataShape_ classifies any array-like object (has numeric .length) as 'byte_array', not just true Arrays", () => {
+  // Confirms the fix does NOT strictly require Array.isArray to be true --
+  // it duck-types on a numeric .length, since we could not verify from
+  // Node whether Apps Script's Advanced Service hands us a "true" JS
+  // Array or some other array-like host object for a decoded byte field.
+  const arrayLike = { length: 3, 0: 1, 1: 2, 2: 3 };
+  assert.equal(classifyBodyDataShape_(arrayLike), "byte_array");
+});
+
+test("classifyBodyDataShape_ classifies an empty array as 'byte_array', not 'unsupported'", () => {
+  assert.equal(classifyBodyDataShape_([]), "byte_array");
+});
+
+test("classifyBodyDataShape_ classifies a plain object with no numeric length as 'unsupported'", () => {
+  assert.equal(classifyBodyDataShape_({ unexpected: "shape" }), "unsupported");
+});
+
+test("classifyBodyDataShape_ classifies null/undefined as 'unsupported', never throws", () => {
+  assert.equal(classifyBodyDataShape_(null), "unsupported");
+  assert.equal(classifyBodyDataShape_(undefined), "unsupported");
+});
+
+test("classifyBodyDataShape_ classifies a number or boolean as 'unsupported'", () => {
+  assert.equal(classifyBodyDataShape_(42), "unsupported");
+  assert.equal(classifyBodyDataShape_(true), "unsupported");
+});
+
+test("regression: the ACTUAL controlled test email's body, as a real byte array, classifies as 'byte_array' and round-trips via Array.prototype.slice", () => {
+  // Reproduces the exact live diagnostic: dataType=object, length=67,
+  // confirmed to be the already-UTF-8-decoded byte array Apps Script's
+  // Advanced Gmail Service handed back for the controlled test email's
+  // text/plain part (not a base64url string at all).
+  const realBodyBytes = Array.from(Buffer.from("Testing Astro Email Intake. My company is now Test Company Alpha.\r\n", "utf8"));
+  assert.equal(realBodyBytes.length, 67); // matches the real production diagnostic exactly
+  assert.equal(classifyBodyDataShape_(realBodyBytes), "byte_array");
+
+  // Simulates Code.gs's normalization step (Array.prototype.slice.call) --
+  // confirms it reproduces the exact same byte sequence Utilities.newBlob
+  // would receive, with no base64 step involved at all.
+  const normalized = Array.prototype.slice.call(realBodyBytes);
+  assert.deepEqual(normalized, realBodyBytes);
+  assert.equal(Buffer.from(normalized).toString("utf8"), "Testing Astro Email Intake. My company is now Test Company Alpha.\r\n");
+});
+
+test("regression: a byte array wrapped in a non-Array array-like (simulating an unknown Apps Script host object) still normalizes correctly", () => {
+  const bytes = Array.from(Buffer.from("hi", "utf8"));
+  const arrayLikeHostObject = { length: bytes.length };
+  bytes.forEach((b, i) => {
+    arrayLikeHostObject[i] = b;
+  });
+  assert.equal(classifyBodyDataShape_(arrayLikeHostObject), "byte_array");
+  const normalized = Array.prototype.slice.call(arrayLikeHostObject);
+  assert.deepEqual(normalized, bytes);
+});
+
+// ---- padBase64_ (regression: real Apps Script "Could not decode string") ----
+
+test("padBase64_ is a no-op when length is already a multiple of 4", () => {
+  assert.equal(padBase64_("YWJjZA".slice(0, 4)), "YWJj");
+  assert.equal(padBase64_("abcd"), "abcd");
+});
+
+test("padBase64_ adds '==' when length %4 == 2", () => {
+  assert.equal(padBase64_("YQ"), "YQ==");
+});
+
+test("padBase64_ adds '=' when length %4 == 3", () => {
+  assert.equal(padBase64_("YWI"), "YWI=");
+});
+
+test("padBase64_ handles empty/falsy input safely (no-op)", () => {
+  assert.equal(padBase64_(""), "");
+  assert.equal(padBase64_(undefined), undefined);
+  assert.equal(padBase64_(null), null);
+});
+
+test("padBase64_ reproduces the real production failure: the controlled test email's body", () => {
+  // The exact body from the live Gmail test that produced
+  // "Exception: Could not decode string." in Apps Script's real
+  // Utilities.base64DecodeWebSafe -- Gmail's API returns this UNPADDED,
+  // and this specific 65-byte ASCII body base64url-encodes to a string
+  // whose length is NOT a multiple of 4 (remainder 3), which is exactly
+  // the shape that triggered the bug. Node has no Utilities service to
+  // actually decode with, so this test locks in the padding MATH against
+  // the real byte-for-byte base64url encoding of the real message body,
+  // which is the part of the fix Node can verify.
+  const realBody = "Testing Astro Email Intake. My company is now Test Company Alpha.";
+  assert.equal(Buffer.byteLength(realBody, "utf8"), 65);
+  const unpadded = Buffer.from(realBody, "utf8")
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  assert.equal(unpadded.length % 4, 3, "sanity check: this body's unpadded base64url length is not 4-aligned");
+  const padded = padBase64_(unpadded);
+  assert.equal(padded.length % 4, 0);
+  // Decoding the padded, web-safe-converted string must round-trip back
+  // to the exact original body -- confirms padding fixes decodability
+  // without altering the actual content in any way.
+  const roundTrip = Buffer.from(padded.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
+  assert.equal(roundTrip, realBody);
 });
 
 // ---- truncateBodyIfNeeded_ ---------------------------------------------------

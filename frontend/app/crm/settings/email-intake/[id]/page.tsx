@@ -316,11 +316,13 @@ export default function EmailIntakeDetailPage() {
             )}
           </section>
 
-          {item.status === "pending_review" && (
+          {(item.status === "pending_review" || item.status === "needs_match") && (
             <div className="flex gap-2">
-              <Button type="button" onClick={handleApprove} disabled={selected.size === 0 || busy}>
-                Approve Selected Changes
-              </Button>
+              {item.status === "pending_review" && (
+                <Button type="button" onClick={handleApprove} disabled={selected.size === 0 || busy}>
+                  Approve Selected Changes
+                </Button>
+              )}
               <Button type="button" variant="outline" onClick={handleReject} disabled={busy}>
                 Reject
               </Button>

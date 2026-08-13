@@ -417,8 +417,13 @@ class EmailIntakeService:
         return ApproveEmailIntakeResult(status="approved", item=item, conflicts=[])
 
     async def reject(self, intake_id: str) -> EmailIntakeItem:
+        """Rejectable from PENDING_REVIEW *or* NEEDS_MATCH -- a reviewer must
+        be able to dismiss an unmatched/irrelevant email without being
+        forced to falsely match it to a CRM contact first. Terminal states
+        (APPROVED, already REJECTED, ERROR) remain blocked. Never touches
+        the CRM in either case -- only this item's own status/reviewed_at."""
         item = await self.get_item(intake_id)
-        if item.status != EmailIntakeStatus.PENDING_REVIEW:
+        if item.status not in (EmailIntakeStatus.PENDING_REVIEW, EmailIntakeStatus.NEEDS_MATCH):
             raise EmailIntakeInvalidStateError(f"Cannot reject an item in status {item.status.value}")
 
         item.status = EmailIntakeStatus.REJECTED

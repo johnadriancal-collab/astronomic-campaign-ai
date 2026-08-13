@@ -114,6 +114,66 @@ function hasProcessedOrErrorLabel_(labelIds, processedLabelId, errorLabelId) {
   return ids.indexOf(processedLabelId) !== -1 || ids.indexOf(errorLabelId) !== -1;
 }
 
+// ---- Bounded raw-candidate scanning (pagination/scan-window stopping rule) --
+
+/**
+ * Hard ceiling on RAW Gmail search results inspected per run, independent
+ * of EMAIL_INTAKE_MAX_MESSAGES_PER_RUN. This is what actually bounds the
+ * mailbox scan -- without it, decoupling the scan window from the
+ * eligible-message budget (see shouldContinueScanning_ below) would risk
+ * an unbounded scan if a mailbox ever accumulated a very long run of
+ * pre-activation/already-labeled messages ahead of the next real
+ * candidate.
+ */
+var MAX_CANDIDATES_SCANNED_PER_RUN = 100;
+
+/**
+ * The actual bug fix: EMAIL_INTAKE_MAX_MESSAGES_PER_RUN must bound
+ * messages ACTUALLY ATTEMPTED (passed the already-labeled/before-
+ * activation skip checks -- see processOneCandidate_'s return value in
+ * Code.gs), never the count of raw Gmail search results inspected.
+ * Before this fix, maxMessagesPerRun was passed directly as Gmail's own
+ * `maxResults`, so a single pre-activation candidate at maxMessagesPerRun=1
+ * could consume the entire raw result set and make a genuinely newer,
+ * eligible message unreachable in that run -- confirmed against a real
+ * production Gmail account. This predicate is checked once per raw
+ * candidate, BEFORE it's processed: true means "look at the next raw
+ * candidate", false means "stop -- either enough eligible messages have
+ * been attempted, or the scan window itself is exhausted."
+ * `scannedCount` is the number of raw candidates already looked at (an
+ * index into the raw list, not a count of eligible ones).
+ */
+function shouldContinueScanning_(attemptedCount, scannedCount, maxMessagesPerRun, maxCandidatesScanned) {
+  var scanLimit = typeof maxCandidatesScanned === "number" && maxCandidatesScanned > 0 ? maxCandidatesScanned : MAX_CANDIDATES_SCANNED_PER_RUN;
+  return attemptedCount < maxMessagesPerRun && scannedCount < scanLimit;
+}
+
+/**
+ * Pure simulation of the real scan/attempt loop in Code.gs's
+ * runEmailIntakeSync, given a plain array of booleans (one per raw
+ * candidate, in Gmail search-result order, true = would be attempted --
+ * i.e. NOT skipped for being already-labeled or before-activation).
+ * Returns the indexes of candidates that would actually be attempted.
+ * Exists so the exact starvation scenario this bug fix addresses (a run
+ * of ineligible candidates ahead of a newer eligible one) can be tested
+ * under plain Node without a real Gmail account -- Code.gs's real loop
+ * uses the identical shouldContinueScanning_ check in the identical
+ * order, so this is a faithful stand-in for its decision logic, not just
+ * a superficially similar one.
+ */
+function selectCandidatesToAttempt_(isEligibleArray, maxMessagesPerRun, maxCandidatesScanned) {
+  var attemptedIndexes = [];
+  var attempted = 0;
+  for (var i = 0; i < isEligibleArray.length; i++) {
+    if (!shouldContinueScanning_(attempted, i, maxMessagesPerRun, maxCandidatesScanned)) break;
+    if (isEligibleArray[i]) {
+      attemptedIndexes.push(i);
+      attempted++;
+    }
+  }
+  return attemptedIndexes;
+}
+
 // ---- Header parsing ---------------------------------------------------------
 
 /** Case-insensitive lookup in a Gmail API headers array: [{name, value}, ...]. */
@@ -209,6 +269,114 @@ function findAttachmentParts_(payload) {
   }
   walk(payload);
   return results;
+}
+
+// ---- TEMPORARY live-debugging diagnostics (metadata only, never content) --
+
+/**
+ * TEMPORARY, diagnostic-only: walks the MIME tree the same way
+ * findBodyPart_ does, but matches by mimeType ALONE (not requiring
+ * body.data to be truthy) so it can reveal a part that exists but whose
+ * body.data is missing/empty/wrongly-shaped -- exactly the class of
+ * runtime surprise this diagnostic pass exists to catch. Returns the raw
+ * part object itself; never call this from non-diagnostic code, and
+ * never log its `.body.data` field directly -- use
+ * describeBodyPartForDiagnostics_ below instead, which reports only
+ * metadata about that field, never its value.
+ */
+function findBodyPartRawForDiagnostics_(payload, mimeType) {
+  if (!payload) return null;
+  if (payload.mimeType === mimeType) return payload;
+  if (payload.parts && payload.parts.length) {
+    for (var i = 0; i < payload.parts.length; i++) {
+      var found = findBodyPartRawForDiagnostics_(payload.parts[i], mimeType);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
+/**
+ * Diagnostic-only: describes a MIME part's body.data field WITHOUT ever
+ * returning or logging its actual content (or byte values) -- confirms
+ * shape (typeof, Array.isArray, first element's typeof, length) so a
+ * runtime-representation mismatch is visible in logs without exposing
+ * any content. `hasAttachmentId` checks whether this part looks like an
+ * attachment reference rather than inline body data. `shape` is the same
+ * classification classifyBodyDataShape_ (below) uses for real decoding.
+ */
+function describeBodyPartForDiagnostics_(payload, mimeType) {
+  var part = findBodyPartRawForDiagnostics_(payload, mimeType);
+  if (!part) return { found: false, mimeType: mimeType };
+  var data = part.body ? part.body.data : undefined;
+  var dataType = typeof data;
+  var dataLength = dataType === "string" ? data.length : data && typeof data.length === "number" ? data.length : null;
+  var isArray = false;
+  try {
+    isArray = Array.isArray(data);
+  } catch (e) {
+    isArray = false;
+  }
+  var firstElementType = data && typeof data.length === "number" && data.length > 0 ? typeof data[0] : null;
+  return {
+    found: true,
+    mimeType: part.mimeType,
+    hasBodyData: data !== undefined && data !== null && data !== "",
+    dataType: dataType,
+    dataLength: dataLength,
+    dataLengthMod4: typeof dataLength === "number" ? dataLength % 4 : null,
+    hasAttachmentId: !!(part.body && part.body.attachmentId),
+    isArray: isArray,
+    firstElementType: firstElementType,
+    shape: classifyBodyDataShape_(data),
+  };
+}
+
+/**
+ * Classifies the ACTUAL runtime shape of a Gmail API body.data value, so
+ * the real decoder (Code.gs's decodeBodyPartToUtf8_) can pick the
+ * correct path. Confirmed against a real production message: calling
+ * Gmail.Users.Messages.get through Apps Script's ADVANCED SERVICE
+ * binding (as opposed to a raw REST call via UrlFetchApp) already
+ * base64-decodes `format: byte` schema fields such as body.data into a
+ * native byte-array-like value before script code ever sees it -- it is
+ * NOT the base64url string the REST schema documents. This function
+ * never inspects byte VALUES, only shape.
+ *   "string"      -- a base64url string (the documented REST shape --
+ *                    kept as a supported path for a raw REST call or a
+ *                    future API version, even though the Advanced
+ *                    Service binding used here doesn't produce it).
+ *   "byte_array"   -- an array-like of already-decoded byte values --
+ *                     do NOT base64-decode a second time.
+ *   "unsupported"  -- any other runtime shape -- fail safely, no guess.
+ */
+function classifyBodyDataShape_(data) {
+  if (typeof data === "string") return "string";
+  if (data && typeof data === "object" && typeof data.length === "number") return "byte_array";
+  return "unsupported";
+}
+
+// ---- Base64url padding -------------------------------------------------
+
+/**
+ * Restores the '=' padding Gmail API's body.data omits (per RFC 4648 §5's
+ * unpadded convention -- the same shape a JWT segment has). Observed
+ * against a real production Gmail message: Apps Script's
+ * Utilities.base64DecodeWebSafe() throws "Exception: Could not decode
+ * string." on unpadded input whose length isn't a multiple of 4, even
+ * though the string itself is valid base64url -- Google's own decoder is
+ * stricter about padding than the data Gmail's API actually returns. Most
+ * real message bodies hit this: only byte-lengths that are an exact
+ * multiple of 3 encode to an already-4-aligned string with nothing to
+ * strip. Re-adding '=' characters changes nothing about the decoded
+ * bytes (padding is length metadata, not encoded content) -- this is a
+ * no-op for input that's already correctly padded or empty.
+ */
+function padBase64_(data) {
+  if (!data) return data;
+  var remainder = data.length % 4;
+  if (remainder === 0) return data;
+  return data + "====".slice(remainder);
 }
 
 // ---- Body length safety net -------------------------------------------------
@@ -367,12 +535,19 @@ if (typeof module !== "undefined" && module.exports) {
     parseActivationInstant_: parseActivationInstant_,
     coarseSearchFloorDate_: coarseSearchFloorDate_,
     isMessageEligibleByTime_: isMessageEligibleByTime_,
+    MAX_CANDIDATES_SCANNED_PER_RUN: MAX_CANDIDATES_SCANNED_PER_RUN,
+    shouldContinueScanning_: shouldContinueScanning_,
+    selectCandidatesToAttempt_: selectCandidatesToAttempt_,
     buildSearchQuery_: buildSearchQuery_,
     hasProcessedOrErrorLabel_: hasProcessedOrErrorLabel_,
     findHeader_: findHeader_,
     splitAddressList_: splitAddressList_,
     findBodyPart_: findBodyPart_,
     findAttachmentParts_: findAttachmentParts_,
+    findBodyPartRawForDiagnostics_: findBodyPartRawForDiagnostics_,
+    describeBodyPartForDiagnostics_: describeBodyPartForDiagnostics_,
+    classifyBodyDataShape_: classifyBodyDataShape_,
+    padBase64_: padBase64_,
     truncateBodyIfNeeded_: truncateBodyIfNeeded_,
     stripHtmlToPlainText_: stripHtmlToPlainText_,
     selectBodyText_: selectBodyText_,

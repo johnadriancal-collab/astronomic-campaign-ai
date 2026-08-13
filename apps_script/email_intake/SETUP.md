@@ -132,7 +132,7 @@ Before running this against your real mailbox for the first time:
 3. Run `runEmailIntakeSync` manually.
 4. Check the execution log for a line like:
    ```
-   runEmailIntakeSync finished -- candidates=1 submittedNew=1 submittedAlreadyProcessed=0 skippedBeforeActivation=0 skippedAlreadyLabeled=0 permanentFailures=0 transientFailures=0
+   runEmailIntakeSync finished -- candidatesScanned=1 attempted=1 submittedNew=1 submittedAlreadyProcessed=0 skippedBeforeActivation=0 skippedAlreadyLabeled=0 permanentFailures=0 transientFailures=0
    ```
 5. Confirm in Gmail that your test message now carries the
    `crm-intake-processed` label.

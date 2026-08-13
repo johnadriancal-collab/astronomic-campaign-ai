@@ -191,3 +191,61 @@ def test_reject_happy_path(test_client):
     reject_resp = client.post(f"/crm/email-intake/{intake_id}/reject")
     assert reject_resp.status_code == 200
     assert reject_resp.json()["status"] == "rejected"
+
+
+def test_reject_needs_match_item_succeeds(test_client):
+    client, _, crm_service = test_client
+    import asyncio
+
+    # No CRM contact exists at all for this sender -- lands in
+    # needs_match, never pending_review. A reviewer must be able to
+    # reject it directly, without matching it to a contact first.
+    resp = client.post(
+        "/sync/email-intake",
+        json=valid_payload(sender="stranger@example.com", body_text="Unrelated spam."),
+        headers=auth_headers(),
+    )
+    intake_id = resp.json()["intake_id"]
+    assert resp.json()["status"] == "needs_match"
+
+    reject_resp = client.post(f"/crm/email-intake/{intake_id}/reject")
+    assert reject_resp.status_code == 200
+    assert reject_resp.json()["status"] == "rejected"
+    assert reject_resp.json()["matched_contact_id"] is None
+
+    contacts = asyncio.run(crm_service.list_contacts())
+    assert contacts.total == 0  # confirms rejecting never created a contact
+
+
+def test_reject_already_approved_item_returns_409(test_client):
+    client, _, crm_service = test_client
+    import asyncio
+
+    asyncio.run(crm_service.create_contact({"email": "amos@example.com", "company": "Massive Capital"}))
+    resp = client.post(
+        "/sync/email-intake",
+        json=valid_payload(sender="amos@example.com", body_text="Amos is now at Massive Ventures."),
+        headers=auth_headers(),
+    )
+    intake_id = resp.json()["intake_id"]
+    client.post(f"/crm/email-intake/{intake_id}/approve", json={"field_keys": ["company"]})
+
+    reject_resp = client.post(f"/crm/email-intake/{intake_id}/reject")
+    assert reject_resp.status_code == 409
+
+
+def test_reject_already_rejected_item_returns_409(test_client):
+    client, _, crm_service = test_client
+    import asyncio
+
+    asyncio.run(crm_service.create_contact({"email": "amos@example.com", "company": "Massive Capital"}))
+    resp = client.post(
+        "/sync/email-intake",
+        json=valid_payload(sender="amos@example.com", body_text="Amos is now at Massive Ventures."),
+        headers=auth_headers(),
+    )
+    intake_id = resp.json()["intake_id"]
+    client.post(f"/crm/email-intake/{intake_id}/reject")
+
+    second_reject_resp = client.post(f"/crm/email-intake/{intake_id}/reject")
+    assert second_reject_resp.status_code == 409

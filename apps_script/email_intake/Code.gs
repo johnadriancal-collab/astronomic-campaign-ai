@@ -132,13 +132,62 @@ function applyLabelToMessage_(messageId, labelId) {
 // ---- Body decoding (the one step that legitimately needs Utilities) ------
 
 /**
- * Decodes a Gmail API base64url body part into a UTF-8 string using
- * Utilities -- Google's own, already-correct implementation. Deliberately
- * NOT reimplemented in logic.js (see that file's header comment for why).
+ * Decodes a Gmail API message body part into a UTF-8 string, handling
+ * BOTH runtime representations confirmed to occur in production --
+ * classifyBodyDataShape_ (logic.js) decides which:
+ *
+ *   "string"     -- a base64url string (the REST API's documented
+ *                    schema shape). Padded (padBase64_ restores the '='
+ *                    Gmail's REST responses omit) then
+ *                    Utilities.base64DecodeWebSafe, then decoded as UTF-8.
+ *   "byte_array" -- an ALREADY-DECODED byte array. Confirmed against a
+ *                    real production message: Apps Script's Advanced
+ *                    Gmail Service binding auto-decodes `format: byte`
+ *                    schema fields like body.data into a native byte-
+ *                    array-like value before script code ever sees it --
+ *                    there is nothing left to base64-decode, and doing
+ *                    so again would corrupt it (which is exactly what
+ *                    produced the original "Could not decode string").
+ *                    Normalized to a plain Array (in case the host object
+ *                    isn't a "true" JS Array) and handed directly to
+ *                    Utilities.newBlob, then decoded as UTF-8.
+ *
+ * Any other runtime shape throws (caught by the caller, which labels the
+ * message crm-intake-error) rather than guessing. Logs metadata only --
+ * message id, MIME type, shape classification, lengths -- never body
+ * content, decoded content, or byte values.
  */
-function decodeBase64UrlToUtf8_(base64UrlData) {
-  var bytes = Utilities.base64DecodeWebSafe(base64UrlData);
-  return Utilities.newBlob(bytes).getDataAsString("UTF-8");
+function decodeBodyPartToUtf8_(messageId, mimeType, rawData) {
+  var shape = classifyBodyDataShape_(rawData);
+  Logger.log(
+    "message " +
+      messageId +
+      " [" +
+      mimeType +
+      "] body.data shape=" +
+      shape +
+      " typeof=" +
+      typeof rawData +
+      " length=" +
+      (rawData && typeof rawData.length === "number" ? rawData.length : "n/a")
+  );
+
+  if (shape === "string") {
+    var bytesFromString = Utilities.base64DecodeWebSafe(padBase64_(rawData));
+    return Utilities.newBlob(bytesFromString).getDataAsString("UTF-8");
+  }
+
+  if (shape === "byte_array") {
+    // Already-decoded bytes -- do NOT base64-decode again. Array.prototype.slice
+    // normalizes whatever array-like host object Apps Script handed us into a
+    // plain Array before handing it to Utilities.newBlob.
+    var byteArray = Array.prototype.slice.call(rawData);
+    return Utilities.newBlob(byteArray).getDataAsString("UTF-8");
+  }
+
+  throw new Error(
+    "message " + messageId + " [" + mimeType + "]: body.data has an unsupported runtime shape (typeof=" + typeof rawData + ") -- cannot decode."
+  );
 }
 
 // ---- HTTP -------------------------------------------------------------
@@ -202,6 +251,7 @@ function runEmailIntakeSync() {
 
   var counts = {
     candidates: 0,
+    attempted: 0,
     skippedBeforeActivation: 0,
     skippedAlreadyLabeled: 0,
     submittedNew: 0,
@@ -229,12 +279,24 @@ function runEmailIntakeSync() {
     var errorLabelId = getOrCreateLabelId_(ERROR_LABEL_NAME);
 
     var query = buildSearchQuery_(config.activationInstantMs, PROCESSED_LABEL_NAME, ERROR_LABEL_NAME);
-    var listResp = Gmail.Users.Messages.list("me", { q: query, maxResults: config.maxMessagesPerRun });
+    // The raw Gmail search fetch is bounded by MAX_CANDIDATES_SCANNED_PER_RUN,
+    // NOT by config.maxMessagesPerRun -- this is the fix for the starvation
+    // bug: maxMessagesPerRun bounds messages actually ATTEMPTED (see
+    // shouldContinueScanning_/processOneCandidate_'s return value below),
+    // while the raw scan window is a separate, larger, still-bounded limit
+    // so a run of pre-activation/already-labeled candidates ahead of a
+    // newer eligible one can't consume the whole raw result set before the
+    // eligible one is even looked at. Math.max guards the (unlikely) case
+    // where maxMessagesPerRun itself is configured larger than the scan window.
+    var rawScanWindow = Math.max(config.maxMessagesPerRun, MAX_CANDIDATES_SCANNED_PER_RUN);
+    var listResp = Gmail.Users.Messages.list("me", { q: query, maxResults: rawScanWindow });
     var candidates = listResp.messages || [];
-    counts.candidates = candidates.length;
 
     for (var i = 0; i < candidates.length; i++) {
-      processOneCandidate_(config, candidates[i].id, processedLabelId, errorLabelId, counts);
+      if (!shouldContinueScanning_(counts.attempted, counts.candidates, config.maxMessagesPerRun, MAX_CANDIDATES_SCANNED_PER_RUN)) break;
+      counts.candidates++;
+      var wasAttempted = processOneCandidate_(config, candidates[i].id, processedLabelId, errorLabelId, counts);
+      if (wasAttempted) counts.attempted++;
       if (counts.authFatal) break; // systemic auth failure -- stop the whole run, see below
       if (counts.systemicPermanentSuspected) break; // streak of permanent failures -- likely systemic, see below
     }
@@ -246,8 +308,10 @@ function runEmailIntakeSync() {
   }
 
   Logger.log(
-    "runEmailIntakeSync finished -- candidates=" +
+    "runEmailIntakeSync finished -- candidatesScanned=" +
       counts.candidates +
+      " attempted=" +
+      counts.attempted +
       " submittedNew=" +
       counts.submittedNew +
       " submittedAlreadyProcessed=" +
@@ -287,6 +351,14 @@ function runEmailIntakeSync() {
  *      the exact same error every time, so it gets the same "flag and stop
  *      auto-retrying" treatment as a 400/404/422 webhook rejection).
  *   3. The webhook call itself (classified by classifyHttpOutcome_).
+ *
+ * Returns true if this message was actually ATTEMPTED (got past both skip
+ * checks below, regardless of outcome) and false if it was SKIPPED
+ * (already labeled, or before activation). This return value is what
+ * EMAIL_INTAKE_MAX_MESSAGES_PER_RUN's budget is counted against in
+ * runEmailIntakeSync -- see shouldContinueScanning_ in logic.js -- so
+ * that a run of ineligible candidates ahead of a newer eligible one can
+ * never consume the whole budget without any of it actually being used.
  */
 function processOneCandidate_(config, messageId, processedLabelId, errorLabelId, counts) {
   var message;
@@ -295,7 +367,7 @@ function processOneCandidate_(config, messageId, processedLabelId, errorLabelId,
   } catch (fetchErr) {
     counts.transientFailures++;
     Logger.log("message " + messageId + ": failed to fetch from Gmail, left unlabeled for retry: " + fetchErr);
-    return;
+    return true; // a real attempt was made (network round-trip happened), it just failed transiently
   }
 
   // Defense in depth: the search query already excludes both labels, but
@@ -303,25 +375,39 @@ function processOneCandidate_(config, messageId, processedLabelId, errorLabelId,
   // is momentarily stale relative to a just-applied label.
   if (hasProcessedOrErrorLabel_(message.labelIds, processedLabelId, errorLabelId)) {
     counts.skippedAlreadyLabeled++;
-    return;
+    return false; // not attempted -- does not count against maxMessagesPerRun
   }
 
   var internalDateMs = parseInt(message.internalDate, 10);
   if (!isMessageEligibleByTime_(internalDateMs, config.activationInstantMs)) {
     counts.skippedBeforeActivation++;
-    return;
+    return false; // not attempted -- does not count against maxMessagesPerRun (the exact fix for the starvation bug)
   }
 
   var payload;
   try {
+    // Diagnostic-only, metadata-only (never content/byte values) log of
+    // both candidate MIME parts' actual runtime shape -- kept because it
+    // is cheap and was exactly what identified the real root cause
+    // (Apps Script's Advanced Gmail Service returns body.data as an
+    // already-decoded byte array, not the base64url string the REST
+    // schema documents). See decodeBodyPartToUtf8_ for the fix.
+    Logger.log("message " + messageId + " plainPart: " + JSON.stringify(describeBodyPartForDiagnostics_(message.payload, "text/plain")));
+    Logger.log("message " + messageId + " htmlPart: " + JSON.stringify(describeBodyPartForDiagnostics_(message.payload, "text/html")));
+
     var plainPart = findBodyPart_(message.payload, "text/plain");
     var htmlPart = findBodyPart_(message.payload, "text/html");
-    var decodedPlain = plainPart ? decodeBase64UrlToUtf8_(plainPart.data) : "";
-    var decodedHtml = htmlPart ? decodeBase64UrlToUtf8_(htmlPart.data) : "";
+    var decodedPlain = plainPart ? decodeBodyPartToUtf8_(messageId, "text/plain", plainPart.data) : "";
+    var decodedHtml = htmlPart ? decodeBodyPartToUtf8_(messageId, "text/html", htmlPart.data) : "";
     // HTML-only messages are common and NOT malformed -- selectBodyText_
     // falls back to a mechanical (non-AI) HTML-to-text conversion only
     // when there is no text/plain part at all; an empty plain-text body
     // is sent as empty, never treated as "missing" and backfilled from HTML.
+    if (!plainPart && htmlPart) {
+      Logger.log("message " + messageId + ": no text/plain part found -- falling back to HTML-to-text conversion.");
+    } else if (!plainPart && !htmlPart) {
+      Logger.log("message " + messageId + ": neither text/plain nor text/html found -- body_text will be empty.");
+    }
     var decodedBody = selectBodyText_(!!plainPart, decodedPlain, !!htmlPart, decodedHtml);
     payload = buildWebhookPayload_(message, decodedBody, { maxBodyChars: config.maxBodyChars });
   } catch (parseErr) {
@@ -338,7 +424,7 @@ function processOneCandidate_(config, messageId, processedLabelId, errorLabelId,
       Logger.log("message " + messageId + ": also failed to apply the error label: " + labelErr);
     }
     Logger.log("message " + messageId + ": could not be parsed into a valid payload, labeled '" + ERROR_LABEL_NAME + "': " + parseErr);
-    return;
+    return true; // attempted -- a real, message-specific processing failure, not a skip
   }
 
   try {
@@ -420,6 +506,7 @@ function processOneCandidate_(config, messageId, processedLabelId, errorLabelId,
     counts.transientFailures++;
     Logger.log("message " + messageId + ": unexpected error, left unlabeled for retry: " + err);
   }
+  return true; // reached the webhook-call stage -- attempted, regardless of outcome
 }
 
 // ---- Manual, safe verification helper (no Gmail access at all) -----------

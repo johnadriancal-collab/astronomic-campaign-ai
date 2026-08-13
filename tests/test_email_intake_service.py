@@ -468,6 +468,64 @@ async def test_reject_retains_item_for_audit(service, crm_service):
     assert item.body_text  # original email retained
 
 
+@pytest.mark.asyncio
+async def test_reject_needs_match_item_succeeds_without_a_match(service, crm_service):
+    # No CRM contact matches this sender at all -- lands in NEEDS_MATCH,
+    # never PENDING_REVIEW. A reviewer must be able to dismiss it as junk
+    # without being forced to falsely match it to some contact first.
+    result = await service.ingest(make_payload(sender="Stranger <stranger@example.com>"))
+    pre_reject = await service.get_item(result.intake_id)
+    assert pre_reject.status == EmailIntakeStatus.NEEDS_MATCH
+    assert pre_reject.matched_contact_id is None
+
+    item = await service.reject(result.intake_id)
+    assert item.status == EmailIntakeStatus.REJECTED
+    assert item.reviewed_at is not None
+    assert item.matched_contact_id is None  # rejecting never performed or required a match
+
+
+@pytest.mark.asyncio
+async def test_reject_needs_match_item_never_touches_crm(service, crm_service):
+    contact = await make_contact(crm_service, company="Massive Capital")
+    before = await crm_service.get_contact(contact.crm_contact_id)
+    result = await service.ingest(make_payload(sender="Stranger <stranger@example.com>"))
+    assert (await service.get_item(result.intake_id)).status == EmailIntakeStatus.NEEDS_MATCH
+
+    await service.reject(result.intake_id)
+
+    after = await crm_service.get_contact(contact.crm_contact_id)
+    assert after == before
+    contacts = await crm_service.list_contacts()
+    assert contacts.total == 1  # no contact was created either
+
+
+@pytest.mark.asyncio
+async def test_reject_needs_match_item_emits_activity_event(service, crm_service):
+    result = await service.ingest(make_payload(sender="Stranger <stranger@example.com>"))
+    await service.reject(result.intake_id)
+    events = await service.activity_log.store.list()
+    rejected_events = [e for e in events if e.event_type == "email_intake.rejected"]
+    assert len(rejected_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_reject_on_already_approved_item_raises(service, crm_service):
+    await make_contact(crm_service, company="Massive Capital")
+    result = await service.ingest(make_payload(body_text="Amos is now at Massive Ventures."))
+    await service.approve(result.intake_id, ["company"])
+    with pytest.raises(EmailIntakeInvalidStateError):
+        await service.reject(result.intake_id)
+
+
+@pytest.mark.asyncio
+async def test_reject_on_already_rejected_item_raises(service, crm_service):
+    await make_contact(crm_service, company="Massive Capital")
+    result = await service.ingest(make_payload(body_text="Amos is now at Massive Ventures."))
+    await service.reject(result.intake_id)
+    with pytest.raises(EmailIntakeInvalidStateError):
+        await service.reject(result.intake_id)
+
+
 # ---- queue filtering/search -------------------------------------------
 
 
