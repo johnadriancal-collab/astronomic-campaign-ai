@@ -601,3 +601,257 @@ async def test_dry_run_emits_no_activity_events_at_all(itf_service):
     await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=True)
     events = await itf_service.activity_log.store.list()
     assert events == []
+
+
+# --- Email Status + "ITF Submissions" list automation ---
+#
+# email_status is CrmContact's existing free-text field -- no new field is
+# introduced. It is set via the same `extra_fields` mechanism "source" already
+# uses, so on an update it goes through CrmService.apply_import_mapping's
+# existing, unmodified fill-only-if-blank rule for external fields: a
+# currently-blank email_status is filled in with "Valid"; ANY nonblank
+# email_status (including "Valid" itself, or something else like "Invalid") is
+# left untouched. "ITF Submissions" list membership uses CrmService's existing
+# bulk_add_to_list()/list_contact_lists()/create_contact_list(), which are
+# already idempotent -- no parallel list/membership mechanism is introduced.
+
+
+ITF_SUBMISSIONS_LIST_NAME = "ITF Submissions"
+
+
+async def _get_list_by_name(crm_service, name):
+    for contact_list in await crm_service.list_contact_lists():
+        if contact_list.name == name:
+            return contact_list
+    return None
+
+
+@pytest.mark.asyncio
+async def test_new_itf_contact_gets_valid_email_status_and_list_membership(itf_service, import_service):
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "created"
+
+    crm = import_service.crm_service
+    contact = await crm.contact_store.get(result.contact_id)
+    assert contact.email_status == "Valid"
+
+    submissions_list = await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME)
+    assert submissions_list is not None
+    assert submissions_list.contact_count == 1
+    member_ids = await crm.list_member_store.list_contact_ids_for_list(submissions_list.list_id)
+    assert member_ids == [contact.crm_contact_id]
+
+
+@pytest.mark.asyncio
+async def test_existing_contact_with_blank_email_status_gets_filled_and_added_to_list(itf_service, import_service):
+    crm = import_service.crm_service
+    existing = await crm.create_contact({"email": "ada@example.com", "first_name": "Ada"})
+    assert existing.email_status is None
+
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "updated"
+
+    updated = await crm.contact_store.get(existing.crm_contact_id)
+    assert updated.email_status == "Valid"
+
+    submissions_list = await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME)
+    member_ids = await crm.list_member_store.list_contact_ids_for_list(submissions_list.list_id)
+    assert member_ids == [existing.crm_contact_id]
+
+
+@pytest.mark.asyncio
+async def test_existing_contact_already_valid_stays_valid_with_no_duplicate_membership(itf_service, import_service):
+    crm = import_service.crm_service
+    existing = await crm.create_contact({"email": "ada@example.com", "first_name": "Ada", "email_status": "Valid"})
+
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "updated"
+
+    updated = await crm.contact_store.get(existing.crm_contact_id)
+    assert updated.email_status == "Valid"
+
+    # Submit again -- a second, different row (a genuinely new/repeat form
+    # submission from the same person), NOT a retry of the same row_number.
+    values_2 = row("8/11/2026 09:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    result_2 = await itf_service.process_submission(HEADERS, values_2, row_number=3, dry_run=False)
+    assert result_2.status == "updated"
+    assert result_2.contact_id == existing.crm_contact_id
+
+    submissions_list = await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME)
+    assert submissions_list.contact_count == 1  # never duplicated
+    member_ids = await crm.list_member_store.list_contact_ids_for_list(submissions_list.list_id)
+    assert member_ids == [existing.crm_contact_id]
+
+
+@pytest.mark.asyncio
+async def test_existing_contact_with_meaningful_nonblank_email_status_is_not_overwritten(itf_service, import_service):
+    """Safe-overwrite rule: an ITF submission must never erase a meaningful
+    existing status like Invalid/Bounced/Do Not Contact -- only a currently
+    blank email_status is ever filled in."""
+    crm = import_service.crm_service
+    for meaningful_status in ("Invalid", "Bounced", "Do Not Contact"):
+        existing = await crm.create_contact(
+            {"email": f"{meaningful_status.lower().replace(' ', '-')}@example.com", "email_status": meaningful_status}
+        )
+        values = row(
+            "8/10/2026 10:00:00", "Ada", "Lovelace",
+            existing.email, "", "", "", "",
+        )
+        result = await itf_service.process_submission(HEADERS, values, row_number=hash(meaningful_status) % 100000 + 2, dry_run=False)
+        assert result.status == "updated"
+
+        updated = await crm.contact_store.get(existing.crm_contact_id)
+        assert updated.email_status == meaningful_status  # untouched
+
+
+@pytest.mark.asyncio
+async def test_repeated_itf_submission_retry_creates_no_duplicate_contact_or_membership(itf_service, import_service):
+    """A genuine retry of the SAME row_number (Apps Script re-firing, or the
+    endpoint being called twice for the same trigger) -- covered by the
+    existing content_hash idempotency ledger, which short-circuits before
+    this automation's code even runs again."""
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    first = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert first.status == "created"
+
+    second = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert second.status == "already_processed"
+
+    crm = import_service.crm_service
+    contacts = await crm.contact_store.list()
+    assert len(contacts) == 1
+
+    submissions_list = await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME)
+    assert submissions_list.contact_count == 1
+
+
+@pytest.mark.asyncio
+async def test_existing_itf_submissions_list_is_reused_not_recreated(itf_service, import_service):
+    crm = import_service.crm_service
+    pre_existing = await crm.create_contact_list(ITF_SUBMISSIONS_LIST_NAME, description="Pre-existing list.")
+
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "created"
+
+    all_lists = await crm.list_contact_lists()
+    matching = [l for l in all_lists if l.name == ITF_SUBMISSIONS_LIST_NAME]
+    assert len(matching) == 1  # never duplicated
+    assert matching[0].list_id == pre_existing.list_id
+    assert matching[0].description == "Pre-existing list."  # untouched
+    assert matching[0].contact_count == 1
+
+
+@pytest.mark.asyncio
+async def test_list_activity_events_fire_once_via_crm_services_own_activity_log(itf_service, import_service):
+    """list.created and list.contacts_added are CrmService's existing events
+    (crm_service.create_contact_list()/bulk_add_to_list()) -- this automation
+    adds no new, ITF-specific event for either. In production, main.py wires
+    ONE shared ActivityLogService into both CrmService and ItfIngestionService,
+    so these appear in the same Activity Log stream as itf.contact_created;
+    here (mirroring that they're two distinct constructor args) they land on
+    crm_service.activity_log specifically. Fires exactly once per genuinely
+    new list/membership -- a second submission from the same contact must not
+    repeat either event."""
+    crm = import_service.crm_service
+
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+
+    crm_events = await crm.activity_log.store.list()
+    crm_event_types = [e.event_type for e in crm_events]
+    assert "list.created" in crm_event_types
+    assert "list.contacts_added" in crm_event_types
+    assert crm_event_types.count("list.created") == 1
+    assert crm_event_types.count("list.contacts_added") == 1
+
+    # A second, different submission from the same person -- list already
+    # exists and they're already a member, so no repeat of either event.
+    values_2 = row("8/11/2026 09:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    await itf_service.process_submission(HEADERS, values_2, row_number=3, dry_run=False)
+
+    crm_events_after = await crm.activity_log.store.list()
+    crm_event_types_after = [e.event_type for e in crm_events_after]
+    assert crm_event_types_after.count("list.created") == 1
+    assert crm_event_types_after.count("list.contacts_added") == 1  # unchanged -- no duplicate
+
+
+@pytest.mark.asyncio
+async def test_possible_duplicate_does_not_get_email_status_or_list_membership(itf_service, import_service):
+    """The new automation only runs after a submission is safely resolved to a
+    real created/updated contact -- a possible_duplicate is neither (its
+    `contact` is the pre-existing, UNMODIFIED candidate flagged for human
+    review -- see import_one_row), so it must not gain email_status or list
+    membership just for being flagged. Forces the POSSIBLE_DUPLICATE branch
+    directly via a mock (same technique as
+    test_processing_failure_emits_processing_failed_not_created_or_updated
+    above) rather than depending on a real name+company collision, which
+    involves classification rules unrelated to this automation."""
+    from unittest.mock import AsyncMock
+
+    from app.models.crm import CrmImportRowStatus
+
+    crm = import_service.crm_service
+    existing = await crm.create_contact({"email": "other@example.com", "first_name": "Ada", "last_name": "Lovelace"})
+
+    itf_service.import_service.import_one_row = AsyncMock(
+        return_value=(CrmImportRowStatus.POSSIBLE_DUPLICATE, existing, "name_company", {"email": "ada-different@example.com"})
+    )
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada-different@example.com", "", "", "", "")
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=False)
+    assert result.status == "possible_duplicate"
+
+    untouched = await crm.contact_store.get(existing.crm_contact_id)
+    assert untouched.email_status is None  # not filled in
+
+    submissions_list = await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME)
+    assert submissions_list is None  # never even created
+
+
+@pytest.mark.asyncio
+async def test_dry_run_never_writes_email_status_or_list_membership(itf_service, import_service):
+    values = row("8/10/2026 10:00:00", "Ada", "Lovelace", "ada@example.com", "", "", "", "")
+    result = await itf_service.process_submission(HEADERS, values, row_number=2, dry_run=True)
+    assert result.status == "created"
+    assert result.mapped_fields["email_status"] == "Valid"  # visible in the preview...
+
+    crm = import_service.crm_service
+    assert await crm.contact_store.list() == []  # ...but nothing was actually written
+    assert await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME) is None
+
+
+@pytest.mark.asyncio
+async def test_unrelated_manual_contact_creation_does_not_receive_valid_or_list_membership(import_service):
+    """Scope guard: a plain manual CRM contact creation (no ITF submission
+    anywhere in the call chain) must never receive email_status="Valid" or
+    "ITF Submissions" list membership -- this automation is reachable only
+    from ItfIngestionService.process_submission()."""
+    crm = import_service.crm_service
+    contact = await crm.create_contact({"email": "manual@example.com", "first_name": "Manual"})
+    assert contact.email_status is None
+    assert await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME) is None
+
+
+@pytest.mark.asyncio
+async def test_unrelated_csv_style_import_one_row_does_not_receive_valid_or_list_membership(import_service):
+    """Scope guard: CrmImportService.import_one_row() is shared infrastructure
+    (CSV import uses the same apply_import_mapping merge rules), but only the
+    ITF caller passes email_status="Valid" via extra_fields -- a CSV-shaped
+    call with no extra_fields must not get it, and must never touch the
+    'ITF Submissions' list (list membership is ITF-only code, unreachable from
+    CrmImportService itself)."""
+    from app.services.crm_classification_rules import build_classification_context
+
+    crm = import_service.crm_service
+    context = await build_classification_context(crm.custom_field_store)
+    status, contact, matched_on, mapped = await import_service.import_one_row(
+        {"Email": "csv-contact@example.com", "First Name": "Csv"},
+        {"Email": "email", "First Name": "first_name"},
+        context,
+    )
+    assert contact.email_status is None
+    assert "email_status" not in mapped
+    assert await _get_list_by_name(crm, ITF_SUBMISSIONS_LIST_NAME) is None

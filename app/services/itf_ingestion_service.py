@@ -8,8 +8,17 @@ only ITF-specific code in this whole pipeline is: turning the Apps Script
 payload into a raw_row dict, the dietary-preferences delimiter bridge
 (_normalize_dietary_preferences_delimiter -- see its docstring; it
 retargets one column's format only, never touches classify_dietary_
-preferences itself or anything CSV import relies on), and the idempotency
-ledger below.
+preferences itself or anything CSV import relies on), the idempotency
+ledger below, and the two post-resolution automations below
+(ITF_EMAIL_STATUS_VALUE / _add_to_itf_submissions_list): every real
+ITF submission that resolves to a written contact (created or updated,
+never a possible_duplicate) gets email_status filled in via the same
+extra_fields mechanism "source"/itf_submitted_at already use (so it goes
+through CrmService's existing, unmodified fill-only-if-blank merge rule --
+no bespoke overwrite logic), and is added to the "ITF Submissions" CRM
+list via CrmService's existing, already-idempotent list API. Neither
+touches CSV import, manual contact creation, Email Intake, or Apollo
+imports -- both are reachable only from this file.
 
 No Google credentials of any kind live in this backend -- a Google Apps
 Script bound to the ITF response Sheet (an installable onFormSubmit
@@ -111,6 +120,26 @@ _STATUS_STRINGS = {
 }
 
 ITF_SUBMITTED_AT_FIELD_KEY = "itf_submitted_at"
+
+# The email address on an ITF submission was typed by the person it belongs to --
+# treat it as valid unless later evidence changes that status. `email_status` is
+# CrmContact's existing, pre-existing free-text field (see app/models/crm.py); no new
+# field is introduced. Setting it via `extra_fields` (below) is deliberate: it is the
+# SAME mechanism already used for "source"/itf_submitted_at, so it flows through
+# CrmService.apply_import_mapping's existing, unmodified EXTERNAL_FIELD_NAMES
+# fill-only-if-blank rule -- the exact same rule every other external field (email,
+# phone, company, ...) already gets on every import path. That rule is what actually
+# implements the safety requirement here: a contact whose email_status is already
+# ANY nonblank value (Valid, Invalid, Bounced, Do Not Contact, ...) is left untouched;
+# only a currently blank/unset email_status is filled in with ITF_EMAIL_STATUS_VALUE.
+# No bespoke overwrite-protection logic exists (or is needed) in this file.
+ITF_EMAIL_STATUS_VALUE = "Valid"
+
+# Exact list name requested -- looked up by exact string match in
+# _ensure_itf_submissions_list_id below; never created twice for the same name (see
+# that method's docstring for the one small residual race it does not close, and
+# why it's an acceptable tradeoff here).
+ITF_SUBMISSIONS_LIST_NAME = "ITF Submissions"
 
 
 def _content_hash(header_ordered_values: list[str]) -> str:
@@ -294,7 +323,7 @@ class ItfIngestionService:
 
         warnings: list[str] = []
         submitted_at = _parse_submitted_at(raw_row)
-        extra_fields: dict[str, Any] = {"source": "itf"}
+        extra_fields: dict[str, Any] = {"source": "itf", "email_status": ITF_EMAIL_STATUS_VALUE}
         if submitted_at:
             extra_fields[f"custom:{ITF_SUBMITTED_AT_FIELD_KEY}"] = submitted_at
         else:
@@ -340,6 +369,16 @@ class ItfIngestionService:
         except Exception as e:
             itf_status, contact, matched_on = ItfRowStatus.ERROR, None, None
             error_message = str(e)
+
+        # Only for a submission that was actually resolved to a real, written
+        # contact -- CREATED or UPDATED. Deliberately excludes POSSIBLE_DUPLICATE
+        # (contact here is the unmodified existing candidate flagged for human
+        # review, never written -- see import_one_row) and ERROR (contact is None
+        # above). Best-effort: a failure here never flips itf_status/error_message,
+        # since the contact write itself already genuinely succeeded -- it's
+        # surfaced as a warning instead (see _add_to_itf_submissions_list).
+        if not dry_run and itf_status in (ItfRowStatus.CREATED, ItfRowStatus.UPDATED) and contact is not None:
+            await self._add_to_itf_submissions_list(contact, warnings)
 
         if not dry_run:
             await self.log_store.save(
@@ -426,6 +465,64 @@ class ItfIngestionService:
                 entity_name=name,
                 metadata={"error": error_message},
             )
+
+    async def _add_to_itf_submissions_list(self, contact: CrmContact, warnings: list[str]) -> None:
+        """
+        Best-effort membership add for the 'ITF Submissions' list -- never
+        raises, and never flips the submission's overall status. The contact
+        create/update this runs after already genuinely succeeded (see the
+        call site's guard); a failure here (e.g. a transient store error) is
+        surfaced only as a warning on the response, exactly like every other
+        non-fatal issue this service already reports (unmapped columns,
+        unparsed timestamp) -- never a reason to report ERROR for a row whose
+        CRM write already committed.
+
+        Idempotent by construction, with zero new mechanism: CrmService.
+        bulk_add_to_list() -- the CRM's existing, already-idempotent list API
+        (see crm_contact_list_member_store.py: add() is keyed on
+        (list_id, crm_contact_id), a repeat add is a genuine no-op at the store
+        layer) -- is called with this one contact_id. A repeat ITF submission
+        for the same contact (whether a retried row or a second real
+        submission from the same person) calls this again with the same
+        (list_id, contact_id) pair and creates no duplicate membership row,
+        and fires no duplicate activity event (bulk_add_to_list only records
+        list.contacts_added when it actually added someone).
+        """
+        try:
+            list_id = await self._ensure_itf_submissions_list_id()
+            await self.import_service.crm_service.bulk_add_to_list(list_id, [contact.crm_contact_id])
+        except Exception as e:
+            warnings.append(f"Could not add this contact to the '{ITF_SUBMISSIONS_LIST_NAME}' list: {e}")
+
+    async def _ensure_itf_submissions_list_id(self) -> str:
+        """
+        Get-or-create for the 'ITF Submissions' CRM list, by exact name match
+        against CrmService.list_contact_lists() -- the CRM's existing list
+        registry, not a parallel one. Scoped entirely to this ITF service; the
+        generic Lists feature (crm_service.py, GET/POST /crm/lists) is
+        unmodified, so every other caller of Lists is unaffected.
+
+        Residual note: list names have no store-level uniqueness constraint
+        today (unlike, e.g., custom field keys -- see
+        _ensure_submitted_at_field_exists's CrmDuplicateFieldKeyError handling
+        just below), so two truly concurrent first-ever ITF submissions could
+        theoretically both observe "not found" and both create a list named
+        'ITF Submissions'. Real ITF submissions arrive one at a time from a
+        single Google Apps Script onFormSubmit trigger firing per Sheet row,
+        so this is not a realistic risk in practice -- flagged here rather
+        than silently assumed away, and closing it fully would mean adding a
+        uniqueness constraint to the shared Lists store, which is out of
+        scope for an ITF-only change.
+        """
+        existing_lists = await self.import_service.crm_service.list_contact_lists()
+        for contact_list in existing_lists:
+            if contact_list.name == ITF_SUBMISSIONS_LIST_NAME:
+                return contact_list.list_id
+        created = await self.import_service.crm_service.create_contact_list(
+            name=ITF_SUBMISSIONS_LIST_NAME,
+            description="Contacts who have submitted the Investor Thesis Form.",
+        )
+        return created.list_id
 
     async def _ensure_submitted_at_field_exists(self) -> None:
         """
