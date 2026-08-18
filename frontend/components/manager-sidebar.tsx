@@ -63,7 +63,7 @@ export function ManagerSidebar() {
       </div>
 
       <div className="p-3">
-        <Link href="/" className={cn(buttonVariants({ size: "sm" }), "w-full gap-1.5")}>
+        <Link href="/manager/campaigns/new" className={cn(buttonVariants({ size: "sm" }), "w-full gap-1.5")}>
           <Plus className="h-4 w-4" />
           Create Campaign
         </Link>

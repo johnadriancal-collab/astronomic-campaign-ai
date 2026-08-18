@@ -1041,6 +1041,34 @@ export function rejectEmailIntakeItem(intakeId: string): Promise<EmailIntakeItem
   return post<EmailIntakeItem>(`/crm/email-intake/${intakeId}/reject`, {});
 }
 
+// --- Campaign Manager Integration Phase: read-side aggregation only -------
+//
+// UnifiedCampaignSummary is a presentation DTO, not a third campaign model --
+// see app/api/campaign_manager.py. It never replaces Campaign or MailCampaign
+// above; the dashboard still fetches richer per-provider data at the detail
+// route each card links to. `status_bucket` is a small shared vocabulary for
+// this endpoint's own consumers -- the dashboard itself renders each item's
+// EXISTING per-provider status badge from `raw_status`, not from this bucket.
+
+export type SendingMethod = "apollo" | "astronomic_mail";
+
+export type CampaignStatusBucket = "draft" | "in_progress" | "ready" | "active" | "paused" | "failed" | "archived";
+
+export interface UnifiedCampaignSummary {
+  id: string;
+  sending_method: SendingMethod;
+  name: string;
+  status_bucket: CampaignStatusBucket;
+  raw_status: string;
+  summary: string;
+  created_at: string;
+  detail_path: string;
+}
+
+export function listUnifiedCampaigns(): Promise<UnifiedCampaignSummary[]> {
+  return request<UnifiedCampaignSummary[]>("/campaign-manager/campaigns");
+}
+
 // --- Astronomic Mail (Phase 1 -- Foundation, NO sending capability) -------
 //
 // Deliberately independent from Campaign/CampaignStatus above (the Apollo-

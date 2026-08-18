@@ -4,12 +4,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Contact,
-  Inbox,
   LayoutDashboard,
   ListChecks,
   ListFilter,
   ListPlus,
-  Mail,
   MessageCircle,
   Settings,
   SlidersHorizontal,
@@ -26,14 +24,6 @@ const SECTIONS = [
   { href: "/crm/lists", label: "Lists", icon: ListChecks },
   { href: "/crm/import", label: "Import CSV", icon: ListPlus },
   { href: "/crm/fields", label: "Custom Fields", icon: SlidersHorizontal },
-];
-
-// Astronomic Mail (Phase 1 -- Foundation, no sending capability) -- its own
-// mini-section, same visual pattern as the CRM header above SECTIONS, kept
-// separate so it's obviously not just another Contacts-adjacent tool.
-const MAIL_SECTIONS = [
-  { href: "/crm/mail/campaigns", label: "Campaigns", icon: Mail },
-  { href: "/crm/mail/mailboxes", label: "Mailboxes", icon: Inbox },
 ];
 
 function isActive(pathname: string, href: string, exact?: boolean) {
@@ -91,35 +81,6 @@ export function CrmSidebar() {
           );
         })}
       </nav>
-
-      <div className="px-3">
-        <div className="h-px bg-sidebar-border" />
-      </div>
-
-      <div className="flex flex-col gap-1 p-3">
-        <p className="px-3 pb-1 text-xs font-medium uppercase tracking-wide text-muted-foreground/70">
-          Astronomic Mail
-        </p>
-        {MAIL_SECTIONS.map((section) => {
-          const active = isActive(pathname, section.href);
-          const Icon = section.icon;
-          return (
-            <Link
-              key={section.href}
-              href={section.href}
-              className={cn(
-                "flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors",
-                active
-                  ? "bg-sidebar-accent font-medium text-sidebar-accent-foreground"
-                  : "text-sidebar-foreground/70 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
-              )}
-            >
-              <Icon className="h-4 w-4" />
-              {section.label}
-            </Link>
-          );
-        })}
-      </div>
 
       <div className="px-3">
         <div className="h-px bg-sidebar-border" />

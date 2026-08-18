@@ -47,6 +47,7 @@ from fastapi.responses import HTMLResponse
 from app.api.activity import router as activity_router
 from app.api.astro import router as astro_router
 from app.api.campaign import router as campaign_router
+from app.api.campaign_manager import router as campaign_manager_router
 from app.api.crm import router as crm_router
 from app.api.email_intake import crm_router as email_intake_crm_router
 from app.api.email_intake import sync_router as email_intake_sync_router
@@ -233,6 +234,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
 app.include_router(campaign_router)
+app.include_router(campaign_manager_router)
 app.include_router(leads_router)
 app.include_router(sync_router)
 app.include_router(crm_router)

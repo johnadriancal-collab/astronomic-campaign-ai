@@ -22,6 +22,27 @@ const nextConfig: NextConfig = {
         destination: "/crm/astro",
         permanent: false,
       },
+      // Campaign Manager Integration Phase: Astronomic Mail's UI moved out
+      // of the CRM layout into Campaign Manager, which is now the single
+      // front door for campaigns of either sending method (see
+      // app/manager/campaigns/*, app/manager/settings/page.tsx). These old
+      // pages were removed, not duplicated -- these redirects are the only
+      // remaining trace of the old paths.
+      {
+        source: "/crm/mail/campaigns",
+        destination: "/manager/campaigns",
+        permanent: false,
+      },
+      {
+        source: "/crm/mail/campaigns/:id",
+        destination: "/manager/campaigns/mail/:id",
+        permanent: false,
+      },
+      {
+        source: "/crm/mail/mailboxes",
+        destination: "/manager/settings",
+        permanent: false,
+      },
     ];
   },
   experimental: {

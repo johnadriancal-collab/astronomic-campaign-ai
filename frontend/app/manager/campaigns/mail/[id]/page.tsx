@@ -238,9 +238,9 @@ export default function MailCampaignDetailPage() {
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
-      <Link href="/crm/mail/campaigns" className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
+      <Link href="/manager/campaigns" className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="h-4 w-4" />
-        All Mail Campaigns
+        All Campaigns
       </Link>
 
       <div className="mb-6 flex items-start justify-between gap-4">
