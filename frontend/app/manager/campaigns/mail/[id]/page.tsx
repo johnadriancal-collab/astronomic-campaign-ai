@@ -8,7 +8,10 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { SendDaysPicker } from "@/components/send-days-picker";
+import { SharingSelector } from "@/components/mail-sharing-selector";
 import {
   addMailSequenceStep,
   archiveMailCampaign,
@@ -26,9 +29,11 @@ import {
   type CrmContactListSummary,
   type MailCampaign,
   type MailCampaignReview,
+  type MailCampaignSharing,
   type MailSequenceStep,
 } from "@/lib/api";
-import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel, WEEKDAY_LABELS } from "@/lib/mail";
+import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel } from "@/lib/mail";
+import { timezoneOptionsIncluding } from "@/lib/timezones";
 import { cn } from "@/lib/utils";
 
 export default function MailCampaignDetailPage() {
@@ -49,7 +54,14 @@ export default function MailCampaignDetailPage() {
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [timezone, setTimezone] = useState("");
+  const [allHours, setAllHours] = useState(false);
   const [savingSchedule, setSavingSchedule] = useState(false);
+
+  const [sharing, setSharing] = useState<MailCampaignSharing>("everyone");
+  const [startImmediately, setStartImmediately] = useState(false);
+  const [dailyLeadStartLimit, setDailyLeadStartLimit] = useState("");
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
 
   const [stepSubject, setStepSubject] = useState("");
   const [stepBody, setStepBody] = useState("");
@@ -77,6 +89,10 @@ export default function MailCampaignDetailPage() {
       setStartTime(c.start_time?.slice(0, 5) ?? "");
       setEndTime(c.end_time?.slice(0, 5) ?? "");
       setTimezone(c.timezone ?? "");
+      setAllHours(c.all_hours);
+      setSharing(c.sharing);
+      setStartImmediately(c.start_immediately);
+      setDailyLeadStartLimit(c.daily_lead_start_limit === null ? "" : String(c.daily_lead_start_limit));
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? `Couldn't load this campaign (${err.status}): ${err.message}` : "Couldn't reach the backend.");
@@ -117,11 +133,17 @@ export default function MailCampaignDetailPage() {
     try {
       const updated = await updateMailCampaign(campaignId, {
         sending_days: sendingDays,
-        start_time: startTime || null,
-        end_time: endTime || null,
+        start_time: allHours ? null : startTime || null,
+        end_time: allHours ? null : endTime || null,
         timezone: timezone || null,
+        all_hours: allHours,
       });
       setCampaign(updated);
+      // The backend forces literal 00:00/23:59 bounds when all_hours is true --
+      // reflect that back into the (disabled) time inputs so a reload doesn't
+      // show stale values.
+      setStartTime(updated.start_time?.slice(0, 5) ?? "");
+      setEndTime(updated.end_time?.slice(0, 5) ?? "");
     } catch (err) {
       setActionError(err instanceof ApiError ? `Couldn't save schedule (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
@@ -129,8 +151,28 @@ export default function MailCampaignDetailPage() {
     }
   }
 
-  function toggleDay(day: number) {
-    setSendingDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day].sort((a, b) => a - b)));
+  async function handleSaveSettings() {
+    if (dailyLeadStartLimit.trim() !== "") {
+      const parsed = Number(dailyLeadStartLimit);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        setSettingsError("Number of leads to start daily must be a positive integer.");
+        return;
+      }
+    }
+    setSavingSettings(true);
+    setSettingsError(null);
+    try {
+      const updated = await updateMailCampaign(campaignId, {
+        sharing,
+        start_immediately: startImmediately,
+        daily_lead_start_limit: dailyLeadStartLimit.trim() === "" ? null : Number(dailyLeadStartLimit),
+      });
+      setCampaign(updated);
+    } catch (err) {
+      setSettingsError(err instanceof ApiError ? `Couldn't save (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setSavingSettings(false);
+    }
   }
 
   async function handleAddStep(e: React.FormEvent) {
@@ -383,24 +425,11 @@ export default function MailCampaignDetailPage() {
           <CardContent className="space-y-3">
             <div>
               <p className="mb-1.5 text-xs font-medium text-muted-foreground">Sending days</p>
-              <div className="flex gap-1.5">
-                {WEEKDAY_LABELS.map((label, day) => (
-                  <button
-                    key={day}
-                    type="button"
-                    disabled={!editable}
-                    onClick={() => toggleDay(day)}
-                    className={cn(
-                      "h-8 w-12 rounded-md border text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-60",
-                      sendingDays.includes(day)
-                        ? "border-primary bg-primary/10 font-medium text-primary"
-                        : "border-input text-muted-foreground"
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <SendDaysPicker days={sendingDays} onChange={setSendingDays} disabled={!editable} />
+            </div>
+            <div className="flex items-center justify-between rounded-md border border-border/60 px-3 py-2">
+              <span className="text-sm">All hours</span>
+              <Switch checked={allHours} onCheckedChange={(v) => setAllHours(Boolean(v))} disabled={!editable} />
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1">
@@ -409,7 +438,7 @@ export default function MailCampaignDetailPage() {
                   type="time"
                   value={startTime}
                   onChange={(e) => setStartTime(e.target.value)}
-                  disabled={!editable}
+                  disabled={!editable || allHours}
                   className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                 />
               </div>
@@ -419,18 +448,87 @@ export default function MailCampaignDetailPage() {
                   type="time"
                   value={endTime}
                   onChange={(e) => setEndTime(e.target.value)}
-                  disabled={!editable}
+                  disabled={!editable || allHours}
                   className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                 />
               </div>
             </div>
             <div className="space-y-1">
-              <label className="text-xs font-medium text-muted-foreground">Timezone (IANA identifier)</label>
-              <Input value={timezone} onChange={(e) => setTimezone(e.target.value)} disabled={!editable} placeholder="America/Chicago" />
+              <label className="text-xs font-medium text-muted-foreground">Timezone</label>
+              <select
+                value={timezone}
+                onChange={(e) => setTimezone(e.target.value)}
+                disabled={!editable}
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <option value="">-- choose a timezone --</option>
+                {timezoneOptionsIncluding(timezone || null).map((tz) => (
+                  <option key={tz.value} value={tz.value}>
+                    {tz.label}
+                  </option>
+                ))}
+              </select>
             </div>
             {editable && (
               <Button size="sm" onClick={handleSaveSchedule} disabled={savingSchedule}>
                 {savingSchedule ? "Saving..." : "Save schedule"}
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Campaign Settings -- Campaign Manager Integration Phase additions
+            with no existing home: Sharing, Start Immediately preference, and
+            Daily Lead Start Limit. Campaign name lives in Audience above;
+            send days/timezone/window live in Schedule above -- not duplicated
+            here. */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Campaign Settings</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {settingsError && (
+              <Alert variant="destructive">
+                <AlertDescription>{settingsError}</AlertDescription>
+              </Alert>
+            )}
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Sharing</label>
+              <SharingSelector value={sharing} onChange={setSharing} disabled={!editable} />
+              <p className="text-xs text-muted-foreground/70">Saved for later -- not yet enforced.</p>
+            </div>
+            <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-3">
+              <div>
+                <p className="text-sm font-medium">Start campaign immediately</p>
+                <p className="text-xs text-muted-foreground">
+                  When enabled, newly added leads can begin progressing through the campaign once sending is enabled.
+                </p>
+              </div>
+              <Switch
+                checked={startImmediately}
+                onCheckedChange={(v) => setStartImmediately(Boolean(v))}
+                disabled={!editable}
+                className="mt-0.5 shrink-0"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Number of leads to start daily</label>
+              <Input
+                type="number"
+                min={1}
+                step={1}
+                value={dailyLeadStartLimit}
+                onChange={(e) => setDailyLeadStartLimit(e.target.value)}
+                disabled={!editable}
+                placeholder="50 (leave blank for unlimited)"
+              />
+              <p className="text-xs text-muted-foreground/70">
+                How many new leads may begin this sequence per day -- separate from a mailbox&apos;s own daily sending limit.
+              </p>
+            </div>
+            {editable && (
+              <Button size="sm" onClick={handleSaveSettings} disabled={savingSettings}>
+                {savingSettings ? "Saving..." : "Save settings"}
               </Button>
             )}
           </CardContent>

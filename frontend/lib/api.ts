@@ -1079,6 +1079,13 @@ export function listUnifiedCampaigns(): Promise<UnifiedCampaignSummary[]> {
 
 export type MailCampaignStatus = "draft" | "ready" | "archived";
 
+// Campaign Manager Integration Phase -- who can see/edit this campaign.
+// This app has no multi-user/workspace permission system anywhere (no
+// owner/user field on MailCampaign or any other model), so this is a
+// stored PREFERENCE only -- nothing enforces it. See app/models/mail.py's
+// MailCampaignSharing docstring.
+export type MailCampaignSharing = "everyone" | "only_me";
+
 export interface MailCampaign {
   mail_campaign_id: string;
   name: string;
@@ -1088,10 +1095,28 @@ export interface MailCampaign {
   start_time: string | null; // "HH:MM:SS"
   end_time: string | null;
   timezone: string | null;
+  all_hours: boolean;
+  sharing: MailCampaignSharing;
+  start_immediately: boolean;
+  daily_lead_start_limit: number | null;
   created_at: string;
   updated_at: string;
   ready_at: string | null;
   archived_at: string | null;
+}
+
+// Everything but `name` is optional campaign-level configuration from the
+// Create Campaign modal -- omitted fields are simply not sent, so the
+// backend creates the campaign exactly as it always has if none are given.
+export interface CreateMailCampaignOptions {
+  sharing?: MailCampaignSharing;
+  sending_days?: number[];
+  start_time?: string; // "HH:MM"
+  end_time?: string;
+  timezone?: string;
+  all_hours?: boolean;
+  start_immediately?: boolean;
+  daily_lead_start_limit?: number | null;
 }
 
 export interface MailSequenceStep {
@@ -1144,8 +1169,8 @@ export function listMailCampaigns(): Promise<MailCampaign[]> {
   return request<MailCampaign[]>("/mail/campaigns");
 }
 
-export function createMailCampaign(name: string): Promise<MailCampaign> {
-  return post<MailCampaign>("/mail/campaigns", { name });
+export function createMailCampaign(name: string, options: CreateMailCampaignOptions = {}): Promise<MailCampaign> {
+  return post<MailCampaign>("/mail/campaigns", { name, ...options });
 }
 
 export function getMailCampaign(mailCampaignId: string): Promise<MailCampaign> {

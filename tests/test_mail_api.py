@@ -71,6 +71,123 @@ def test_get_missing_campaign_returns_404(client):
     assert resp.status_code == 404
 
 
+# --- Campaign Manager Integration Phase: Create Campaign modal fields -----
+
+
+def test_create_campaign_with_full_config_in_one_call(client):
+    """The Create Campaign modal submits everything in one POST -- this
+    must persist all of it without a second PATCH round-trip."""
+    resp = client.post(
+        "/mail/campaigns",
+        json={
+            "name": "Austin Founder Outreach — August 2026",
+            "sharing": "only_me",
+            "sending_days": [0, 1, 2, 3, 4],
+            "start_time": "08:00",
+            "end_time": "18:00",
+            "timezone": "America/Chicago",
+            "all_hours": False,
+            "start_immediately": True,
+            "daily_lead_start_limit": 50,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "draft"
+    assert body["sharing"] == "only_me"
+    assert body["sending_days"] == [0, 1, 2, 3, 4]
+    assert body["start_time"].startswith("08:00")
+    assert body["end_time"].startswith("18:00")
+    assert body["timezone"] == "America/Chicago"
+    assert body["start_immediately"] is True
+    assert body["daily_lead_start_limit"] == 50
+
+
+def test_create_campaign_with_only_name_keeps_prior_defaults(client):
+    """Callers that only ever send `name` (every pre-existing client) get
+    exactly the same shape as before this phase."""
+    resp = client.post("/mail/campaigns", json={"name": "Just A Name"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sharing"] == "everyone"
+    assert body["all_hours"] is False
+    assert body["start_immediately"] is False
+    assert body["daily_lead_start_limit"] is None
+    assert body["sending_days"] == []
+    assert body["timezone"] is None
+
+
+def test_create_campaign_with_all_hours_forces_full_day_bounds(client):
+    resp = client.post(
+        "/mail/campaigns",
+        json={"name": "All Hours", "all_hours": True, "sending_days": [0, 1], "timezone": "UTC"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["all_hours"] is True
+    assert body["start_time"].startswith("00:00")
+    assert body["end_time"].startswith("23:59")
+
+
+def test_create_campaign_rejects_invalid_daily_lead_start_limit(client):
+    resp = client.post("/mail/campaigns", json={"name": "Bad Limit", "daily_lead_start_limit": 0})
+    assert resp.status_code == 400
+
+
+def test_create_campaign_rejects_invalid_sharing_value(client):
+    resp = client.post("/mail/campaigns", json={"name": "Bad Sharing", "sharing": "team"})
+    assert resp.status_code == 422  # Pydantic enum validation on the request model itself
+
+
+def test_create_campaign_rejects_invalid_timezone(client):
+    resp = client.post("/mail/campaigns", json={"name": "Bad TZ", "timezone": "Nowhere/Real"})
+    assert resp.status_code == 400
+
+
+def test_update_campaign_sharing_and_daily_limit(client):
+    created = client.post("/mail/campaigns", json={"name": "Settings Edit"}).json()
+    cid = created["mail_campaign_id"]
+
+    resp = client.patch(f"/mail/campaigns/{cid}", json={"sharing": "only_me", "daily_lead_start_limit": 25})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["sharing"] == "only_me"
+    assert body["daily_lead_start_limit"] == 25
+
+
+def test_update_campaign_rejects_non_positive_daily_limit(client):
+    created = client.post("/mail/campaigns", json={"name": "Settings Edit"}).json()
+    resp = client.patch(f"/mail/campaigns/{created['mail_campaign_id']}", json={"daily_lead_start_limit": -1})
+    assert resp.status_code == 400
+
+
+def test_update_campaign_all_hours_toggle(client):
+    created = client.post("/mail/campaigns", json={"name": "Toggle Hours"}).json()
+    cid = created["mail_campaign_id"]
+
+    on = client.patch(f"/mail/campaigns/{cid}", json={"all_hours": True})
+    assert on.status_code == 200
+    assert on.json()["start_time"].startswith("00:00")
+    assert on.json()["end_time"].startswith("23:59")
+
+    off = client.patch(f"/mail/campaigns/{cid}", json={"all_hours": False, "start_time": "09:00", "end_time": "17:00"})
+    assert off.status_code == 200
+    assert off.json()["all_hours"] is False
+    assert off.json()["start_time"].startswith("09:00")
+
+
+def test_start_immediately_never_appears_alongside_an_active_status(client):
+    """No matter what start_immediately is set to, status stays draft --
+    there is no status value this campaign can reach that implies sending."""
+    resp = client.post("/mail/campaigns", json={"name": "Immediate", "start_immediately": True})
+    body = resp.json()
+    assert body["start_immediately"] is True
+    assert body["status"] == "draft"
+    schema = client.get("/openapi.json").json()
+    status_enum = schema["components"]["schemas"]["MailCampaignStatus"]["enum"]
+    assert "active" not in status_enum
+
+
 def test_full_wizard_flow_through_ready_and_review(client, crm):
     import asyncio
 

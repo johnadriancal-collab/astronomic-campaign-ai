@@ -1,13 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEFAULT_SENDING_DAYS,
   formatScheduleSummary,
   formatSendingDays,
   formatTimeOfDay,
+  isAllSendingDaysSelected,
   mailCampaignStatusBadgeClass,
   mailCampaignStatusLabel,
   mailEnrollmentStatusLabel,
   mailSuppressionReasonLabel,
+  toggleAllSendingDays,
+  toggleSendingDay,
 } from "./mail.ts";
 
 test("mailCampaignStatusLabel maps every Phase 1 status", () => {
@@ -65,4 +69,42 @@ test("formatScheduleSummary renders a complete schedule", () => {
     timezone: "America/Chicago",
   });
   assert.equal(summary, "Mon, Tue, Wed, Thu, Fri · 09:00–17:00 (America/Chicago)");
+});
+
+// --- Campaign Manager Integration Phase: Send Days picker logic ----------
+
+test("DEFAULT_SENDING_DAYS is Monday through Friday", () => {
+  assert.deepEqual(DEFAULT_SENDING_DAYS, [0, 1, 2, 3, 4]);
+});
+
+test("isAllSendingDaysSelected is true only for all seven days", () => {
+  assert.equal(isAllSendingDaysSelected([]), false);
+  assert.equal(isAllSendingDaysSelected([0, 1, 2, 3, 4]), false);
+  assert.equal(isAllSendingDaysSelected([0, 1, 2, 3, 4, 5, 6]), true);
+});
+
+test("toggleSendingDay adds a missing day and keeps the array sorted", () => {
+  assert.deepEqual(toggleSendingDay([0, 2], 1), [0, 1, 2]);
+  assert.deepEqual(toggleSendingDay([], 5), [5]);
+});
+
+test("toggleSendingDay removes an already-selected day", () => {
+  assert.deepEqual(toggleSendingDay([0, 1, 2], 1), [0, 2]);
+});
+
+test("deselecting a day after 'All days' was selected makes isAllSendingDaysSelected false", () => {
+  const allDays = toggleAllSendingDays([]);
+  assert.equal(isAllSendingDaysSelected(allDays), true);
+  const afterManualDeselect = toggleSendingDay(allDays, 3);
+  assert.equal(isAllSendingDaysSelected(afterManualDeselect), false);
+  assert.equal(afterManualDeselect.length, 6);
+});
+
+test("toggleAllSendingDays selects all seven days when not already all selected", () => {
+  assert.deepEqual(toggleAllSendingDays([0, 1]), [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(toggleAllSendingDays([]), [0, 1, 2, 3, 4, 5, 6]);
+});
+
+test("toggleAllSendingDays clears to none when all seven are already selected", () => {
+  assert.deepEqual(toggleAllSendingDays([0, 1, 2, 3, 4, 5, 6]), []);
 });

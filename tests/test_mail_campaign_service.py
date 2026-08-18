@@ -146,6 +146,122 @@ async def test_update_allows_partial_incomplete_schedule_while_draft(service):
     assert updated.start_time is None
 
 
+# --- Campaign Manager Integration Phase: campaign-level config fields ----
+
+
+async def test_new_campaign_defaults_are_non_send_capable(service):
+    """A brand-new campaign carries the new config fields at their neutral
+    defaults -- sharing visible-to-everyone, no start-immediately intent,
+    no daily limit -- and, most importantly, is still a plain DRAFT with no
+    path to an active-sending state."""
+    campaign = await service.create_campaign("Draft")
+    assert campaign.sharing.value == "everyone"
+    assert campaign.all_hours is False
+    assert campaign.start_immediately is False
+    assert campaign.daily_lead_start_limit is None
+    assert campaign.status == MailCampaignStatus.DRAFT
+
+
+async def test_update_sharing_persists_as_enum(service):
+    from app.models.mail import MailCampaignSharing
+
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"sharing": "only_me"})
+    assert updated.sharing == MailCampaignSharing.ONLY_ME
+
+    reloaded = await service.get_campaign(campaign.mail_campaign_id)
+    assert reloaded.sharing == MailCampaignSharing.ONLY_ME
+
+
+async def test_update_rejects_invalid_sharing_value(service):
+    campaign = await service.create_campaign("Draft")
+    with pytest.raises(ValueError):
+        await service.update_campaign(campaign.mail_campaign_id, {"sharing": "everyone_in_the_world"})
+
+
+async def test_update_start_immediately_never_changes_status(service):
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"start_immediately": True})
+    assert updated.start_immediately is True
+    assert updated.status == MailCampaignStatus.DRAFT
+
+
+async def test_update_daily_lead_start_limit_persists(service):
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"daily_lead_start_limit": 50})
+    assert updated.daily_lead_start_limit == 50
+
+
+async def test_update_daily_lead_start_limit_none_means_unlimited(service):
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"daily_lead_start_limit": 50})
+    updated = await service.update_campaign(updated.mail_campaign_id, {"daily_lead_start_limit": None})
+    assert updated.daily_lead_start_limit is None
+
+
+@pytest.mark.parametrize("bad_limit", [0, -5, 1.5, True])
+async def test_update_rejects_non_positive_daily_lead_start_limit(service, bad_limit):
+    campaign = await service.create_campaign("Draft")
+    with pytest.raises(ValueError):
+        await service.update_campaign(campaign.mail_campaign_id, {"daily_lead_start_limit": bad_limit})
+
+
+async def test_all_hours_forces_full_day_bounds_overriding_explicit_times(service):
+    """Setting all_hours True forces literal 00:00/23:59 bounds even if the
+    same patch also tried to set different explicit times -- all_hours wins."""
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"all_hours": True, "start_time": "09:00", "end_time": "17:00"},
+    )
+    assert updated.all_hours is True
+    assert updated.start_time.isoformat() == "00:00:00"
+    assert updated.end_time.isoformat() == "23:59:00"
+
+
+async def test_all_hours_true_with_no_explicit_times_still_forces_full_day(service):
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"all_hours": True})
+    assert updated.start_time.isoformat() == "00:00:00"
+    assert updated.end_time.isoformat() == "23:59:00"
+
+
+async def test_all_hours_satisfies_mark_ready_schedule_validation(service, crm):
+    """An all_hours campaign is a genuinely complete, valid schedule for
+    mark_ready() -- it must not need real start/end times from the user."""
+    contact_list = await crm.create_contact_list("Audience")
+    campaign = await service.create_campaign("Draft")
+    campaign = await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"source_list_id": contact_list.list_id, "sending_days": [0, 1, 2], "all_hours": True, "timezone": "UTC"},
+    )
+    await service.add_step(campaign.mail_campaign_id, "Hi", "Body")
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    assert ready.status == MailCampaignStatus.READY
+
+
+async def test_turning_all_hours_off_does_not_retroactively_clear_times(service):
+    """Turning all_hours back off leaves whatever start/end times are
+    already stored untouched -- the caller must explicitly set new ones if
+    they want a real window instead of the full-day bounds."""
+    campaign = await service.create_campaign("Draft")
+    campaign = await service.update_campaign(campaign.mail_campaign_id, {"all_hours": True})
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"all_hours": False})
+    assert updated.all_hours is False
+    assert updated.start_time.isoformat() == "00:00:00"
+    assert updated.end_time.isoformat() == "23:59:00"
+
+
+async def test_create_campaign_still_works_with_only_a_name(service):
+    """The original, minimal create_campaign(name) contract is completely
+    unchanged -- every existing call site keeps working identically."""
+    campaign = await service.create_campaign("Just A Name")
+    assert campaign.name == "Just A Name"
+    assert campaign.sending_days == []
+    assert campaign.timezone is None
+    assert campaign.sharing.value == "everyone"
+
+
 async def test_update_ignores_disallowed_patch_keys_including_status(service):
     """Matches CrmService.update_contact_list()'s exact convention: unknown/
     disallowed keys are silently dropped, never applied, never erroring."""

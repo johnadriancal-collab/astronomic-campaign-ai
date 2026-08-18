@@ -53,6 +53,30 @@ export function mailSuppressionReasonLabel(reason: MailSuppressionReason): strin
 // callers must never pass a raw getDay() value here.
 export const WEEKDAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+export const ALL_SENDING_DAYS = [0, 1, 2, 3, 4, 5, 6];
+
+// The Create Campaign modal's default -- Monday through Friday.
+export const DEFAULT_SENDING_DAYS = [0, 1, 2, 3, 4];
+
+export function isAllSendingDaysSelected(days: number[]): boolean {
+  return days.length === 7;
+}
+
+// Used by the day-pill row's single-day click -- always returns a new,
+// sorted array.
+export function toggleSendingDay(days: number[], day: number): number[] {
+  return days.includes(day) ? days.filter((d) => d !== day) : [...days, day].sort((a, b) => a - b);
+}
+
+// "All days" behaves like a standard select-all checkbox: selects every day
+// if not already all selected, clears to none if all seven are currently
+// selected. Manually deselecting a single day afterward (via
+// toggleSendingDay) naturally makes isAllSendingDaysSelected() false again --
+// there is no separate "all days" flag to keep in sync with sendingDays.
+export function toggleAllSendingDays(days: number[]): number[] {
+  return isAllSendingDaysSelected(days) ? [] : [...ALL_SENDING_DAYS];
+}
+
 export function formatSendingDays(days: number[]): string {
   if (days.length === 0) return "No sending days configured";
   if (days.length === 7) return "Every day";

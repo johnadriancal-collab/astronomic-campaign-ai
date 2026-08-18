@@ -20,6 +20,7 @@ from app.dependencies import get_mail_campaign_service, get_mail_suppression_ser
 from app.models.mail import (
     MailCampaign,
     MailCampaignReview,
+    MailCampaignSharing,
     MailContactSuppressionStatus,
     MailEnrollment,
     MailScheduleValidationError,
@@ -50,7 +51,24 @@ router = APIRouter(prefix="/mail", tags=["mail"])
 
 
 class MailCampaignCreateRequest(BaseModel):
+    """`name` is the only truly required field (matching create_campaign()'s
+    existing minimal contract, unchanged, so every prior caller keeps
+    working). Everything else is optional, campaign-level configuration
+    from the Create Campaign modal (Campaign Manager Integration Phase) --
+    any field left unset here is simply not included in the follow-up patch
+    below, so the campaign is created exactly like before with no extra
+    fields written. `start_time`/`end_time` are "HH:MM" strings, matching
+    the existing PATCH endpoint's convention."""
+
     name: str
+    sharing: MailCampaignSharing | None = None
+    sending_days: list[int] | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    timezone: str | None = None
+    all_hours: bool | None = None
+    start_immediately: bool | None = None
+    daily_lead_start_limit: int | None = None
 
 
 @router.get("/campaigns", response_model=list[MailCampaign])
@@ -62,7 +80,25 @@ async def list_campaigns(service: MailCampaignService = Depends(get_mail_campaig
 async def create_campaign(
     payload: MailCampaignCreateRequest, service: MailCampaignService = Depends(get_mail_campaign_service)
 ):
-    return await service.create_campaign(payload.name)
+    """
+    Two existing service calls composed at this route only (create_campaign()
+    and update_campaign() are both unchanged in what they individually
+    accept) -- this reuses update_campaign()'s existing soft validation
+    (time-string parsing, day-range/timezone checks, all_hours full-day
+    forcing, daily_lead_start_limit positivity) instead of duplicating any
+    of it here. If no optional field was provided, the second call is
+    skipped entirely and behavior is byte-identical to before this phase.
+    """
+    campaign = await service.create_campaign(payload.name)
+    patch = payload.model_dump(exclude={"name"}, exclude_none=True)
+    if not patch:
+        return campaign
+    try:
+        return await service.update_campaign(campaign.mail_campaign_id, patch)
+    except MailScheduleValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/campaigns/{mail_campaign_id}", response_model=MailCampaign)
@@ -88,6 +124,8 @@ async def update_campaign(
     except CrmContactListNotFound as e:
         raise HTTPException(status_code=400, detail=f"Selected CRM List not found: {e}")
     except MailScheduleValidationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 

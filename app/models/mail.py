@@ -64,6 +64,20 @@ class MailCampaignStatus(str, Enum):
     ARCHIVED = "archived"
 
 
+class MailCampaignSharing(str, Enum):
+    """Who can see/edit this campaign -- a stored PREFERENCE only. This app
+    has no multi-user/workspace permission system anywhere (no owner/user
+    field exists on MailCampaign, CrmContactList, or any other model), so
+    nothing anywhere enforces this value -- every campaign remains visible
+    to every caller of GET /mail/campaigns regardless of this field. It is
+    persisted now so the UI has a clean, honest place to record the user's
+    intent for whenever a real permission system exists; see the Campaign
+    Manager Integration Phase's Create Campaign modal for the UI."""
+
+    EVERYONE = "everyone"
+    ONLY_ME = "only_me"
+
+
 class MailCampaign(BaseModel):
     """
     References its audience by `source_list_id` (an existing
@@ -82,6 +96,30 @@ class MailCampaign(BaseModel):
     intentionally all independently nullable/empty -- a campaign can be
     saved mid-configuration. mark_ready() is what enforces they're ALL
     present and mutually valid before the campaign can leave DRAFT.
+
+    `all_hours`/`start_immediately`/`daily_lead_start_limit` (Campaign
+    Manager Integration Phase addition, see the Create Campaign modal) are
+    all campaign-level CONFIGURATION/PREFERENCE fields, not capabilities --
+    nothing in this codebase reads them to actually send, schedule, or
+    progress anything yet:
+      - `all_hours=True` means the campaign's sending window is the full
+        day; mail_campaign_service.py enforces this by writing literal
+        `start_time=00:00`/`end_time=23:59` whenever it's set True (see
+        MailCampaignService.update_campaign()), so validate_mail_schedule()
+        and every existing start/end-time consumer needs no changes at all
+        -- `all_hours` itself exists only so the UI can round-trip the
+        user's actual choice on re-edit, distinct from someone literally
+        picking 00:00-23:59 by hand.
+      - `start_immediately` is a preference for a future sending engine to
+        read ("should a newly-enrolled lead begin immediately, once
+        sending exists") -- it never changes `status` and never enables
+        any send. MailCampaignStatus still has no ACTIVE member at all.
+      - `daily_lead_start_limit` caps how many NEW leads may begin the
+        sequence per day, once a future engine exists to enforce it. This
+        is deliberately a DIFFERENT concept from a future per-mailbox daily
+        send-volume limit (see MailCampaignReview.daily_capacity_estimate)
+        -- one caps new starts, the other will cap total sends; they must
+        never be collapsed into a single field.
     """
 
     mail_campaign_id: str
@@ -95,6 +133,11 @@ class MailCampaign(BaseModel):
     start_time: time | None = None
     end_time: time | None = None
     timezone: str | None = None  # IANA identifier, e.g. "America/Chicago"
+    all_hours: bool = False
+
+    sharing: MailCampaignSharing = MailCampaignSharing.EVERYONE
+    start_immediately: bool = False
+    daily_lead_start_limit: int | None = None
 
     created_at: datetime
     updated_at: datetime

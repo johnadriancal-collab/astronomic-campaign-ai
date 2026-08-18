@@ -38,6 +38,7 @@ from app.models.mail import (
     ALLOWED_MAIL_TEMPLATE_VARIABLES,
     MailCampaign,
     MailCampaignReview,
+    MailCampaignSharing,
     MailCampaignStatus,
     MailEnrollment,
     MailEnrollmentStatus,
@@ -117,7 +118,21 @@ class InvalidMailTemplateVariableError(ValueError):
         )
 
 
-_CAMPAIGN_PATCH_FIELDS = {"name", "source_list_id", "sending_days", "start_time", "end_time", "timezone"}
+_CAMPAIGN_PATCH_FIELDS = {
+    "name",
+    "source_list_id",
+    "sending_days",
+    "start_time",
+    "end_time",
+    "timezone",
+    "all_hours",
+    "sharing",
+    "start_immediately",
+    "daily_lead_start_limit",
+}
+
+_ALL_DAY_SENTINEL_START = time(0, 0)
+_ALL_DAY_SENTINEL_END = time(23, 59)
 
 
 def _parse_time_of_day(value: str) -> time:
@@ -199,6 +214,16 @@ class MailCampaignService:
         Setting `source_list_id` to a value that doesn't resolve to a real
         CrmContactList is rejected immediately (CrmContactListNotFound) --
         no reason to let a campaign point at a dangling id even transiently.
+
+        The four Campaign Manager Integration Phase additions get the same
+        "soft" treatment: `sharing`/`all_hours`/`start_immediately` are
+        booleans/enums with no incompleteness to check, and
+        `daily_lead_start_limit` is rejected immediately if provided but
+        not a positive integer (None -- "unlimited" -- is always fine).
+        `all_hours=True` forces `start_time`/`end_time` to the literal
+        full-day bounds regardless of whatever this same patch also
+        requested for those two keys -- see MailCampaign's docstring for
+        why this needs no change to validate_mail_schedule() or mark_ready().
         """
         campaign = await self._require_campaign(mail_campaign_id)
         self._require_draft(campaign)
@@ -215,8 +240,28 @@ class MailCampaignService:
             if time_key in allowed and isinstance(allowed[time_key], str):
                 allowed[time_key] = _parse_time_of_day(allowed[time_key])
 
+        # Same reasoning as the time-string coercion above: a raw PATCH body
+        # carries "everyone"/"only_me" as a plain string, not yet the enum
+        # model_copy(update=...) expects -- coerce explicitly rather than let
+        # a bare string silently sit in a field typed as MailCampaignSharing.
+        if "sharing" in allowed and isinstance(allowed["sharing"], str):
+            try:
+                allowed["sharing"] = MailCampaignSharing(allowed["sharing"])
+            except ValueError as e:
+                raise ValueError(f"'{allowed['sharing']}' is not a valid sharing value.") from e
+
+        if "daily_lead_start_limit" in allowed and allowed["daily_lead_start_limit"] is not None:
+            limit = allowed["daily_lead_start_limit"]
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+                raise ValueError("Number of leads to start daily must be a positive integer.")
+
         if "source_list_id" in allowed and allowed["source_list_id"] is not None:
             await self.crm_service.get_contact_list(allowed["source_list_id"])  # raises CrmContactListNotFound
+
+        merged_all_hours = allowed.get("all_hours", campaign.all_hours)
+        if merged_all_hours:
+            allowed["start_time"] = _ALL_DAY_SENTINEL_START
+            allowed["end_time"] = _ALL_DAY_SENTINEL_END
 
         merged_start = allowed.get("start_time", campaign.start_time)
         merged_end = allowed.get("end_time", campaign.end_time)

@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test lib/tag-multi-select.test.ts lib/sort-contacts.test.ts lib/csv-export.test.ts lib/contact-selection.test.ts lib/filter-query-url.test.ts lib/filter-conditions.test.ts lib/astro-conversation.test.ts lib/contact-results-view.test.ts lib/crm-bulk-selection.test.ts lib/add-to-list.test.ts lib/activity.test.ts lib/email-intake.test.ts lib/mail.test.ts"
+    "test": "node --test lib/tag-multi-select.test.ts lib/sort-contacts.test.ts lib/csv-export.test.ts lib/contact-selection.test.ts lib/filter-query-url.test.ts lib/filter-conditions.test.ts lib/astro-conversation.test.ts lib/contact-results-view.test.ts lib/crm-bulk-selection.test.ts lib/add-to-list.test.ts lib/activity.test.ts lib/email-intake.test.ts lib/mail.test.ts lib/timezones.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
