@@ -1040,3 +1040,189 @@ export function approveEmailIntakeItem(intakeId: string, fieldKeys: string[]): P
 export function rejectEmailIntakeItem(intakeId: string): Promise<EmailIntakeItem> {
   return post<EmailIntakeItem>(`/crm/email-intake/${intakeId}/reject`, {});
 }
+
+// --- Astronomic Mail (Phase 1 -- Foundation, NO sending capability) -------
+//
+// Deliberately independent from Campaign/CampaignStatus above (the Apollo-
+// oriented system) -- MailCampaign/MailCampaignStatus are their own types.
+// MailCampaignStatus intentionally has only 3 values in this phase; there
+// is no "active"/"paused"/"completed" to represent because nothing here
+// can send. See app/models/mail.py for the full rationale.
+
+export type MailCampaignStatus = "draft" | "ready" | "archived";
+
+export interface MailCampaign {
+  mail_campaign_id: string;
+  name: string;
+  status: MailCampaignStatus;
+  source_list_id: string | null;
+  sending_days: number[]; // 0=Monday .. 6=Sunday
+  start_time: string | null; // "HH:MM:SS"
+  end_time: string | null;
+  timezone: string | null;
+  created_at: string;
+  updated_at: string;
+  ready_at: string | null;
+  archived_at: string | null;
+}
+
+export interface MailSequenceStep {
+  step_id: string;
+  mail_campaign_id: string;
+  step_number: number;
+  subject: string;
+  body: string;
+  delay_days: number;
+  reply_in_thread: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+// The only {{variable}} placeholders add_step/update_step will accept --
+// anything else is rejected with a 400. Kept here so the composer UI can
+// show the same whitelist it will actually be validated against.
+export const MAIL_TEMPLATE_VARIABLES = ["first_name", "last_name", "company"] as const;
+
+export type MailEnrollmentStatus = "pending" | "suppressed";
+
+export interface MailEnrollment {
+  enrollment_id: string;
+  mail_campaign_id: string;
+  crm_contact_id: string;
+  email_at_enrollment: string;
+  status: MailEnrollmentStatus;
+  enrolled_at: string;
+  created_at: string;
+}
+
+// Pure, read-only -- calling this never enrolls anyone, queues anything, or
+// changes any contact/list data. See MailCampaignService.get_review().
+export interface MailCampaignReview {
+  mail_campaign_id: string;
+  source_list_id: string | null;
+  source_list_name: string | null;
+  source_list_exists: boolean;
+  total_contacts: number;
+  contacts_missing_email: number;
+  contacts_suppressed: number;
+  contacts_eligible: number;
+  sequence_step_count: number;
+  theoretical_total_sends: number;
+  daily_capacity_estimate: number | null;
+  daily_capacity_note: string;
+}
+
+export function listMailCampaigns(): Promise<MailCampaign[]> {
+  return request<MailCampaign[]>("/mail/campaigns");
+}
+
+export function createMailCampaign(name: string): Promise<MailCampaign> {
+  return post<MailCampaign>("/mail/campaigns", { name });
+}
+
+export function getMailCampaign(mailCampaignId: string): Promise<MailCampaign> {
+  return request<MailCampaign>(`/mail/campaigns/${mailCampaignId}`);
+}
+
+export function updateMailCampaign(mailCampaignId: string, patch: Record<string, unknown>): Promise<MailCampaign> {
+  return request<MailCampaign>(`/mail/campaigns/${mailCampaignId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+/** DRAFT -> READY. Validates completeness and snapshots the current audience
+ * into MailEnrollment rows -- see the backend docstring for exactly when/why. */
+export function markMailCampaignReady(mailCampaignId: string): Promise<MailCampaign> {
+  return post<MailCampaign>(`/mail/campaigns/${mailCampaignId}/ready`, {});
+}
+
+/** READY -> DRAFT. Deletes the (now-stale) enrollment snapshot so editing can resume. */
+export function unlockMailCampaign(mailCampaignId: string): Promise<MailCampaign> {
+  return post<MailCampaign>(`/mail/campaigns/${mailCampaignId}/unlock`, {});
+}
+
+export function archiveMailCampaign(mailCampaignId: string): Promise<MailCampaign> {
+  return post<MailCampaign>(`/mail/campaigns/${mailCampaignId}/archive`, {});
+}
+
+export function getMailCampaignReview(mailCampaignId: string): Promise<MailCampaignReview> {
+  return request<MailCampaignReview>(`/mail/campaigns/${mailCampaignId}/review`);
+}
+
+export function listMailEnrollments(mailCampaignId: string): Promise<MailEnrollment[]> {
+  return request<MailEnrollment[]>(`/mail/campaigns/${mailCampaignId}/enrollments`);
+}
+
+export function listMailSequenceSteps(mailCampaignId: string): Promise<MailSequenceStep[]> {
+  return request<MailSequenceStep[]>(`/mail/campaigns/${mailCampaignId}/steps`);
+}
+
+export function addMailSequenceStep(
+  mailCampaignId: string,
+  payload: { subject: string; body: string; delay_days?: number; reply_in_thread?: boolean }
+): Promise<MailSequenceStep> {
+  return post<MailSequenceStep>(`/mail/campaigns/${mailCampaignId}/steps`, payload);
+}
+
+export function updateMailSequenceStep(
+  mailCampaignId: string,
+  stepId: string,
+  patch: Record<string, unknown>
+): Promise<MailSequenceStep> {
+  return request<MailSequenceStep>(`/mail/campaigns/${mailCampaignId}/steps/${stepId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteMailSequenceStep(mailCampaignId: string, stepId: string): Promise<MailSequenceStep[]> {
+  return request<MailSequenceStep[]>(`/mail/campaigns/${mailCampaignId}/steps/${stepId}`, { method: "DELETE" });
+}
+
+export function reorderMailSequenceSteps(mailCampaignId: string, stepIds: string[]): Promise<MailSequenceStep[]> {
+  return post<MailSequenceStep[]>(`/mail/campaigns/${mailCampaignId}/steps/reorder`, { step_ids: stepIds });
+}
+
+// --- Mail Suppression -- keyed by normalized email, independent of ---
+// --- CrmContact.email_status. See app/models/mail.py for why. --------
+
+export type MailSuppressionReason = "manual" | "unsubscribed" | "hard_bounce" | "complaint";
+
+export interface MailSuppression {
+  email_normalized: string;
+  reason: MailSuppressionReason;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+  active: boolean;
+  unsuppressed_at: string | null;
+}
+
+export interface MailContactSuppressionStatus {
+  email_normalized: string;
+  suppressed: boolean;
+  reason: MailSuppressionReason | null;
+  notes: string | null;
+  created_at: string | null;
+  unsuppressed_at: string | null;
+}
+
+export function suppressMailEmail(
+  email: string,
+  reason: MailSuppressionReason = "manual",
+  notes?: string
+): Promise<MailSuppression> {
+  return post<MailSuppression>("/mail/suppressions", { email, reason, notes });
+}
+
+export function unsuppressMailEmail(email: string): Promise<MailSuppression> {
+  return post<MailSuppression>("/mail/suppressions/unsuppress", { email });
+}
+
+/** Never 404s -- `suppressed: false` for an address that's never been suppressed. */
+export function getMailSuppressionStatus(email: string): Promise<MailContactSuppressionStatus> {
+  return request<MailContactSuppressionStatus>(`/mail/suppressions/${encodeURIComponent(email)}`);
+}

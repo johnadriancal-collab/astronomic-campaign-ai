@@ -33,6 +33,10 @@ class ActivityCategory(str, Enum):
     CAMPAIGNS = "campaigns"
     EMAIL_INTAKE = "email_intake"
     ERRORS = "errors"
+    # Astronomic Mail (app/models/mail.py) -- deliberately its own category,
+    # never CAMPAIGNS, so its event stream is never confused with the
+    # existing Apollo-oriented Campaign Manager's events.
+    MAIL = "mail"
 
 
 class ActivitySource(str, Enum):
@@ -50,6 +54,8 @@ class ActivitySource(str, Enum):
     CAMPAIGN_SYSTEM = "campaign_system"
     EMAIL_INTAKE = "email_intake"
     SYSTEM = "system"
+    # Astronomic Mail -- distinct from CAMPAIGN_SYSTEM (Apollo).
+    MAIL_SYSTEM = "mail_system"
 
 
 class ActivityEvent(BaseModel):

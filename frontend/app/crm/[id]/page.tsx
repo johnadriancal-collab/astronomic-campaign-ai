@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, Archive, Save } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Archive, Ban, CheckCircle2, Save } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -15,13 +15,19 @@ import {
   ApiError,
   archiveCrmContact,
   getCrmContact,
+  getMailSuppressionStatus,
   listCrmCustomFields,
+  suppressMailEmail,
+  unsuppressMailEmail,
   updateCrmContact,
   type CrmContact,
   type CrmCustomFieldDefinition,
+  type MailContactSuppressionStatus,
 } from "@/lib/api";
 import { DIETARY_PREFERENCE_OPTIONS, INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
+import { mailSuppressionReasonLabel } from "@/lib/mail";
 import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
+import { cn } from "@/lib/utils";
 
 const CORE_TEXT_FIELDS: [keyof CrmContact, string][] = [
   ["first_name", "First name"],
@@ -233,6 +239,14 @@ export default function CrmContactDetailPage() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // Astronomic Mail suppression -- keyed by this contact's email, entirely
+  // independent of the contact's own email_status field (see lib/mail.ts /
+  // app/models/mail.py). Loaded as a separate, best-effort call so a
+  // suppression-lookup failure never blocks the contact page itself.
+  const [suppression, setSuppression] = useState<MailContactSuppressionStatus | null>(null);
+  const [suppressionBusy, setSuppressionBusy] = useState(false);
+  const [suppressionError, setSuppressionError] = useState<string | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -244,6 +258,44 @@ export default function CrmContactDetailPage() {
       }
     })();
   }, [params.id]);
+
+  useEffect(() => {
+    if (!contact?.email) {
+      setSuppression(null);
+      return;
+    }
+    getMailSuppressionStatus(contact.email)
+      .then(setSuppression)
+      .catch(() => setSuppression(null));
+  }, [contact?.email]);
+
+  async function handleSuppress() {
+    if (!contact?.email) return;
+    setSuppressionBusy(true);
+    setSuppressionError(null);
+    try {
+      await suppressMailEmail(contact.email, "manual");
+      setSuppression(await getMailSuppressionStatus(contact.email));
+    } catch (err) {
+      setSuppressionError(err instanceof ApiError ? `Couldn't suppress (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setSuppressionBusy(false);
+    }
+  }
+
+  async function handleUnsuppress() {
+    if (!contact?.email) return;
+    setSuppressionBusy(true);
+    setSuppressionError(null);
+    try {
+      await unsuppressMailEmail(contact.email);
+      setSuppression(await getMailSuppressionStatus(contact.email));
+    } catch (err) {
+      setSuppressionError(err instanceof ApiError ? `Couldn't unsuppress (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setSuppressionBusy(false);
+    }
+  }
 
   function set<K extends keyof CrmContact>(key: K, value: CrmContact[K]) {
     setContact((prev) => (prev ? { ...prev, [key]: value } : prev));
@@ -352,6 +404,42 @@ export default function CrmContactDetailPage() {
         </Alert>
       )}
       {saved && <p className="mb-4 text-sm text-muted-foreground">Saved.</p>}
+
+      {contact.email && suppression && (
+        <Card className={cn("mb-6", suppression.suppressed && "border-destructive/40 bg-destructive/5")}>
+          <CardContent className="flex items-center justify-between gap-3 py-4">
+            <div className="flex items-center gap-2">
+              {suppression.suppressed ? (
+                <Ban className="h-4 w-4 text-destructive" />
+              ) : (
+                <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+              )}
+              <div>
+                <p className={cn("text-sm font-medium", suppression.suppressed && "text-destructive")}>
+                  {suppression.suppressed ? "Email suppressed -- will not be mailed" : "Not suppressed for Mail"}
+                </p>
+                {suppression.suppressed && suppression.reason && (
+                  <p className="text-xs text-muted-foreground">
+                    Reason: {mailSuppressionReasonLabel(suppression.reason)}
+                    {suppression.notes ? ` -- ${suppression.notes}` : ""}
+                  </p>
+                )}
+              </div>
+            </div>
+            {suppressionError && <p className="text-xs text-destructive">{suppressionError}</p>}
+            {suppression.suppressed ? (
+              <Button variant="outline" size="sm" onClick={handleUnsuppress} disabled={suppressionBusy}>
+                Unsuppress
+              </Button>
+            ) : (
+              <Button variant="outline" size="sm" onClick={handleSuppress} disabled={suppressionBusy} className="gap-1.5">
+                <Ban className="h-3.5 w-3.5" />
+                Suppress from Mail
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       <div className="space-y-6">
         <Card>

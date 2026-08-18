@@ -22,6 +22,8 @@ from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
+from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_suppression_service import MailSuppressionService
 
 
 async def get_campaign_service(request: Request) -> CampaignService:
@@ -62,6 +64,14 @@ async def get_activity_log_service(request: Request) -> ActivityLogService:
 
 async def get_email_intake_service(request: Request) -> EmailIntakeService:
     return request.app.state.email_intake_service
+
+
+async def get_mail_campaign_service(request: Request) -> MailCampaignService:
+    return request.app.state.mail_campaign_service
+
+
+async def get_mail_suppression_service(request: Request) -> MailSuppressionService:
+    return request.app.state.mail_suppression_service
 
 
 async def verify_email_intake_webhook_token(authorization: str | None = Header(default=None)) -> None:

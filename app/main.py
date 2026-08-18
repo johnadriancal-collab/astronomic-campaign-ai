@@ -51,6 +51,7 @@ from app.api.crm import router as crm_router
 from app.api.email_intake import crm_router as email_intake_crm_router
 from app.api.email_intake import sync_router as email_intake_sync_router
 from app.api.leads import router as leads_router
+from app.api.mail import router as mail_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.repositories.sqlite_activity_event_store import SQLiteActivityEventStore
@@ -68,6 +69,10 @@ from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenc
 from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStore
 from app.repositories.sqlite_itf_ingestion_log_store import SQLiteItfIngestionLogStore
 from app.repositories.sqlite_lead_store import SQLiteLeadStore
+from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
+from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
+from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
+from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -78,6 +83,8 @@ from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
+from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_suppression_service import MailSuppressionService
 
 
 @asynccontextmanager
@@ -100,6 +107,10 @@ async def lifespan(app: FastAPI):
     itf_ingestion_log_store = SQLiteItfIngestionLogStore(settings.database_path)
     activity_event_store = SQLiteActivityEventStore(settings.database_path)
     email_intake_store = SQLiteEmailIntakeStore(settings.database_path)
+    mail_campaign_store = SQLiteMailCampaignStore(settings.database_path)
+    mail_sequence_step_store = SQLiteMailSequenceStepStore(settings.database_path)
+    mail_enrollment_store = SQLiteMailEnrollmentStore(settings.database_path)
+    mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -115,6 +126,10 @@ async def lifespan(app: FastAPI):
     await itf_ingestion_log_store.connect()
     await activity_event_store.connect()
     await email_intake_store.connect()
+    await mail_campaign_store.connect()
+    await mail_sequence_step_store.connect()
+    await mail_enrollment_store.connect()
+    await mail_suppression_store.connect()
 
     activity_log_service = ActivityLogService(store=activity_event_store)
     app.state.activity_log_service = activity_log_service
@@ -176,6 +191,24 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
     )
 
+    # Astronomic Mail (Phase 1 -- Foundation). No Gmail/OAuth credentials
+    # involved and no sending capability exists anywhere in this wiring or
+    # in the services/routes it constructs -- see app/api/mail.py's module
+    # docstring. MailCampaignService depends on crm_service (read-only:
+    # get_contact_list/get_list_contacts) to resolve a campaign's audience;
+    # it never mutates a CrmContact or CrmContactList.
+    app.state.mail_suppression_service = MailSuppressionService(
+        store=mail_suppression_store,
+        activity_log=activity_log_service,
+    )
+    app.state.mail_campaign_service = MailCampaignService(
+        campaign_store=mail_campaign_store,
+        step_store=mail_sequence_step_store,
+        enrollment_store=mail_enrollment_store,
+        crm_service=crm_service,
+        activity_log=activity_log_service,
+    )
+
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -192,6 +225,10 @@ async def lifespan(app: FastAPI):
     await itf_ingestion_log_store.close()
     await activity_event_store.close()
     await email_intake_store.close()
+    await mail_campaign_store.close()
+    await mail_sequence_step_store.close()
+    await mail_enrollment_store.close()
+    await mail_suppression_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
@@ -203,6 +240,7 @@ app.include_router(astro_router)
 app.include_router(activity_router)
 app.include_router(email_intake_sync_router)
 app.include_router(email_intake_crm_router)
+app.include_router(mail_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
