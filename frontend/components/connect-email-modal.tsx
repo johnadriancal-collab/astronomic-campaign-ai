@@ -1,6 +1,8 @@
 "use client";
 
+import { useState } from "react";
 import { Mail } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -11,13 +13,36 @@ import {
   DialogPopup,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { ApiError, startGoogleMailboxConnect } from "@/lib/api";
 
-// Purely informational -- there is no Gmail OAuth, no Google credentials,
-// and no way to actually connect a mailbox in this phase (see
-// app/models/mail.py's MailboxConfig/Mailbox docstring). This modal never
-// starts an OAuth redirect, never calls a backend endpoint, and never marks
-// anything as connected -- it only explains what's coming next.
+// Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). Clicking
+// "Connect Google Workspace" asks the backend for a Google authorize URL
+// (see /mailboxes/google/start) and then does a full top-level browser
+// navigation to it -- this is NOT a fetch Google redirects back to; Google
+// lands the browser on the backend's own /mailboxes/google/callback
+// directly, which then 302s back to /manager/emails?connected=1 (or
+// ?error=...), handled by that page on mount. Nothing here stores a
+// credential, calls Google directly, or marks anything connected itself.
 export function ConnectEmailModal({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const [connecting, setConnecting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleConnectGoogle() {
+    setConnecting(true);
+    setError(null);
+    try {
+      const { authorize_url } = await startGoogleMailboxConnect();
+      window.location.href = authorize_url;
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? `Couldn't start Google connection (${err.status}): ${err.message}`
+          : "Couldn't reach the backend."
+      );
+      setConnecting(false);
+    }
+  }
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogPopup className="max-w-sm">
@@ -27,12 +52,24 @@ export function ConnectEmailModal({ open, onOpenChange }: { open: boolean; onOpe
             Connect Email
           </DialogTitle>
           <DialogDescription>
-            Google Workspace connection will be available in the next phase. There is no Gmail OAuth, no stored
-            credentials, and no sending capability yet -- this is a preview of where inbox connection will live.
+            Connect a Google Workspace (Gmail) inbox to Astronomic Mail. You&apos;ll sign in with Google and approve
+            the requested permissions.
           </DialogDescription>
         </DialogHeader>
+
+        {error && (
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+
+        <Button type="button" className="w-full gap-1.5" onClick={handleConnectGoogle} disabled={connecting}>
+          <Mail className="h-4 w-4" />
+          {connecting ? "Redirecting to Google..." : "Connect Google Workspace"}
+        </Button>
+
         <DialogFooter>
-          <DialogClose render={<Button type="button">Got it</Button>} />
+          <DialogClose render={<Button type="button" variant="outline">Cancel</Button>} />
         </DialogFooter>
       </DialogPopup>
     </Dialog>

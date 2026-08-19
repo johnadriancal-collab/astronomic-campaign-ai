@@ -52,5 +52,39 @@ class Settings(BaseSettings):
     # 503 rather than crashing at startup when it's unset, same as ITF's.
     email_intake_webhook_token: str | None = None
 
+    # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection) -- see
+    # app/integrations/google_oauth_client.py and app/services/mailbox_service.py.
+    # ALL five are None until deliberately configured; every route that needs
+    # them returns a clear 503 rather than crashing app startup, matching
+    # itf_webhook_token's precedent above. No Gmail send/data scope is ever
+    # requested by this client -- connection only.
+    #
+    # google_oauth_client_id / google_oauth_client_secret: from a Google Cloud
+    # Console OAuth 2.0 Client ID (Web application type).
+    #
+    # google_oauth_redirect_uri: must exactly match one of that Client ID's
+    # registered "Authorized redirect URIs" -- e.g.
+    # "https://<this-backend's-public-domain>/mailboxes/google/callback".
+    # Google redirects the user's browser here DIRECTLY (never through the
+    # frontend's /backend/* rewrite proxy), since an OAuth redirect is a
+    # top-level browser navigation Google itself issues, not a same-origin
+    # fetch/XHR the proxy could intercept.
+    #
+    # frontend_origin: this backend's only way to know where to send the
+    # user's browser back to after processing the callback (e.g.
+    # "https://<frontend's-public-domain>") -- there is no other frontend-
+    # origin config anywhere in this app today because the browser otherwise
+    # never talks to this backend directly.
+    #
+    # mailbox_token_encryption_key: a Fernet key (32 url-safe base64 bytes)
+    # used ONLY to encrypt/decrypt stored Google refresh tokens at rest (see
+    # app/services/token_encryption.py) -- losing it means every connected
+    # mailbox must be reconnected; there is no recovery path, by design.
+    google_oauth_client_id: str | None = None
+    google_oauth_client_secret: str | None = None
+    google_oauth_redirect_uri: str | None = None
+    frontend_origin: str | None = None
+    mailbox_token_encryption_key: str | None = None
+
 
 settings = Settings()

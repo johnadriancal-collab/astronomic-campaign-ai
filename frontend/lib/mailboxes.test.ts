@@ -1,23 +1,17 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { Mailbox } from "./api.ts";
 import {
-  deliverabilityBadgeClass,
-  deliverabilityLabel,
-  deriveTld,
   DELIVERABILITY_TOOLTIP,
   EMAIL_ACCOUNT_TABLE_COLUMNS,
+  deriveTld,
   filterMailboxes,
   formatSendUsage,
-  MAILBOX_ACCOUNTS,
+  mailboxDisplayName,
+  mailboxStatusBadgeClass,
+  mailboxStatusLabel,
   providerLabel,
-  type MailboxAccount,
 } from "./mailboxes.ts";
-
-// --- No fabricated data ----------------------------------------------------
-
-test("MAILBOX_ACCOUNTS is empty -- no mailbox model/connection exists yet", () => {
-  assert.deepEqual(MAILBOX_ACCOUNTS, []);
-});
 
 // --- Exact, approved column set ---------------------------------------------
 
@@ -64,24 +58,37 @@ test("deriveTld returns null for unusual/invalid domains rather than throwing", 
   assert.equal(deriveTld(""), null);
 });
 
-// --- filterMailboxes ---------------------------------------------------------
+// --- mailboxDisplayName ------------------------------------------------------
 
-function makeMailbox(overrides: Partial<MailboxAccount> = {}): MailboxAccount {
+function makeMailbox(overrides: Partial<Mailbox> = {}): Mailbox {
   return {
     mailbox_id: "mb-1",
-    display_name: "Chris Beaman",
+    provider: "google",
     email: "chris@astronomic.io",
-    provider: "google_workspace",
-    deliverability_status: "unknown",
-    deliverability_score: null,
-    campaign_count: 0,
-    emails_sent_today: 0,
-    daily_send_limit: null,
-    queue_count: 0,
-    connected_at: null,
+    display_name: "Chris Beaman",
+    status: "connected",
+    google_user_id: "google-sub-1",
+    granted_scopes: ["openid", "email", "profile"],
+    connected_at: "2026-08-19T00:00:00Z",
+    updated_at: "2026-08-19T00:00:00Z",
+    disconnected_at: null,
     ...overrides,
   };
 }
+
+test("mailboxDisplayName uses the Google display name when present", () => {
+  assert.equal(mailboxDisplayName(makeMailbox({ display_name: "Chris Beaman" })), "Chris Beaman");
+});
+
+test("mailboxDisplayName falls back to the email when there is no display name", () => {
+  assert.equal(mailboxDisplayName(makeMailbox({ display_name: null, email: "chris@astronomic.io" })), "chris@astronomic.io");
+});
+
+test("mailboxDisplayName falls back to the email for an empty-string display name", () => {
+  assert.equal(mailboxDisplayName(makeMailbox({ display_name: "", email: "chris@astronomic.io" })), "chris@astronomic.io");
+});
+
+// --- filterMailboxes ---------------------------------------------------------
 
 test("filterMailboxes with an empty query returns every mailbox unchanged", () => {
   const mailboxes = [makeMailbox(), makeMailbox({ mailbox_id: "mb-2", display_name: "Karla Alvarez" })];
@@ -101,6 +108,11 @@ test("filterMailboxes matches by email, case-insensitively", () => {
   assert.equal(filterMailboxes(mailboxes, "ASTRONOMIC.IO").length, 1);
 });
 
+test("filterMailboxes matches a null-display-name mailbox by its email fallback", () => {
+  const mailboxes = [makeMailbox({ display_name: null, email: "karla@astronomic.io" })];
+  assert.equal(filterMailboxes(mailboxes, "karla").length, 1);
+});
+
 test("filterMailboxes excludes non-matching rows", () => {
   const mailboxes = [makeMailbox({ display_name: "Karla Alvarez", email: "karla@astronomic.io" })];
   assert.equal(filterMailboxes(mailboxes, "brendan").length, 0);
@@ -110,25 +122,21 @@ test("filterMailboxes against an empty list always returns an empty list", () =>
   assert.deepEqual(filterMailboxes([], "anything"), []);
 });
 
-// --- Labels / badges -- neutral state, no fabricated score -----------------
+// --- Labels / badges ---------------------------------------------------------
 
 test("providerLabel renders Google Workspace for the only real V1 provider", () => {
-  assert.equal(providerLabel("google_workspace"), "Google Workspace");
+  assert.equal(providerLabel("google"), "Google Workspace");
 });
 
-test("deliverabilityLabel shows a neutral dash for 'unknown', not a fake score", () => {
-  assert.equal(deliverabilityLabel("unknown"), "—");
+test("mailboxStatusLabel covers every real status", () => {
+  assert.equal(mailboxStatusLabel("connected"), "Connected");
+  assert.equal(mailboxStatusLabel("needs_reauth"), "Needs Reauthorization");
+  assert.equal(mailboxStatusLabel("disconnected"), "Disconnected");
 });
 
-test("deliverabilityLabel has real labels ready for when a metric exists", () => {
-  assert.equal(deliverabilityLabel("good"), "Good");
-  assert.equal(deliverabilityLabel("warning"), "Warning");
-  assert.equal(deliverabilityLabel("poor"), "Poor");
-});
-
-test("deliverabilityBadgeClass returns a non-empty class for every status", () => {
-  for (const status of ["good", "warning", "poor", "unknown"] as const) {
-    assert.ok(deliverabilityBadgeClass(status).length > 0);
+test("mailboxStatusBadgeClass returns a non-empty class for every status", () => {
+  for (const status of ["connected", "needs_reauth", "disconnected"] as const) {
+    assert.ok(mailboxStatusBadgeClass(status).length > 0);
   }
 });
 

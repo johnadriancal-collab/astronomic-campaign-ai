@@ -7,3 +7,4 @@ pydantic-settings>=2.3.0
 loguru>=0.7.2
 aiosqlite>=0.20.0
 python-multipart>=0.0.9
+cryptography>=42.0.0

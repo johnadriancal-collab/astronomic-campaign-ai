@@ -1,49 +1,24 @@
-// Astronomic Mail sending-inbox (mailbox) types and pure helpers.
+// Astronomic Mail sending-inbox (mailbox) display helpers -- pure
+// formatting/labeling logic kept separate from page components, same split
+// as lib/mail.ts and lib/email-intake.ts.
 //
-// IMPORTANT -- this module is deliberately backend-free. There is no
-// MailboxAccount model, store, or API route anywhere in this app yet (see
-// app/models/mail.py's own docstring: "MailboxConfig / Mailbox -- no real
-// mailbox exists until Phase 2 (OAuth)"). MAILBOX_ACCOUNTS below is a
-// literal empty array, not a fetch result -- the Emails page renders
-// straight from it, so there is nothing to "fabricate": zero real mailboxes
-// exist, so this shows zero rows, honestly.
-//
-// This module exists now so that (a) the Emails page has a stable shape to
-// render against today, and (b) Phase 2 (Gmail OAuth) can introduce a real
-// backend model/endpoint and swap MAILBOX_ACCOUNTS for a real fetch without
-// changing anything about the table, search, or column rendering below it.
+// `Mailbox` (the real, backend-connected type) lives in lib/api.ts -- this
+// module only formats/derives display values from it. Deliverability
+// Index, Campaigns, Emails Sent Today, and Queue have NO backing field on
+// Mailbox at all (no deliverability engine, no campaign<->mailbox
+// assignment model, no sending engine, no send queue exist yet) -- the
+// Emails page renders these as literal neutral values, not read off any
+// mailbox field, so there is nothing here to fabricate.
 
-export type MailboxProvider = "google_workspace";
+import type { Mailbox, MailboxProvider, MailboxStatus } from "@/lib/api";
 
-// Only "unknown" is ever real right now -- see DELIVERABILITY_TOOLTIP.
-// The other three are reserved for whatever real signal Phase 2+ builds
-// (a simple tier, or a numeric score -- deliverability_score exists on
-// MailboxAccount for exactly that, independent of this status tier).
-export type DeliverabilityStatus = "good" | "warning" | "poor" | "unknown";
+export const DELIVERABILITY_TOOLTIP = "Deliverability monitoring will be added later.";
 
-export interface MailboxAccount {
-  mailbox_id: string;
-  display_name: string;
-  email: string;
-  provider: MailboxProvider;
-  deliverability_status: DeliverabilityStatus;
-  deliverability_score: number | null;
-  campaign_count: number;
-  emails_sent_today: number;
-  daily_send_limit: number | null;
-  queue_count: number;
-  connected_at: string | null;
-}
-
-// No mailbox connection exists yet -- always empty until Phase 2 (Gmail
-// OAuth) introduces a real backend model and this is replaced by a fetch.
-export const MAILBOX_ACCOUNTS: MailboxAccount[] = [];
-
-// The Emails table's exact, approved column set (Campaign Manager
-// Integration Phase follow-up) -- deliberately excludes Signature, Custom
-// Domain, and Smart Sending Groups, which QuickMail's Email Accounts view
-// has but this product does not want. Exported so the page renders its
-// headers directly from this array and a test can assert it never drifts.
+// The Emails table's exact, approved column set -- deliberately excludes
+// Signature, Custom Domain, and Smart Sending Groups, which QuickMail's
+// Email Accounts view has but this product does not want. Exported so the
+// page renders its headers directly from this array and a test can assert
+// it never drifts.
 export const EMAIL_ACCOUNT_TABLE_COLUMNS = [
   "Name",
   "Email",
@@ -55,44 +30,42 @@ export const EMAIL_ACCOUNT_TABLE_COLUMNS = [
   "Queue",
 ] as const;
 
-export const DELIVERABILITY_TOOLTIP = "Deliverability monitoring will be added later.";
-
 export function providerLabel(provider: MailboxProvider): string {
   switch (provider) {
-    case "google_workspace":
+    case "google":
       return "Google Workspace";
-  }
-}
-
-export function deliverabilityLabel(status: DeliverabilityStatus): string {
-  switch (status) {
-    case "good":
-      return "Good";
-    case "warning":
-      return "Warning";
-    case "poor":
-      return "Poor";
-    case "unknown":
-      return "—";
   }
 }
 
 // Same "bold color for the state that matters" convention as
 // mailCampaignStatusBadgeClass (lib/mail.ts) / statusBadgeClass
-// (lib/email-intake.ts). "unknown" -- the only state that exists in
-// practice today -- deliberately gets the same neutral treatment as every
-// other not-yet-real metric in this app (e.g. daily_capacity_estimate).
-export function deliverabilityBadgeClass(status: DeliverabilityStatus): string {
+// (lib/email-intake.ts).
+export function mailboxStatusLabel(status: MailboxStatus): string {
   switch (status) {
-    case "good":
+    case "connected":
+      return "Connected";
+    case "needs_reauth":
+      return "Needs Reauthorization";
+    case "disconnected":
+      return "Disconnected";
+  }
+}
+
+export function mailboxStatusBadgeClass(status: MailboxStatus): string {
+  switch (status) {
+    case "connected":
       return "bg-emerald-100 text-emerald-800";
-    case "warning":
+    case "needs_reauth":
       return "bg-amber-100 text-amber-800";
-    case "poor":
-      return "bg-destructive/10 text-destructive";
-    case "unknown":
+    case "disconnected":
       return "bg-secondary text-muted-foreground";
   }
+}
+
+// Name column: Google account display name where available, falling back
+// safely to the email address if Google returned no name.
+export function mailboxDisplayName(mailbox: Mailbox): string {
+  return mailbox.display_name || mailbox.email;
 }
 
 // Derives a display TLD from an email's domain without storing it
@@ -109,20 +82,21 @@ export function deriveTld(email: string): string | null {
   return parts[parts.length - 1].toLowerCase();
 }
 
-// Filters by display name OR email, case-insensitive -- the only two
+// Filters by display name (falling back to email, matching what's actually
+// rendered in the Name column) OR email, case-insensitive -- the only two
 // fields the Emails page's search bar is specified to match against.
-export function filterMailboxes(mailboxes: MailboxAccount[], query: string): MailboxAccount[] {
+export function filterMailboxes(mailboxes: Mailbox[], query: string): Mailbox[] {
   const q = query.trim().toLowerCase();
   if (!q) return mailboxes;
   return mailboxes.filter(
-    (m) => m.display_name.toLowerCase().includes(q) || m.email.toLowerCase().includes(q)
+    (m) => mailboxDisplayName(m).toLowerCase().includes(q) || m.email.toLowerCase().includes(q)
   );
 }
 
-// "24 / 50"-style future display -- returns null (render a neutral dash)
-// when there's no real limit to compare against yet, exactly like
-// deliverability_score. Kept here, not inlined in the page, so Phase 2 can
-// wire real numbers through this one function.
+// "24 / 50"-style future display -- returns a plain count (never fabricates
+// a limit) when there's no real limit to compare against yet. Kept here,
+// not inlined in the page, so a future sending engine can wire real numbers
+// through this one function.
 export function formatSendUsage(sent: number, limit: number | null): string {
   return limit === null ? String(sent) : `${sent} / ${limit}`;
 }

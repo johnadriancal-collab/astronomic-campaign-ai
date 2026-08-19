@@ -1279,3 +1279,48 @@ export function unsuppressMailEmail(email: string): Promise<MailSuppression> {
 export function getMailSuppressionStatus(email: string): Promise<MailContactSuppressionStatus> {
   return request<MailContactSuppressionStatus>(`/mail/suppressions/${encodeURIComponent(email)}`);
 }
+
+// --- Astronomic Mail Phase 2 -- Google Workspace Mailbox Connection -------
+//
+// CONNECTION ONLY -- see app/api/mailboxes.py's module docstring. No route
+// here can send an email, queue one, or activate a campaign. `Mailbox` is
+// the PUBLIC-safe shape returned by every one of these calls -- there is no
+// refresh/access token field anywhere in this type, matching the backend's
+// own Mailbox/MailboxCredential split (app/models/mailbox.py).
+
+export type MailboxProvider = "google";
+export type MailboxStatus = "connected" | "needs_reauth" | "disconnected";
+
+export interface Mailbox {
+  mailbox_id: string;
+  provider: MailboxProvider;
+  email: string;
+  display_name: string | null;
+  status: MailboxStatus;
+  google_user_id: string | null;
+  granted_scopes: string[];
+  connected_at: string;
+  updated_at: string;
+  disconnected_at: string | null;
+}
+
+export function listMailboxes(): Promise<Mailbox[]> {
+  return request<Mailbox[]>("/mailboxes");
+}
+
+/**
+ * Returns the URL to navigate the browser to -- callers must do a full
+ * top-level navigation (`window.location.href = authorize_url`), not treat
+ * this like a normal API call whose result renders in place. Google's own
+ * redirect back after consent lands on the BACKEND's own
+ * /mailboxes/google/callback directly (bypassing this app's /backend/*
+ * rewrite proxy entirely, since that's a top-level browser navigation
+ * Google itself issues), which then 302s the browser to /manager/emails.
+ */
+export function startGoogleMailboxConnect(): Promise<{ authorize_url: string }> {
+  return request<{ authorize_url: string }>("/mailboxes/google/start");
+}
+
+export function disconnectMailbox(mailboxId: string): Promise<Mailbox> {
+  return post<Mailbox>(`/mailboxes/${mailboxId}/disconnect`, {});
+}

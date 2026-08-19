@@ -53,6 +53,7 @@ from app.api.email_intake import crm_router as email_intake_crm_router
 from app.api.email_intake import sync_router as email_intake_sync_router
 from app.api.leads import router as leads_router
 from app.api.mail import router as mail_router
+from app.api.mailboxes import router as mailboxes_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.repositories.sqlite_activity_event_store import SQLiteActivityEventStore
@@ -74,6 +75,9 @@ from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
 from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
+from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
+from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
+from app.google.oauth_client import GoogleOAuthClient
 from app.services.activity_log_service import ActivityLogService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -86,6 +90,7 @@ from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_suppression_service import MailSuppressionService
+from app.services.mailbox_service import MailboxService
 
 
 @asynccontextmanager
@@ -112,6 +117,8 @@ async def lifespan(app: FastAPI):
     mail_sequence_step_store = SQLiteMailSequenceStepStore(settings.database_path)
     mail_enrollment_store = SQLiteMailEnrollmentStore(settings.database_path)
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
+    mailbox_store = SQLiteMailboxStore(settings.database_path)
+    mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -131,6 +138,8 @@ async def lifespan(app: FastAPI):
     await mail_sequence_step_store.connect()
     await mail_enrollment_store.connect()
     await mail_suppression_store.connect()
+    await mailbox_store.connect()
+    await mailbox_credential_store.connect()
 
     activity_log_service = ActivityLogService(store=activity_event_store)
     app.state.activity_log_service = activity_log_service
@@ -210,6 +219,18 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
     )
 
+    # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). CSRF
+    # `state` lives only in MailboxService's in-memory dict, not a store --
+    # see that class's docstring. GoogleOAuthClient makes real network calls
+    # to Google only when GOOGLE_OAUTH_CLIENT_ID/SECRET/REDIRECT_URI are
+    # configured; every route that needs them returns a clear 503 otherwise
+    # (see app/api/mailboxes.py), never crashing app startup.
+    app.state.mailbox_service = MailboxService(
+        mailbox_store=mailbox_store,
+        credential_store=mailbox_credential_store,
+        oauth_client=GoogleOAuthClient(),
+    )
+
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -230,6 +251,8 @@ async def lifespan(app: FastAPI):
     await mail_sequence_step_store.close()
     await mail_enrollment_store.close()
     await mail_suppression_store.close()
+    await mailbox_store.close()
+    await mailbox_credential_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
@@ -243,6 +266,7 @@ app.include_router(activity_router)
 app.include_router(email_intake_sync_router)
 app.include_router(email_intake_crm_router)
 app.include_router(mail_router)
+app.include_router(mailboxes_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
