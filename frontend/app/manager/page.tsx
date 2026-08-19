@@ -11,10 +11,10 @@ const SECTIONS = [
     description: "Every campaign built via Campaign Builder, with status and progress at a glance.",
   },
   {
-    href: "/manager/sequences",
+    href: "/manager/emails",
     icon: Mail,
-    title: "Sequences / Emails",
-    description: "The email sequences deployed to Apollo for each campaign.",
+    title: "Emails",
+    description: "Sending inboxes connected to Astronomic Mail campaigns.",
   },
   {
     href: "/manager/leads",
@@ -38,7 +38,7 @@ const SECTIONS = [
     href: "/manager/settings",
     icon: Settings,
     title: "Settings",
-    description: "Connected mailboxes, sending limits, and workspace preferences.",
+    description: "Workspace-level preferences.",
   },
 ];
 

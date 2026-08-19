@@ -1,38 +1,34 @@
-import { Inbox } from "lucide-react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import Link from "next/link";
+import { Mail, Settings } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { buttonVariants } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 
-// Relocated from the old /crm/mail/mailboxes page as part of the Campaign
-// Manager Integration Phase -- Mailboxes now lives under Campaign Manager
-// Settings (navigation/product organization only). Still deliberately
-// static -- no backend model or API call exists for Mailboxes yet (Phase 2).
-// No fake "connected" mailboxes are ever shown here, and no Google
-// credentials of any kind are involved.
+// Sending inboxes moved to their own canonical home (Campaign Manager ->
+// Emails, see app/manager/emails/page.tsx) -- Settings no longer owns any
+// mailbox UI of its own, so there is only ever one place to manage inboxes.
+// This page is a plain "not built yet" shell (matching ManagerPlaceholder's
+// pattern) for whatever workspace-level preferences land here later, plus a
+// pointer to where mailbox management actually lives now.
 export default function SettingsPage() {
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
-      <div className="mb-6">
-        <h1 className="mb-2 font-serif text-2xl font-medium tracking-tight">Settings</h1>
-        <p className="text-sm text-muted-foreground">Astronomic Mail -- sending inbox connections.</p>
+    <div className="mx-auto max-w-2xl px-6 py-20 text-center">
+      <div className="mx-auto mb-5 flex h-12 w-12 items-center justify-center rounded-2xl bg-secondary/60 text-muted-foreground">
+        <Settings className="h-5 w-5" />
       </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-sm">
-            <Inbox className="h-4 w-4" />
-            No mailboxes connected
-          </CardTitle>
-        </CardHeader>
-        <CardContent>
-          <Alert>
-            <AlertTitle>Mailbox connections will be configured in Phase 2.</AlertTitle>
-            <AlertDescription>
-              This phase (Foundation) has no Google OAuth connection, no Gmail credentials, and no way to actually
-              send an email. Campaigns can be drafted, reviewed, and marked ready without a connected mailbox.
-            </AlertDescription>
-          </Alert>
-        </CardContent>
-      </Card>
+      <div className="mb-3 flex items-center justify-center gap-2">
+        <h1 className="font-serif text-xl font-medium tracking-tight">Settings</h1>
+        <Badge variant="outline" className="rounded-full font-normal text-muted-foreground">
+          Coming soon
+        </Badge>
+      </div>
+      <p className="text-sm text-muted-foreground">
+        Workspace-level preferences will be configured here. Sending inboxes are managed under Emails.
+      </p>
+      <Link href="/manager/emails" className={cn(buttonVariants({ variant: "outline", size: "sm" }), "mt-4 gap-1.5")}>
+        <Mail className="h-4 w-4" />
+        Go to Emails
+      </Link>
     </div>
   );
 }

@@ -40,7 +40,22 @@ const nextConfig: NextConfig = {
       },
       {
         source: "/crm/mail/mailboxes",
-        destination: "/manager/settings",
+        destination: "/manager/emails",
+        permanent: false,
+      },
+      // Emails Inbox Management Phase: the old "Sequences / Emails" nav
+      // item/placeholder is fully replaced by the real Emails page (see
+      // app/manager/emails/page.tsx) -- there is no per-sequence detail to
+      // send an old /manager/sequences/:id link to, so both collapse to the
+      // same canonical destination rather than keeping a second, dead page.
+      {
+        source: "/manager/sequences",
+        destination: "/manager/emails",
+        permanent: false,
+      },
+      {
+        source: "/manager/sequences/:id",
+        destination: "/manager/emails",
         permanent: false,
       },
     ];

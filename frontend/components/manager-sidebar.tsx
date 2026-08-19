@@ -12,21 +12,28 @@ import {
   Plus,
   Settings,
   Sparkles,
+  type LucideIcon,
   Users,
 } from "lucide-react";
 import { buttonVariants } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
+import { MANAGER_NAV_SECTIONS } from "@/lib/manager-nav";
 import { cn } from "@/lib/utils";
 
-const SECTIONS = [
-  { href: "/manager", label: "Overview", icon: LayoutDashboard, exact: true },
-  { href: "/manager/campaigns", label: "Campaigns", icon: Megaphone },
-  { href: "/manager/sequences", label: "Sequences / Emails", icon: Mail },
-  { href: "/manager/leads", label: "Leads", icon: Users },
-  { href: "/manager/inbox", label: "Inbox", icon: Inbox },
-  { href: "/manager/analytics", label: "Analytics", icon: ChartColumn },
-  { href: "/manager/settings", label: "Settings", icon: Settings },
-];
+const SECTION_ICONS: Record<string, LucideIcon> = {
+  "/manager": LayoutDashboard,
+  "/manager/campaigns": Megaphone,
+  "/manager/emails": Mail,
+  "/manager/leads": Users,
+  "/manager/inbox": Inbox,
+  "/manager/analytics": ChartColumn,
+  "/manager/settings": Settings,
+};
+
+const SECTIONS = MANAGER_NAV_SECTIONS.map((section) => ({
+  ...section,
+  icon: SECTION_ICONS[section.href],
+}));
 
 function isActive(pathname: string, href: string, exact?: boolean) {
   return exact ? pathname === href : pathname === href || pathname.startsWith(`${href}/`);
