@@ -144,6 +144,30 @@ class MailboxService:
         if existing is None:
             existing = await self.mailbox_store.get_by_email(email)
 
+        # Encrypt BEFORE writing anything to either store. If
+        # MAILBOX_TOKEN_ENCRYPTION_KEY is missing/invalid,
+        # encrypt_refresh_token() raises TokenEncryptionNotConfiguredError
+        # right here -- before any Mailbox row is created or marked
+        # connected. This ordering is deliberate and load-bearing: a
+        # mailbox must never be left showing status=CONNECTED while no
+        # usable credential is actually stored for it. (An earlier version
+        # of this method persisted the Mailbox first and encrypted after --
+        # a misconfigured key then left a "Connected"-looking mailbox with
+        # no stored credential at all, while the user was shown an error.
+        # See tests/test_mailbox_service.py's
+        # test_encryption_failure_leaves_no_partially_connected_mailbox*
+        # for the regression coverage.)
+        #
+        # refresh_token is only ever present on the FIRST consent for a
+        # given grant (or whenever Google re-issues one, which
+        # build_authorize_url()'s prompt=consent always requests) -- if
+        # Google ever omits it, keep whatever credential we already have
+        # rather than wiping a working one, and skip encryption entirely
+        # (nothing new to encrypt).
+        encrypted_refresh_token: str | None = None
+        if refresh_token:
+            encrypted_refresh_token = encrypt_refresh_token(refresh_token)
+
         if existing is not None:
             mailbox = existing.model_copy(
                 update={
@@ -171,23 +195,19 @@ class MailboxService:
             )
             await self.mailbox_store.create(mailbox)
 
-        # refresh_token is only ever present on the FIRST consent for a
-        # given grant (or whenever Google re-issues one, which
-        # build_authorize_url()'s prompt=consent always requests) -- if
-        # Google ever omits it, keep whatever credential we already have
-        # rather than wiping a working one.
-        if refresh_token:
-            encrypted = encrypt_refresh_token(refresh_token)
+        if encrypted_refresh_token is not None:
             existing_credential = await self.credential_store.get(mailbox.mailbox_id)
             if existing_credential is not None:
                 await self.credential_store.save(
-                    existing_credential.model_copy(update={"encrypted_refresh_token": encrypted, "updated_at": now})
+                    existing_credential.model_copy(
+                        update={"encrypted_refresh_token": encrypted_refresh_token, "updated_at": now}
+                    )
                 )
             else:
                 await self.credential_store.create(
                     MailboxCredential(
                         mailbox_id=mailbox.mailbox_id,
-                        encrypted_refresh_token=encrypted,
+                        encrypted_refresh_token=encrypted_refresh_token,
                         created_at=now,
                         updated_at=now,
                     )

@@ -14,7 +14,7 @@ import pytest
 from cryptography.fernet import Fernet
 
 from app.google.oauth_client import GoogleOAuthNotConfiguredError, GoogleTokenExchangeError, GoogleUserinfoError
-from app.models.mailbox import MailboxStatus
+from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.mailbox_credential_store import MemoryMailboxCredentialStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services import token_encryption
@@ -406,3 +406,81 @@ async def test_begin_oauth_propagates_not_configured_error():
 
     with pytest.raises(GoogleOAuthNotConfiguredError):
         service.begin_google_oauth()
+
+
+# --- credential-encryption failure never leaves a "connected" mailbox with --
+# --- no stored credential (production incident regression) -----------------
+#
+# Root cause of the incident this guards against: MAILBOX_TOKEN_ENCRYPTION_KEY
+# was set to an invalid value in production. handle_google_callback() used to
+# create/save the Mailbox as CONNECTED *before* attempting to encrypt the
+# refresh token -- so the encryption failure (raised after that write) left a
+# real mailbox row showing "Connected" with no credential ever stored, while
+# the user was redirected to an error page. These tests pin the fixed
+# ordering: encryption happens first, so a failure here writes nothing.
+
+
+async def test_encryption_failure_on_new_mailbox_creates_no_row(service, monkeypatch):
+    monkeypatch.setattr(token_encryption.settings, "mailbox_token_encryption_key", None)
+    state = service.begin_google_oauth().split("state=")[1]
+
+    from app.services.token_encryption import TokenEncryptionNotConfiguredError
+
+    with pytest.raises(TokenEncryptionNotConfiguredError):
+        await service.handle_google_callback(code="abc", state=state, error=None)
+
+    assert await service.list_mailboxes() == []
+
+
+async def test_encryption_failure_on_reconnect_leaves_existing_mailbox_untouched(service, monkeypatch):
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    pre_existing = Mailbox(
+        mailbox_id="mb-victoria",
+        provider=MailboxProvider.GOOGLE,
+        email="victoria@astronomicconnect.com",
+        display_name="Victoria Bennett",
+        status=MailboxStatus.NEEDS_REAUTH,
+        google_user_id="google-sub-1",
+        connected_at=now,
+        updated_at=now,
+    )
+    await service.mailbox_store.create(pre_existing)
+
+    monkeypatch.setattr(token_encryption.settings, "mailbox_token_encryption_key", None)
+    state = service.begin_google_oauth().split("state=")[1]
+
+    from app.services.token_encryption import TokenEncryptionNotConfiguredError
+
+    with pytest.raises(TokenEncryptionNotConfiguredError):
+        await service.handle_google_callback(code="abc", state=state, error=None)
+
+    unchanged = await service.mailbox_store.get("mb-victoria")
+    assert unchanged == pre_existing
+    assert unchanged.status == MailboxStatus.NEEDS_REAUTH  # never flipped to CONNECTED
+
+
+async def test_retry_after_fixing_the_key_succeeds_with_no_duplicate_row(service, monkeypatch):
+    """The exact recovery path for the production incident: once the key is
+    fixed, clicking Connect Email again must update the SAME mailbox (by
+    google_user_id) with a real stored credential -- not create a second row."""
+    monkeypatch.setattr(token_encryption.settings, "mailbox_token_encryption_key", None)
+    state1 = service.begin_google_oauth().split("state=")[1]
+    from app.services.token_encryption import TokenEncryptionNotConfiguredError
+
+    with pytest.raises(TokenEncryptionNotConfiguredError):
+        await service.handle_google_callback(code="abc", state=state1, error=None)
+    assert await service.list_mailboxes() == []
+
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setattr(token_encryption.settings, "mailbox_token_encryption_key", Fernet.generate_key().decode())
+    state2 = service.begin_google_oauth().split("state=")[1]
+    mailbox = await service.handle_google_callback(code="def", state=state2, error=None)
+
+    all_mailboxes = await service.list_mailboxes()
+    assert len(all_mailboxes) == 1
+    assert mailbox.status == MailboxStatus.CONNECTED
+    credential = await service.credential_store.get(mailbox.mailbox_id)
+    assert credential is not None
