@@ -86,5 +86,27 @@ class Settings(BaseSettings):
     frontend_origin: str | None = None
     mailbox_token_encryption_key: str | None = None
 
+    # Internal Hub login (single shared account -- see app/services/auth_service.py's
+    # module docstring for why this phase deliberately has no per-user
+    # accounts/signup/roles). Both None until configured; POST /auth/login
+    # returns a clear 503 rather than ever accepting a login when unset, so
+    # the app fails CLOSED (nobody can log in) rather than open.
+    #
+    # auth_email: the one allowed login email, compared case-insensitively
+    # (see app.models.crm.normalize_email).
+    #
+    # auth_password_hash: NEVER the plaintext password -- see
+    # app/services/password_hashing.py's module docstring for the exact,
+    # standard-library-only command that generates this value. Set the
+    # ENTIRE printed string (starting with "pbkdf2_sha256$") as this value.
+    #
+    # cookie_secure: whether the session cookie is marked `Secure` (HTTPS
+    # only). Defaults True (production-safe); only reason to ever set this
+    # False is testing the login flow in a real browser over plain
+    # http://localhost, where a Secure cookie would silently never be sent.
+    auth_email: str | None = None
+    auth_password_hash: str | None = None
+    cookie_secure: bool = True
+
 
 settings = Settings()

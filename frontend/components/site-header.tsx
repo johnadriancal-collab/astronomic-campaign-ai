@@ -3,6 +3,9 @@
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { LogOut } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { logout } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 const TOP_LEVEL_AREAS = [
@@ -18,6 +21,18 @@ function isAreaActive(pathname: string, href: string) {
 
 export function SiteHeader() {
   const pathname = usePathname();
+
+  // Login itself never shows the authenticated shell's nav/logout -- there
+  // is no session to log out of, and no protected area to navigate to yet.
+  const isLoginPage = pathname === "/login";
+
+  async function handleLogout() {
+    try {
+      await logout();
+    } finally {
+      window.location.href = "/login";
+    }
+  }
 
   return (
     <header className="sticky top-0 z-40 border-b border-border bg-background/96 backdrop-blur-md">
@@ -46,23 +61,31 @@ export function SiteHeader() {
             />
           </div>
         </Link>
-        <nav className="hidden items-center gap-6 sm:flex">
-          {TOP_LEVEL_AREAS.map((area) => {
-            const active = isAreaActive(pathname, area.href);
-            return (
-              <Link
-                key={area.href}
-                href={area.href}
-                className={cn(
-                  "border-b-2 border-transparent py-1 text-sm font-medium transition-colors",
-                  active ? "border-primary text-foreground" : "text-muted-foreground hover:text-foreground"
-                )}
-              >
-                {area.label}
-              </Link>
-            );
-          })}
-        </nav>
+        {!isLoginPage && (
+          <div className="flex items-center gap-4">
+            <nav className="hidden items-center gap-6 sm:flex">
+              {TOP_LEVEL_AREAS.map((area) => {
+                const active = isAreaActive(pathname, area.href);
+                return (
+                  <Link
+                    key={area.href}
+                    href={area.href}
+                    className={cn(
+                      "border-b-2 border-transparent py-1 text-sm font-medium transition-colors",
+                      active ? "border-primary text-foreground" : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {area.label}
+                  </Link>
+                );
+              })}
+            </nav>
+            <Button variant="ghost" size="sm" className="gap-1.5 text-muted-foreground" onClick={handleLogout}>
+              <LogOut className="h-3.5 w-3.5" />
+              Log out
+            </Button>
+          </div>
+        )}
       </div>
     </header>
   );

@@ -3,6 +3,17 @@ import type { NextConfig } from "next";
 const BACKEND_ORIGIN = process.env.BACKEND_ORIGIN ?? "http://localhost:8000";
 
 const nextConfig: NextConfig = {
+  // Defense in depth ONLY, alongside app/layout.tsx's `robots` metadata --
+  // the real security boundary is the login itself (middleware.ts /
+  // session_auth_middleware.py), not this header.
+  async headers() {
+    return [
+      {
+        source: "/:path*",
+        headers: [{ key: "X-Robots-Tag", value: "noindex, nofollow" }],
+      },
+    ];
+  },
   async rewrites() {
     return [
       {

@@ -46,6 +46,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.activity import router as activity_router
 from app.api.astro import router as astro_router
+from app.api.auth import router as auth_router
 from app.api.campaign import router as campaign_router
 from app.api.campaign_manager import router as campaign_manager_router
 from app.api.crm import router as crm_router
@@ -57,6 +58,7 @@ from app.api.mailboxes import router as mailboxes_router
 from app.api.sync import router as sync_router
 from app.config import settings
 from app.repositories.sqlite_activity_event_store import SQLiteActivityEventStore
+from app.repositories.sqlite_auth_session_store import SQLiteAuthSessionStore
 from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
 from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
 from app.repositories.sqlite_crm_contact_list_member_store import SQLiteCrmContactListMemberStore
@@ -77,8 +79,10 @@ from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceS
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
 from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
+from app.session_auth_middleware import enforce_session_auth
 from app.google.oauth_client import GoogleOAuthClient
 from app.services.activity_log_service import ActivityLogService
+from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
 from app.services.crm_import_service import CrmImportService
@@ -119,6 +123,7 @@ async def lifespan(app: FastAPI):
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
+    auth_session_store = SQLiteAuthSessionStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -140,6 +145,7 @@ async def lifespan(app: FastAPI):
     await mail_suppression_store.connect()
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
+    await auth_session_store.connect()
 
     activity_log_service = ActivityLogService(store=activity_event_store)
     app.state.activity_log_service = activity_log_service
@@ -231,6 +237,12 @@ async def lifespan(app: FastAPI):
         oauth_client=GoogleOAuthClient(),
     )
 
+    # Internal Hub login -- a single shared account, no signup/roles/teams
+    # (see app/services/auth_service.py's module docstring). AUTH_EMAIL/
+    # AUTH_PASSWORD_HASH unset means POST /auth/login always 503s -- the
+    # app fails CLOSED, never open, when unconfigured.
+    app.state.auth_service = AuthService(session_store=auth_session_store)
+
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -253,9 +265,12 @@ async def lifespan(app: FastAPI):
     await mail_suppression_store.close()
     await mailbox_store.close()
     await mailbox_credential_store.close()
+    await auth_session_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
+app.middleware("http")(enforce_session_auth)
+app.include_router(auth_router)
 app.include_router(campaign_router)
 app.include_router(campaign_manager_router)
 app.include_router(leads_router)

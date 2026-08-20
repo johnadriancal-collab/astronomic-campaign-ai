@@ -1324,3 +1324,27 @@ export function startGoogleMailboxConnect(): Promise<{ authorize_url: string }> 
 export function disconnectMailbox(mailboxId: string): Promise<Mailbox> {
   return post<Mailbox>(`/mailboxes/${mailboxId}/disconnect`, {});
 }
+
+// --- Internal Hub login ------------------------------------------------
+//
+// A single shared email+password account guards the whole application --
+// see app/services/auth_service.py's module docstring. The session itself
+// lives entirely in an HTTP-only cookie the backend sets/clears; nothing
+// here ever reads, stores, or exposes it -- these calls only report
+// whether login/logout succeeded.
+
+export interface AuthStatus {
+  authenticated: boolean;
+}
+
+export function login(email: string, password: string): Promise<AuthStatus> {
+  return post<AuthStatus>("/auth/login", { email, password });
+}
+
+export function logout(): Promise<AuthStatus> {
+  return post<AuthStatus>("/auth/logout", {});
+}
+
+export function checkSession(): Promise<AuthStatus> {
+  return request<AuthStatus>("/auth/session");
+}

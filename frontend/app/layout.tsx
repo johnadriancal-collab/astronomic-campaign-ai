@@ -28,6 +28,11 @@ const plexMono = IBM_Plex_Mono({
 export const metadata: Metadata = {
   title: "Astronomic Campaign AI",
   description: "Describe an outreach campaign in plain English. Claude drafts it, Apollo builds it.",
+  // Defense in depth ONLY -- this is an internal tool with private company/
+  // contact data behind a real login (see middleware.ts / session_auth_middleware.py),
+  // not a substitute for authentication. Search engines should never index
+  // or crawl any page here regardless of whether a crawler respects this.
+  robots: { index: false, follow: false, nocache: true },
 };
 
 export default function RootLayout({
