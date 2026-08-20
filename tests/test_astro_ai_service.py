@@ -37,12 +37,11 @@ class FakeClaudeClient:
         self.should_raise: Exception | None = None
         self.last_call: dict | None = None
 
-    async def generate_chat_reply(self, system_prompt, messages, max_tokens, temperature=0.5, timeout=30.0):
+    async def generate_chat_reply(self, system_prompt, messages, max_tokens, timeout=30.0):
         self.last_call = {
             "system_prompt": system_prompt,
             "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": temperature,
             "timeout": timeout,
         }
         if self.should_raise:

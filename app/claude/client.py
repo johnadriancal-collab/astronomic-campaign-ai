@@ -141,7 +141,6 @@ class ClaudeClient:
         system_prompt: str,
         messages: list[dict],
         max_tokens: int,
-        temperature: float = 0.5,
         timeout: float = 30.0,
     ) -> tuple[str, dict]:
         """
@@ -152,6 +151,14 @@ class ClaudeClient:
         cleanly to the user immediately rather than silently spend up to
         3x the tokens/latency retrying, and retrying a 429 immediately
         would only make it worse.
+
+        Deliberately never sends `temperature`: confirmed directly against
+        Anthropic (2026-08-20 production investigation) that claude-sonnet-5
+        rejects it with a 400 invalid_request_error ("`temperature` is
+        deprecated for this model"), which is exactly what was causing
+        every real Astro AI chat request to fail. generate_json_with_usage
+        below is a separate code path (Campaign Builder, claude-sonnet-4-5)
+        with its own `temperature` -- unaffected by this.
 
         Raises one of ClaudeNotConfiguredError / ClaudeAuthenticationError /
         ClaudeRateLimitError / ClaudeTimeoutError / ClaudeProviderError --
@@ -179,7 +186,6 @@ class ClaudeClient:
                     json={
                         "model": self.model,
                         "max_tokens": max_tokens,
-                        "temperature": temperature,
                         "system": system_prompt,
                         "messages": messages,
                     },
