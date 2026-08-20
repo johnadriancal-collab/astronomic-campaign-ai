@@ -44,13 +44,6 @@ export function CrmSidebar() {
           Astro AI
         </Link>
         <Link
-          href="/"
-          className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
-        >
-          <Sparkles className="h-4 w-4" />
-          Campaign Builder
-        </Link>
-        <Link
           href="/manager"
           className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         >

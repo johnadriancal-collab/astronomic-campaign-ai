@@ -8,17 +8,17 @@ import { CreateMailCampaignModal } from "@/components/create-mail-campaign-modal
 import type { MailCampaign } from "@/lib/api";
 
 // Method-first fork for Campaign Manager's "Create Campaign". Apollo's own
-// creation workflow (the Claude prompt at "/") is untouched by this page --
-// choosing it just navigates there, no campaign-name field or other step is
-// introduced in front of it. Astronomic Mail opens the Create Campaign
-// modal (campaign-level sending-rule configuration) instead of the old
-// inline "name a campaign" mini-form.
+// creation workflow (the Claude prompt at /campaign-builder) is untouched
+// by this page -- choosing it just navigates there, no campaign-name field
+// or other step is introduced in front of it. Astronomic Mail opens the
+// Create Campaign modal (campaign-level sending-rule configuration)
+// instead of the old inline "name a campaign" mini-form.
 export default function NewCampaignPage() {
   const router = useRouter();
   const [mailModalOpen, setMailModalOpen] = useState(false);
 
   function chooseApollo() {
-    router.push("/");
+    router.push("/campaign-builder");
   }
 
   function handleMailCampaignCreated(campaign: MailCampaign) {
@@ -59,7 +59,7 @@ export default function NewCampaignPage() {
           <CardContent>
             <p className="text-sm text-muted-foreground">Use the existing Apollo campaign workflow.</p>
             <p className="mt-2 flex items-center gap-1 text-xs text-muted-foreground/70">
-              Continue to Astro <ArrowRight className="h-3 w-3" />
+              Continue to Apollo <ArrowRight className="h-3 w-3" />
             </p>
           </CardContent>
         </Card>

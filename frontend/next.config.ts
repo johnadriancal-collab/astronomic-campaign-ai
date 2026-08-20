@@ -24,6 +24,17 @@ const nextConfig: NextConfig = {
   },
   async redirects() {
     return [
+      // Astro AI Product Consolidation: Astro AI (/astro-ai) is now the
+      // Hub's only top-level AI entry point. The old Campaign Builder
+      // prompt page that used to live at "/" moved to /campaign-builder
+      // and is reached only via Campaign Manager's explicit
+      // "Create Campaign -> Apollo" choice -- it's no longer a standalone
+      // product, so root now points at Astro AI instead.
+      {
+        source: "/",
+        destination: "/astro-ai",
+        permanent: false,
+      },
       // Astro Search moved under the CRM layout so it keeps the sidebar
       // visible like every other CRM section (see app/crm/astro/page.tsx) --
       // this keeps old /astro links/bookmarks working without a second copy

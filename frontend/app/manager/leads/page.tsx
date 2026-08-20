@@ -87,7 +87,7 @@ export default function LeadsPage() {
               created — not merely from appearing in a search result.
             </p>
           </div>
-          <Link href="/" className={cn(buttonVariants({ size: "sm" }), "mt-1")}>
+          <Link href="/manager/campaigns/new" className={cn(buttonVariants({ size: "sm" }), "mt-1")}>
             Create a campaign
           </Link>
         </div>

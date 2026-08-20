@@ -26,7 +26,7 @@ export default function ResultsPage() {
 
   useEffect(() => {
     if (!campaign) {
-      router.replace("/");
+      router.replace("/campaign-builder");
     }
   }, [campaign, router]);
 
@@ -130,7 +130,7 @@ export default function ResultsPage() {
   return (
     <div className="mx-auto max-w-6xl px-6 py-10">
       <button
-        onClick={() => router.push("/")}
+        onClick={() => router.push("/campaign-builder")}
         className="mb-6 flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
         <ArrowLeft className="h-3.5 w-3.5" />

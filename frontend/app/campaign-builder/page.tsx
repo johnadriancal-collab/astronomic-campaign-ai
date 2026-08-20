@@ -9,9 +9,17 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { previewCampaign, ApiError } from "@/lib/api";
 import { useCampaignStore } from "@/lib/store";
 
+// Relocated from "/" -- this is Apollo's single-shot Claude plan-generation
+// prompt, reached only via Campaign Manager's "Create Campaign -> Apollo"
+// choice (see app/manager/campaigns/new/page.tsx), never as a top-level
+// nav item. Copy here deliberately avoids "Astro"/"Ask Astro" language so
+// it can't be mistaken for the separate, general-purpose Astro AI
+// assistant at /astro-ai -- that confusion (a user typing a plain question
+// here and getting an Apollo campaign back) is exactly what this move
+// fixes.
 const EXAMPLE_PROMPTS = ["Create a campaign", "Find investors", "Check a prospect", "Analyze campaign"];
 
-export default function Home() {
+export default function CampaignBuilderPage() {
   const router = useRouter();
   const setCampaign = useCampaignStore((s) => s.setCampaign);
   const desiredProspectCount = useCampaignStore((s) => s.desiredProspectCount);
@@ -46,15 +54,14 @@ export default function Home() {
         <div className="mb-8 flex flex-col items-center text-center animate-in fade-in slide-in-from-bottom-2 duration-700">
           <span className="mb-4 inline-flex items-center gap-1.5 rounded-full border border-border/60 bg-secondary/60 px-3 py-1 text-xs text-muted-foreground">
             <Sparkles className="h-3 w-3 text-primary" />
-            ASTRONOMIC INTELLIGENCE
+            APOLLO CAMPAIGN BUILDER
           </span>
 
           <h1 className="text-balance font-serif text-4xl font-medium tracking-tight sm:text-5xl">
-            What can Astro do for you?
+            Describe the campaign you want to build
           </h1>
           <p className="mt-4 max-w-md text-balance text-sm text-muted-foreground sm:text-base">
-            Create campaigns, find prospects, analyze your CRM, check campaign performance, and
-            more.
+            Astronomic will search Apollo, build your audience, and draft an outreach sequence.
           </p>
         </div>
 
@@ -69,7 +76,7 @@ export default function Home() {
                   handleGenerate();
                 }
               }}
-              placeholder="Ask Astro anything..."
+              placeholder="Describe who you want to reach..."
               disabled={loading}
               rows={5}
               className="resize-none border-none bg-transparent p-2 text-base shadow-none focus-visible:ring-0 md:text-base"
@@ -84,7 +91,7 @@ export default function Home() {
                   </>
                 ) : (
                   <>
-                    Ask Astro
+                    Generate campaign
                     <ArrowRight className="h-4 w-4" />
                   </>
                 )}
@@ -119,7 +126,7 @@ export default function Home() {
                 <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-primary" />
               </span>
-              Astro is working on your campaign…
+              Building your campaign…
             </div>
           )}
         </div>
