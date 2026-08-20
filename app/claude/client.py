@@ -1,5 +1,10 @@
 """
-Thin wrapper around the Anthropic Messages API for structured JSON generation.
+Thin wrapper around the Anthropic Messages API. Originally built for
+structured JSON generation (Campaign Builder's plan generation, prospect
+ranking); Astro AI chat (see app/services/astro_ai_service.py) extends this
+SAME client with a plain-text, multi-turn chat method rather than
+duplicating a second Anthropic HTTP client -- one place owns the API key,
+the base URL, and the wire format.
 """
 
 import json
@@ -26,7 +31,33 @@ class ClaudeNotConfiguredError(RuntimeError):
     Deliberately raised BEFORE the retry loop below: retrying a call that is
     guaranteed to fail auth 3 times in a row wastes time and produces a
     confusing generic error instead of this precise one.
+
+    Also raised by generate_chat_reply() (Astro AI) for the identical reason
+    -- one config, one error type, for every Claude call site in this app.
     """
+
+
+class ClaudeAuthenticationError(RuntimeError):
+    """Anthropic rejected the configured API key (HTTP 401). Distinct from
+    ClaudeNotConfiguredError: a key IS set, but Anthropic says it's invalid
+    -- an operator/deployment problem, not a transient outage."""
+
+
+class ClaudeRateLimitError(RuntimeError):
+    """Anthropic returned HTTP 429. Never retried automatically here --
+    retrying a rate limit immediately just makes it worse; the caller
+    should surface this to the user rather than hide it behind a retry."""
+
+
+class ClaudeTimeoutError(RuntimeError):
+    """The request exceeded its timeout before Anthropic responded."""
+
+
+class ClaudeProviderError(RuntimeError):
+    """Any other non-2xx response or network-level failure from Anthropic
+    (5xx outage, malformed response, etc.) -- never carries the raw
+    response body in its message, so a caller can safely log/surface this
+    without risking a secret or provider-internal detail leaking."""
 
 
 class ClaudeClient:
@@ -104,6 +135,74 @@ class ClaudeClient:
         raise RuntimeError(
             f"Claude JSON generation failed after {max_retries} attempts: {last_error}"
         )
+
+    async def generate_chat_reply(
+        self,
+        system_prompt: str,
+        messages: list[dict],
+        max_tokens: int,
+        temperature: float = 0.5,
+        timeout: float = 30.0,
+    ) -> tuple[str, dict]:
+        """
+        Astro AI chat (see app/services/astro_ai_service.py) -- plain
+        conversational text, not JSON, and a `messages` list (multi-turn)
+        rather than a single user_prompt. No automatic retry (unlike
+        generate_json_with_usage): a failed chat turn should surface
+        cleanly to the user immediately rather than silently spend up to
+        3x the tokens/latency retrying, and retrying a 429 immediately
+        would only make it worse.
+
+        Raises one of ClaudeNotConfiguredError / ClaudeAuthenticationError /
+        ClaudeRateLimitError / ClaudeTimeoutError / ClaudeProviderError --
+        never a bare httpx exception -- so every caller has a small, closed
+        set of cases to handle and none of them carry Anthropic's raw
+        response body (which could contain the prompt or other detail
+        callers shouldn't surface verbatim).
+        """
+        if not self.api_key:
+            raise ClaudeNotConfiguredError(
+                "Claude is not configured (ANTHROPIC_API_KEY is unset) -- Astro AI is unavailable "
+                "until it's set. This does not affect the CRM, ITF intake, or any other part of "
+                "the application."
+            )
+
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    ANTHROPIC_MESSAGES_URL,
+                    headers={
+                        "x-api-key": self.api_key,
+                        "anthropic-version": ANTHROPIC_VERSION,
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "max_tokens": max_tokens,
+                        "temperature": temperature,
+                        "system": system_prompt,
+                        "messages": messages,
+                    },
+                )
+        except httpx.TimeoutException as e:
+            raise ClaudeTimeoutError("Claude did not respond in time.") from e
+        except httpx.HTTPError as e:
+            raise ClaudeProviderError(f"Network error calling Claude: {type(e).__name__}") from e
+
+        if resp.status_code == 401:
+            logger.error("Claude authentication failed for Astro AI chat -- check ANTHROPIC_API_KEY.")
+            raise ClaudeAuthenticationError("Claude rejected the configured API key.")
+        if resp.status_code == 429:
+            raise ClaudeRateLimitError("Claude rate limit exceeded.")
+        if resp.status_code >= 400:
+            logger.error(f"Claude chat request failed with status {resp.status_code}.")
+            raise ClaudeProviderError(f"Claude returned status {resp.status_code}.")
+
+        data = resp.json()
+        text = "".join(
+            block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
+        ).strip()
+        return text, data.get("usage", {})
 
     @staticmethod
     def _parse_json(text: str) -> dict:

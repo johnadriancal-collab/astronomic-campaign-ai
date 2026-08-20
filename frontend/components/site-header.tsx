@@ -8,8 +8,15 @@ import { Button } from "@/components/ui/button";
 import { logout } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
+// "Astro AI" here means the general Claude assistant at /astro-ai (Phase 1
+// foundation) -- the entry at "/" is Campaign Builder's own single-shot
+// Claude prompt for generating an Apollo campaign plan, a different,
+// unrelated feature that happened to share the "Astro" label before this
+// nav was corrected. Its own functionality/route/behavior is unchanged --
+// only this label was inaccurate.
 const TOP_LEVEL_AREAS = [
-  { href: "/", label: "Astro AI" },
+  { href: "/astro-ai", label: "Astro AI" },
+  { href: "/", label: "Campaign Builder" },
   { href: "/manager", label: "Campaign Manager" },
   { href: "/crm", label: "CRM" },
 ];

@@ -13,11 +13,27 @@ class Settings(BaseSettings):
     # app/claude/client.py's ClaudeNotConfiguredError. Leaving it unset must
     # never prevent the rest of the app (CRM, ITF intake, /health, etc.) from
     # booting; that's exactly what making this Optional (rather than a bare
-    # `str`, which pydantic-settings would fail app startup on) fixes.
+    # `str`, which pydantic-settings would fail app startup on) fixes. Astro
+    # AI chat (app/services/astro_ai_service.py) reuses this SAME key --
+    # there is deliberately only one Anthropic credential in this app.
     anthropic_api_key: str | None = None
     apollo_api_key: str
 
+    # Campaign Builder's plan-generation/ranking model -- unrelated to Astro
+    # AI chat below; kept as its own setting so changing one never touches
+    # the other's behavior.
     claude_model: str = "claude-sonnet-4-5"
+
+    # Astro AI chat's model (see app/services/astro_ai_service.py) --
+    # deliberately a SEPARATE setting from claude_model above, even though
+    # both currently point at Claude, because they serve different jobs
+    # (structured campaign-plan JSON vs. conversational business assistant)
+    # that may reasonably need different models later. claude-sonnet-5 is
+    # the current mid-tier model: strong enough for research/writing/
+    # analysis without paying for Opus-tier capability this use case
+    # doesn't need.
+    astro_chat_model: str = "claude-sonnet-5"
+
     apollo_base_url: str = "https://api.apollo.io/api/v1"
 
     # Optional: default mailbox to send from if not specified per-request.

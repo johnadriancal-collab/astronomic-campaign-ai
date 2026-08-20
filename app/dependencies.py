@@ -13,6 +13,7 @@ from fastapi import Header, HTTPException, Request
 
 from app.config import settings
 from app.services.activity_log_service import ActivityLogService
+from app.services.astro_ai_service import AstroAiService
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -82,6 +83,10 @@ async def get_mailbox_service(request: Request) -> MailboxService:
 
 async def get_auth_service(request: Request) -> AuthService:
     return request.app.state.auth_service
+
+
+async def get_astro_ai_service(request: Request) -> AstroAiService:
+    return request.app.state.astro_ai_service
 
 
 async def verify_email_intake_webhook_token(authorization: str | None = Header(default=None)) -> None:

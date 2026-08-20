@@ -1348,3 +1348,25 @@ export function logout(): Promise<AuthStatus> {
 export function checkSession(): Promise<AuthStatus> {
   return request<AuthStatus>("/auth/session");
 }
+
+// --- Astro AI chat (Phase 1 -- general assistant foundation) --------------
+//
+// Deliberately separate from AstroCommandRequest/Response above (Astro
+// Search's own deterministic, Claude-free CRM query parser) and from
+// previewCampaign() (Campaign Builder's single-shot Claude JSON plan
+// generation) -- three different "Astro"-branded features. This one talks
+// to Claude in general-assistant mode; it has no CRM/campaign/mailbox data
+// access in this phase (see the backend's system prompt). Stateless: the
+// caller resends the full message history every turn, same convention as
+// AstroCommandContext.
+
+export type AstroChatRole = "user" | "assistant";
+
+export interface AstroChatMessage {
+  role: AstroChatRole;
+  content: string;
+}
+
+export function sendAstroChatMessage(messages: AstroChatMessage[]): Promise<AstroChatMessage> {
+  return post<AstroChatMessage>("/astro-ai/chat", { messages });
+}

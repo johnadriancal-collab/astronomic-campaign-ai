@@ -37,11 +37,18 @@ export function CrmSidebar() {
     <aside className="sticky top-16 flex h-[calc(100vh-4rem)] w-60 shrink-0 flex-col overflow-y-auto border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
       <div className="flex flex-col gap-1 p-3">
         <Link
-          href="/"
+          href="/astro-ai"
           className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         >
           <Sparkles className="h-4 w-4" />
           Astro AI
+        </Link>
+        <Link
+          href="/"
+          className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+        >
+          <Sparkles className="h-4 w-4" />
+          Campaign Builder
         </Link>
         <Link
           href="/manager"

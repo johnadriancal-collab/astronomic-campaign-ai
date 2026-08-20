@@ -46,6 +46,7 @@ from fastapi.responses import HTMLResponse
 
 from app.api.activity import router as activity_router
 from app.api.astro import router as astro_router
+from app.api.astro_ai import router as astro_ai_router
 from app.api.auth import router as auth_router
 from app.api.campaign import router as campaign_router
 from app.api.campaign_manager import router as campaign_manager_router
@@ -82,6 +83,7 @@ from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
 from app.session_auth_middleware import enforce_session_auth
 from app.google.oauth_client import GoogleOAuthClient
 from app.services.activity_log_service import ActivityLogService
+from app.services.astro_ai_service import AstroAiService, build_default_claude_client
 from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -243,6 +245,13 @@ async def lifespan(app: FastAPI):
     # app fails CLOSED, never open, when unconfigured.
     app.state.auth_service = AuthService(session_store=auth_session_store)
 
+    # Astro AI chat (Phase 1 -- general assistant foundation, no Hub-data
+    # access). Stateless: no store to connect/close, matching Astro
+    # Search's own precedent. Reuses ANTHROPIC_API_KEY (see
+    # app/config.py) -- there is only ever one Anthropic credential in
+    # this app -- with its own model setting (astro_chat_model).
+    app.state.astro_ai_service = AstroAiService(claude_client=build_default_claude_client())
+
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -271,6 +280,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
 app.middleware("http")(enforce_session_auth)
 app.include_router(auth_router)
+app.include_router(astro_ai_router)
 app.include_router(campaign_router)
 app.include_router(campaign_manager_router)
 app.include_router(leads_router)

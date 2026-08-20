@@ -72,6 +72,17 @@ async def test_claude_client_with_empty_string_api_key_also_raises(monkeypatch):
         await client.generate_json_with_usage("system prompt", "user prompt")
 
 
+@pytest.mark.asyncio
+async def test_generate_chat_reply_with_no_api_key_raises_before_any_http_call(monkeypatch):
+    """Astro AI chat (generate_chat_reply) shares the exact same fail-fast
+    guarantee as generate_json above -- one config, one boundary, for
+    every Claude call site in this app."""
+    monkeypatch.setattr(client_module.settings, "anthropic_api_key", None)
+    client = ClaudeClient(model="claude-sonnet-5")
+    with pytest.raises(ClaudeNotConfiguredError, match="ANTHROPIC_API_KEY"):
+        await client.generate_chat_reply("system prompt", [{"role": "user", "content": "hi"}], max_tokens=100)
+
+
 def test_claude_client_construction_never_raises_regardless_of_key():
     """Constructing a ClaudeClient (and therefore CampaignAgent()/ProspectRanker(), both
     constructed eagerly at app startup in main.py) must never fail just because no key is
