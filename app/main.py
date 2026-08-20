@@ -84,6 +84,7 @@ from app.session_auth_middleware import enforce_session_auth
 from app.google.oauth_client import GoogleOAuthClient
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_ai_service import AstroAiService, build_default_claude_client
+from app.services.astro_crm_tools import AstroCrmTools
 from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -245,12 +246,19 @@ async def lifespan(app: FastAPI):
     # app fails CLOSED, never open, when unconfigured.
     app.state.auth_service = AuthService(session_store=auth_session_store)
 
-    # Astro AI chat (Phase 1 -- general assistant foundation, no Hub-data
-    # access). Stateless: no store to connect/close, matching Astro
+    # Astro AI chat (Phase 1 general assistant + Phase 2 read-only CRM
+    # tool-use). Stateless: no store to connect/close, matching Astro
     # Search's own precedent. Reuses ANTHROPIC_API_KEY (see
     # app/config.py) -- there is only ever one Anthropic credential in
     # this app -- with its own model setting (astro_chat_model).
-    app.state.astro_ai_service = AstroAiService(claude_client=build_default_claude_client())
+    # AstroCrmTools wraps the SAME crm_service used by the CRM API/Astro
+    # Search above -- read-only (query_contacts/get_filterable_fields
+    # only, see astro_crm_tools.py's module docstring), never a second CRM
+    # system.
+    app.state.astro_ai_service = AstroAiService(
+        claude_client=build_default_claude_client(),
+        crm_tools=AstroCrmTools(crm_service),
+    )
 
     yield
     await campaign_store.close()

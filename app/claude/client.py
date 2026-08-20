@@ -142,7 +142,8 @@ class ClaudeClient:
         messages: list[dict],
         max_tokens: int,
         timeout: float = 30.0,
-    ) -> tuple[str, dict]:
+        tools: list[dict] | None = None,
+    ) -> tuple[str, dict, str, list[dict]]:
         """
         Astro AI chat (see app/services/astro_ai_service.py) -- plain
         conversational text, not JSON, and a `messages` list (multi-turn)
@@ -151,6 +152,19 @@ class ClaudeClient:
         cleanly to the user immediately rather than silently spend up to
         3x the tokens/latency retrying, and retrying a 429 immediately
         would only make it worse.
+
+        `tools` (Phase 2, read-only CRM tool-use -- see
+        app/services/astro_crm_tools.py): passed straight through to
+        Anthropic's `tools` field, omitted from the request entirely when
+        None so a caller with no tools produces the exact same request
+        shape as before this existed. Returns the raw `stop_reason` and
+        `content` blocks (not just the extracted text) because the caller
+        needs both to run a tool-use loop: `stop_reason == "tool_use"`
+        means `content` contains one or more `tool_use` blocks the caller
+        must execute and feed back, exactly as Anthropic's protocol
+        requires (echoing this exact content list back as the assistant's
+        turn) -- extracting only text here would lose what's needed to do
+        that.
 
         Deliberately never sends `temperature`: confirmed directly against
         Anthropic (2026-08-20 production investigation) that claude-sonnet-5
@@ -174,6 +188,15 @@ class ClaudeClient:
                 "the application."
             )
 
+        payload = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": system_prompt,
+            "messages": messages,
+        }
+        if tools is not None:
+            payload["tools"] = tools
+
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 resp = await client.post(
@@ -183,12 +206,7 @@ class ClaudeClient:
                         "anthropic-version": ANTHROPIC_VERSION,
                         "content-type": "application/json",
                     },
-                    json={
-                        "model": self.model,
-                        "max_tokens": max_tokens,
-                        "system": system_prompt,
-                        "messages": messages,
-                    },
+                    json=payload,
                 )
         except httpx.TimeoutException as e:
             raise ClaudeTimeoutError("Claude did not respond in time.") from e
@@ -205,10 +223,9 @@ class ClaudeClient:
             raise ClaudeProviderError(f"Claude returned status {resp.status_code}.")
 
         data = resp.json()
-        text = "".join(
-            block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"
-        ).strip()
-        return text, data.get("usage", {})
+        content = data.get("content", [])
+        text = "".join(block.get("text", "") for block in content if block.get("type") == "text").strip()
+        return text, data.get("usage", {}), data.get("stop_reason", "end_turn"), content
 
     @staticmethod
     def _parse_json(text: str) -> dict:

@@ -66,6 +66,37 @@ async def test_astro_chat_request_for_claude_sonnet_5_omits_temperature(captured
 
 
 @pytest.mark.asyncio
+async def test_tools_omitted_from_request_when_not_passed(captured_request):
+    client = ClaudeClient(model="claude-sonnet-5")
+    await client.generate_chat_reply("system prompt", [{"role": "user", "content": "hi"}], max_tokens=100)
+
+    assert "tools" not in captured_request["json"]
+
+
+@pytest.mark.asyncio
+async def test_tools_included_verbatim_when_passed(captured_request):
+    from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS
+
+    client = ClaudeClient(model="claude-sonnet-5")
+    await client.generate_chat_reply(
+        "system prompt", [{"role": "user", "content": "hi"}], max_tokens=100, tools=CRM_TOOL_DEFINITIONS
+    )
+
+    assert captured_request["json"]["tools"] == CRM_TOOL_DEFINITIONS
+
+
+@pytest.mark.asyncio
+async def test_generate_chat_reply_returns_stop_reason_and_content_blocks(captured_request):
+    client = ClaudeClient(model="claude-sonnet-5")
+    text, usage, stop_reason, content = await client.generate_chat_reply(
+        "system prompt", [{"role": "user", "content": "hi"}], max_tokens=100
+    )
+
+    assert stop_reason == "end_turn"
+    assert content == [{"type": "text", "text": '{"ok": true}'}]
+
+
+@pytest.mark.asyncio
 async def test_campaign_builder_request_still_sends_temperature(captured_request):
     """generate_json_with_usage is Campaign Builder's separate code path
     (claude-sonnet-4-5) -- must be completely unaffected by the Astro AI
