@@ -46,7 +46,7 @@ export function ManagerSidebar() {
     <aside className="flex w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar text-sidebar-foreground">
       <div className="flex flex-col gap-1 p-3">
         <Link
-          href="/astro-ai"
+          href="/"
           className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         >
           <Sparkles className="h-4 w-4" />

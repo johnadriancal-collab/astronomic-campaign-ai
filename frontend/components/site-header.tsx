@@ -10,6 +10,7 @@ import { TOP_LEVEL_NAV_AREAS } from "@/lib/top-level-nav";
 import { cn } from "@/lib/utils";
 
 function isAreaActive(pathname: string, href: string) {
+  if (href === "/") return pathname === "/";
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
