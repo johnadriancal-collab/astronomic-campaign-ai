@@ -43,3 +43,28 @@ class UnifiedCampaignSummary(BaseModel):
     summary: str
     created_at: datetime
     detail_path: str
+
+
+# Presentation-only bucketing -- never written back to either store, and
+# recomputed from the real enum value on every read. Lives here (a model
+# file, importable by both the API layer and the service layer) rather
+# than in app/api/campaign_manager.py, specifically so
+# app/services/astro_campaign_tools.py can reuse the exact same mapping
+# without a service importing from the API layer (this app's services
+# never import app.api.*).
+APOLLO_STATUS_BUCKET: dict[str, CampaignStatusBucket] = {
+    "draft": CampaignStatusBucket.DRAFT,
+    "searched": CampaignStatusBucket.IN_PROGRESS,
+    "building": CampaignStatusBucket.IN_PROGRESS,
+    "built": CampaignStatusBucket.IN_PROGRESS,
+    "failed": CampaignStatusBucket.FAILED,
+    "ready": CampaignStatusBucket.READY,
+    "active": CampaignStatusBucket.ACTIVE,
+    "paused": CampaignStatusBucket.PAUSED,
+}
+
+MAIL_STATUS_BUCKET: dict[str, CampaignStatusBucket] = {
+    "draft": CampaignStatusBucket.DRAFT,
+    "ready": CampaignStatusBucket.READY,
+    "archived": CampaignStatusBucket.ARCHIVED,
+}

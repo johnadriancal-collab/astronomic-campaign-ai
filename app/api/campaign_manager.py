@@ -20,34 +20,19 @@ from app.api.campaign import list_campaigns as list_apollo_campaigns
 from app.api.mail import list_campaigns as list_mail_campaigns
 from app.dependencies import get_campaign_service, get_email_sequence_sync_service, get_mail_campaign_service
 from app.models.campaign import Campaign
-from app.models.campaign_manager import CampaignStatusBucket, SendingMethod, UnifiedCampaignSummary
+from app.models.campaign_manager import (
+    APOLLO_STATUS_BUCKET as _APOLLO_STATUS_BUCKET,
+)
+from app.models.campaign_manager import (
+    MAIL_STATUS_BUCKET as _MAIL_STATUS_BUCKET,
+)
+from app.models.campaign_manager import SendingMethod, UnifiedCampaignSummary
 from app.models.mail import MailCampaign
 from app.services.campaign_service import CampaignService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.mail_campaign_service import MailCampaignService
 
 router = APIRouter(prefix="/campaign-manager", tags=["campaign-manager"])
-
-# Presentation-only bucketing -- never written back to either store, and
-# recomputed from the real enum value on every read. See this module's and
-# app/models/campaign_manager.py's docstrings for why this exists only for
-# the unified dashboard rather than replacing either status enum.
-_APOLLO_STATUS_BUCKET: dict[str, CampaignStatusBucket] = {
-    "draft": CampaignStatusBucket.DRAFT,
-    "searched": CampaignStatusBucket.IN_PROGRESS,
-    "building": CampaignStatusBucket.IN_PROGRESS,
-    "built": CampaignStatusBucket.IN_PROGRESS,
-    "failed": CampaignStatusBucket.FAILED,
-    "ready": CampaignStatusBucket.READY,
-    "active": CampaignStatusBucket.ACTIVE,
-    "paused": CampaignStatusBucket.PAUSED,
-}
-
-_MAIL_STATUS_BUCKET: dict[str, CampaignStatusBucket] = {
-    "draft": CampaignStatusBucket.DRAFT,
-    "ready": CampaignStatusBucket.READY,
-    "archived": CampaignStatusBucket.ARCHIVED,
-}
 
 
 def _apollo_summary(campaign: Campaign) -> UnifiedCampaignSummary:

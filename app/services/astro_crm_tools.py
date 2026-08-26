@@ -1,5 +1,6 @@
 """
-Astro AI Phase 2 -- the CRM's read-only surface for Claude tool-use.
+Astro AI Phase 2 (CRM contacts) + Phase 3 (CRM Lists) -- the CRM's
+read-only surface for Claude tool-use.
 
 Deliberately built on the SAME generic query engine the CRM's own "More
 Filters" UI and Astro Search already use (CrmService.query_contacts +
@@ -10,18 +11,27 @@ investor-specific or otherwise hardcoded vocabulary here; see
 describe_available_fields(), which is what tells Claude (via the system
 prompt) what's actually queryable.
 
+Lists (Phase 3) live in this SAME file rather than a separate one because
+they share CrmService and the CRM filter engine -- the "count/search list
+members matching a CRM filter" tools below reuse crm_filter_service's
+matches_query()/validate_query() directly (the exact same investor_type
+logic count_crm_contacts uses), never a second classification system.
+
 Strictly read-only and strictly allowlisted: this module imports nothing
-from crm_service.py except query_contacts/get_filterable_fields (never
-create_contact/update_contact/archive_contact), imports nothing Apollo- or
-campaign- or mailbox-related at all, and AstroCrmTools.dispatch() only ever
-calls one of the three functions in _HANDLERS below -- an unrecognized
-tool name is rejected, never dynamically resolved.
+from crm_service.py except query_contacts/get_filterable_fields/
+list_contact_lists/get_contact_list/get_list_contacts (never
+create_contact/update_contact/archive_contact/create_contact_list/
+update_contact_list/delete_contact_list/bulk_add_to_list/
+bulk_remove_from_list), imports nothing Apollo- or campaign- or
+mailbox-related at all, and AstroCrmTools.dispatch() only ever calls one
+of the functions in _HANDLERS below -- an unrecognized tool name is
+rejected, never dynamically resolved.
 """
 
 from loguru import logger
 
-from app.models.crm import CrmContact, FilterCondition, FilterQuery
-from app.services.crm_filter_service import FilterValidationError
+from app.models.crm import CrmContact, CrmContactListSummary, FilterCondition, FilterQuery
+from app.services.crm_filter_service import FilterValidationError, matches_query, validate_query
 from app.services.crm_service import CrmService
 
 # Anthropic tool-use schemas. `filters`' shape is intentionally generic
@@ -110,10 +120,82 @@ CRM_TOOL_DEFINITIONS: list[dict] = [
             "required": [],
         },
     },
+    {
+        "name": "list_crm_lists",
+        "description": (
+            "List every named CRM contact list (name, description, and its current member "
+            "count). Returns the true total, capped at 50."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "get_crm_list",
+        "description": (
+            "Look up one CRM list by its exact name. List names are NOT guaranteed unique -- if "
+            "more than one list shares that exact name, this returns an 'ambiguous' result with "
+            "the possible matches instead of picking one."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "get_crm_list_members",
+        "description": (
+            "Get the contacts in one named CRM list, optionally narrowed by the SAME CRM filter "
+            "conditions count_crm_contacts/search_crm_contacts use -- e.g. to answer 'angel "
+            "investors in the Hotshot list' in one call, pass list_name='Hotshot' and filters=[{"
+            "field: custom:investor_type, operator: contains_any, value: [Angel Investor]}]. "
+            "Returns at most 20 contacts plus the true total match count."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "list_name": {"type": "string"},
+                "filters": {"type": "array", "items": _FILTER_ITEM_SCHEMA},
+                "logic": {"type": "string", "enum": ["AND", "OR"]},
+                "limit": {
+                    "type": "integer",
+                    "description": "Max contacts to return. Capped at 20 regardless of what you request.",
+                },
+            },
+            "required": ["list_name"],
+        },
+    },
+    {
+        "name": "count_crm_list_members",
+        "description": (
+            "Count contacts in one named CRM list, optionally narrowed by CRM filter conditions "
+            "-- e.g. 'how many angel investors are in the Hotshot list' resolves in one call: "
+            "list_name='Hotshot', filters=[{field: custom:investor_type, operator: contains_any, "
+            "value: [Angel Investor]}]. Returns ONLY a total, never contact records."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "list_name": {"type": "string"},
+                "filters": {"type": "array", "items": _FILTER_ITEM_SCHEMA},
+                "logic": {"type": "string", "enum": ["AND", "OR"]},
+            },
+            "required": ["list_name"],
+        },
+    },
 ]
 
 SEARCH_RESULT_LIMIT = 20
 _LOOKUP_CANDIDATE_LIMIT = 5
+LIST_REGISTRY_LIMIT = 50
+# Internal cap on how many of a list's members are fetched before applying
+# an optional CRM filter in Python (matches_query has no store-level/SQL
+# form -- see crm_filter_service.py). NOT sent to Claude; only the final
+# (already-≤SEARCH_RESULT_LIMIT) result and total are. Fine at today's
+# list sizes (single digits to ~50 members); if a list ever genuinely grew
+# past this, count_crm_list_members/get_crm_list_members would silently
+# undercount rather than error -- visible technical debt, not addressed in
+# this phase per explicit scope (no caching/store-level filtering added).
+_LIST_MEMBER_SCAN_CAP = 1_000
 
 
 def _project_summary(contact: CrmContact) -> dict:
@@ -145,6 +227,15 @@ def _project_full(contact: CrmContact) -> dict:
         }
     )
     return data
+
+
+def _project_list(contact_list: CrmContactListSummary) -> dict:
+    return {
+        "list_id": contact_list.list_id,
+        "name": contact_list.name,
+        "description": contact_list.description,
+        "contact_count": contact_list.contact_count,
+    }
 
 
 def _parse_filters(raw_filters: list[dict] | None) -> list[FilterCondition]:
@@ -252,6 +343,106 @@ class AstroCrmTools:
             "candidates": [_project_summary(c) for c in page.items[:_LOOKUP_CANDIDATE_LIMIT]],
         }
 
+    async def _resolve_list_by_name(self, name: str) -> dict:
+        """Shared by get_crm_list / get_crm_list_members / count_crm_list_members.
+        Exact, case-insensitive match only -- list names are confirmed NOT
+        unique (see CrmContactListStore's own docstring), so 2+ matches is
+        a real, expected case, never silently resolved to one."""
+        lists = await self.crm_service.list_contact_lists()
+        matches = [l for l in lists if l.name.strip().lower() == name.strip().lower()]
+        if not matches:
+            return {"status": "not_found"}
+        if len(matches) == 1:
+            return {"status": "found", "list": matches[0]}
+        return {
+            "status": "ambiguous",
+            "total": len(matches),
+            "candidates": [_project_list(l) for l in matches[:_LOOKUP_CANDIDATE_LIMIT]],
+        }
+
+    async def _list_crm_lists(self, tool_input: dict) -> dict:
+        lists = await self.crm_service.list_contact_lists()
+        total = len(lists)
+        returned = lists[:LIST_REGISTRY_LIMIT]
+        return {"total": total, "returned": len(returned), "lists": [_project_list(l) for l in returned]}
+
+    async def _get_crm_list(self, tool_input: dict) -> dict:
+        name = (tool_input.get("name") or "").strip()
+        if not name:
+            return {"error": "invalid_filter", "message": "Provide a list name to look up."}
+        resolved = await self._resolve_list_by_name(name)
+        if resolved["status"] == "found":
+            return {"status": "found", "list": _project_list(resolved["list"])}
+        return resolved
+
+    async def _get_crm_list_members(self, tool_input: dict) -> dict:
+        name = (tool_input.get("list_name") or "").strip()
+        if not name:
+            return {"error": "invalid_filter", "message": "Provide a list_name to look up its members."}
+        resolved = await self._resolve_list_by_name(name)
+        if resolved["status"] != "found":
+            return resolved
+        contact_list = resolved["list"]
+
+        requested_limit = int(tool_input.get("limit") or SEARCH_RESULT_LIMIT)
+        limit = max(1, min(requested_limit, SEARCH_RESULT_LIMIT))
+        raw_filters = tool_input.get("filters")
+
+        if raw_filters:
+            filters = _parse_filters(raw_filters)
+            query = FilterQuery(filters=filters, logic=tool_input.get("logic", "AND"))
+            registry = await self.crm_service.get_filterable_fields()
+            field_by_key = validate_query(query, registry)
+            page = await self.crm_service.get_list_contacts(
+                contact_list.list_id, page=1, page_size=_LIST_MEMBER_SCAN_CAP
+            )
+            matched = [c for c in page.items if matches_query(c, query, field_by_key)]
+            total = len(matched)
+            returned = matched[:limit]
+        else:
+            page = await self.crm_service.get_list_contacts(contact_list.list_id, page=1, page_size=limit)
+            total = page.total
+            returned = page.items
+
+        return {
+            "status": "found",
+            "list": {"list_id": contact_list.list_id, "name": contact_list.name},
+            "total": total,
+            "returned": len(returned),
+            "contacts": [_project_summary(c) for c in returned],
+        }
+
+    async def _count_crm_list_members(self, tool_input: dict) -> dict:
+        name = (tool_input.get("list_name") or "").strip()
+        if not name:
+            return {"error": "invalid_filter", "message": "Provide a list_name to count its members."}
+        resolved = await self._resolve_list_by_name(name)
+        if resolved["status"] != "found":
+            return resolved
+        contact_list = resolved["list"]
+        raw_filters = tool_input.get("filters")
+
+        if not raw_filters:
+            # contact_count is already computed by CrmService for every
+            # list -- reuse it directly rather than re-deriving.
+            return {
+                "status": "found",
+                "list": {"list_id": contact_list.list_id, "name": contact_list.name},
+                "total": contact_list.contact_count,
+            }
+
+        filters = _parse_filters(raw_filters)
+        query = FilterQuery(filters=filters, logic=tool_input.get("logic", "AND"))
+        registry = await self.crm_service.get_filterable_fields()
+        field_by_key = validate_query(query, registry)
+        page = await self.crm_service.get_list_contacts(contact_list.list_id, page=1, page_size=_LIST_MEMBER_SCAN_CAP)
+        matched_total = sum(1 for c in page.items if matches_query(c, query, field_by_key))
+        return {
+            "status": "found",
+            "list": {"list_id": contact_list.list_id, "name": contact_list.name},
+            "total": matched_total,
+        }
+
 
 # Deliberately the ONLY tool-name -> function mapping AstroCrmTools.dispatch
 # will ever consult -- adding a write/Apollo/campaign/mailbox capability to
@@ -261,4 +452,8 @@ _HANDLERS = {
     "count_crm_contacts": AstroCrmTools._count_crm_contacts,
     "search_crm_contacts": AstroCrmTools._search_crm_contacts,
     "get_crm_contact": AstroCrmTools._get_crm_contact,
+    "list_crm_lists": AstroCrmTools._list_crm_lists,
+    "get_crm_list": AstroCrmTools._get_crm_list,
+    "get_crm_list_members": AstroCrmTools._get_crm_list_members,
+    "count_crm_list_members": AstroCrmTools._count_crm_list_members,
 }

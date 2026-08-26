@@ -83,8 +83,12 @@ from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
 from app.session_auth_middleware import enforce_session_auth
 from app.google.oauth_client import GoogleOAuthClient
 from app.services.activity_log_service import ActivityLogService
+from app.services.astro_activity_tools import AstroActivityTools
 from app.services.astro_ai_service import AstroAiService, build_default_claude_client
+from app.services.astro_campaign_tools import AstroCampaignTools
 from app.services.astro_crm_tools import AstroCrmTools
+from app.services.astro_hub_tools import AstroHubTools
+from app.services.astro_mailbox_tools import AstroMailboxTools
 from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -247,17 +251,31 @@ async def lifespan(app: FastAPI):
     app.state.auth_service = AuthService(session_store=auth_session_store)
 
     # Astro AI chat (Phase 1 general assistant + Phase 2 read-only CRM
-    # tool-use). Stateless: no store to connect/close, matching Astro
+    # tool-use + Phase 3 read-only Campaign Manager/Lists/mailbox/Activity
+    # Log tool-use). Stateless: no store to connect/close, matching Astro
     # Search's own precedent. Reuses ANTHROPIC_API_KEY (see
     # app/config.py) -- there is only ever one Anthropic credential in
     # this app -- with its own model setting (astro_chat_model).
-    # AstroCrmTools wraps the SAME crm_service used by the CRM API/Astro
-    # Search above -- read-only (query_contacts/get_filterable_fields
-    # only, see astro_crm_tools.py's module docstring), never a second CRM
-    # system.
+    # AstroHubTools composes four per-domain tool surfaces, each wrapping
+    # the SAME already-constructed service/store this app's own routes
+    # use -- read-only only (see each astro_*_tools.py module docstring),
+    # never a second/parallel system. AstroMailboxTools is given
+    # `mailbox_store` directly (never `mailbox_service`, which also holds
+    # a `MailboxCredentialStore` reference) -- see astro_mailbox_tools.py
+    # for why that's a structural, not just conventional, guarantee.
     app.state.astro_ai_service = AstroAiService(
         claude_client=build_default_claude_client(),
-        crm_tools=AstroCrmTools(crm_service),
+        hub_tools=AstroHubTools(
+            crm_tools=AstroCrmTools(crm_service),
+            mailbox_tools=AstroMailboxTools(mailbox_store),
+            activity_tools=AstroActivityTools(activity_log_service),
+            campaign_tools=AstroCampaignTools(
+                campaign_service=campaign_service,
+                mail_campaign_service=mail_campaign_service,
+                mail_suppression_service=mail_suppression_service,
+                email_sequence_store=email_sequence_sync_service.store,
+            ),
+        ),
     )
 
     yield

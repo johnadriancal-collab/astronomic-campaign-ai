@@ -87,9 +87,23 @@ async def crm_service():
             custom_fields={"investor_type": ["Family Office"]},
         )
     )
-    await service.contact_store.create(
-        make_contact(first_name="John", last_name="Smith", company="Acme", city="Austin")
+    john = make_contact(first_name="John", last_name="Smith", company="Acme", city="Austin")
+    await service.contact_store.create(john)
+
+    all_contacts = await service.contact_store.list()
+    by_name = {f"{c.first_name} {c.last_name}": c for c in all_contacts}
+
+    hotshot = await service.create_contact_list("Hotshot", description="Curated top prospects")
+    await service.bulk_add_to_list(
+        hotshot.list_id,
+        [by_name["Alice Angel"].crm_contact_id, by_name["Bob Angel"].crm_contact_id, by_name["John Smith"].crm_contact_id],
     )
+
+    # Two lists sharing the exact same name -- list names are NOT unique,
+    # this is the deliberate ambiguity scenario.
+    await service.create_contact_list("Austin Investors", description="2025 cohort")
+    await service.create_contact_list("Austin Investors", description="2026 cohort")
+
     return service
 
 
@@ -310,3 +324,156 @@ def test_astro_crm_tools_never_imports_write_apollo_campaign_or_mailbox_code():
     }
     hit = forbidden & imported_modules
     assert not hit, f"astro_crm_tools.py imports forbidden module(s): {hit}"
+
+
+# --- Phase 3: CRM Lists -----------------------------------------------------
+
+
+async def test_list_crm_lists_returns_all_with_counts(tools):
+    result = await tools.dispatch("list_crm_lists", {})
+    names = {l["name"] for l in result["lists"]}
+    assert "Hotshot" in names
+    hotshot = next(l for l in result["lists"] if l["name"] == "Hotshot")
+    assert hotshot["contact_count"] == 3
+
+
+async def test_get_crm_list_found(tools):
+    result = await tools.dispatch("get_crm_list", {"name": "Hotshot"})
+    assert result["status"] == "found"
+    assert result["list"]["contact_count"] == 3
+    assert result["list"]["description"] == "Curated top prospects"
+
+
+async def test_get_crm_list_not_found(tools):
+    result = await tools.dispatch("get_crm_list", {"name": "Nonexistent List"})
+    assert result == {"status": "not_found"}
+
+
+async def test_get_crm_list_ambiguous_never_arbitrarily_picks_one(tools):
+    """Two lists both named 'Austin Investors' -- list names are confirmed
+    not unique; must never silently pick one."""
+    result = await tools.dispatch("get_crm_list", {"name": "Austin Investors"})
+    assert result["status"] == "ambiguous"
+    assert result["total"] == 2
+    descriptions = {c["description"] for c in result["candidates"]}
+    assert descriptions == {"2025 cohort", "2026 cohort"}
+
+
+async def test_get_crm_list_requires_a_name(tools):
+    result = await tools.dispatch("get_crm_list", {})
+    assert result["error"] == "invalid_filter"
+
+
+async def test_get_crm_list_members_without_filter_returns_all(tools):
+    result = await tools.dispatch("get_crm_list_members", {"list_name": "Hotshot"})
+    assert result["status"] == "found"
+    assert result["total"] == 3
+    names = {c["name"] for c in result["contacts"]}
+    assert names == {"Alice Angel", "Bob Angel", "John Smith"}
+
+
+async def test_get_crm_list_members_unknown_list_is_not_found(tools):
+    result = await tools.dispatch("get_crm_list_members", {"list_name": "Nonexistent List"})
+    assert result == {"status": "not_found"}
+
+
+async def test_get_crm_list_members_result_cannot_exceed_hard_limit(tools, crm_service):
+    big_list = await crm_service.create_contact_list("Big List")
+    all_contacts = await crm_service.contact_store.list()
+    for i in range(SEARCH_RESULT_LIMIT + 5):
+        c = make_contact(first_name=f"Bulk{i}", last_name="Contact")
+        await crm_service.contact_store.create(c)
+    all_contacts = await crm_service.contact_store.list()
+    bulk_ids = [c.crm_contact_id for c in all_contacts if c.first_name and c.first_name.startswith("Bulk")]
+    await crm_service.bulk_add_to_list(big_list.list_id, bulk_ids)
+
+    result = await tools.dispatch("get_crm_list_members", {"list_name": "Big List", "limit": 999})
+
+    assert result["total"] > SEARCH_RESULT_LIMIT
+    assert result["returned"] == SEARCH_RESULT_LIMIT
+    assert len(result["contacts"]) == SEARCH_RESULT_LIMIT
+
+
+# --- Phase 3: the list + CRM-filter composite (the "Hotshot" example) ------
+
+
+async def test_count_angel_investors_in_hotshot_list_uses_the_composite(tools):
+    """The exact example from the approved architecture: 'how many angel
+    investors are in the Hotshot list' resolves via count_crm_list_members
+    with the SAME custom:investor_type filter count_crm_contacts uses --
+    of Hotshot's 3 members (Alice Angel, Bob Angel, John Smith), only the
+    2 Angels match."""
+    result = await tools.dispatch(
+        "count_crm_list_members",
+        {
+            "list_name": "Hotshot",
+            "filters": [{"field": "custom:investor_type", "operator": "contains_any", "value": ["Angel Investor"]}],
+        },
+    )
+    assert result == {"status": "found", "list": {"list_id": result["list"]["list_id"], "name": "Hotshot"}, "total": 2}
+
+
+async def test_count_crm_list_members_without_filter_reuses_precomputed_count(tools):
+    result = await tools.dispatch("count_crm_list_members", {"list_name": "Hotshot"})
+    assert result["total"] == 3
+
+
+async def test_get_crm_list_members_with_filter_returns_only_matching_contacts(tools):
+    result = await tools.dispatch(
+        "get_crm_list_members",
+        {
+            "list_name": "Hotshot",
+            "filters": [{"field": "custom:investor_type", "operator": "contains_any", "value": ["Angel Investor"]}],
+        },
+    )
+    assert result["total"] == 2
+    names = {c["name"] for c in result["contacts"]}
+    assert names == {"Alice Angel", "Bob Angel"}
+
+
+async def test_count_crm_list_members_unknown_list_is_not_found(tools):
+    result = await tools.dispatch("count_crm_list_members", {"list_name": "Nonexistent List", "filters": []})
+    assert result == {"status": "not_found"}
+
+
+async def test_count_crm_list_members_ambiguous_list_name(tools):
+    result = await tools.dispatch("count_crm_list_members", {"list_name": "Austin Investors"})
+    assert result["status"] == "ambiguous"
+
+
+async def test_list_member_filter_rejects_unknown_field(tools):
+    result = await tools.dispatch(
+        "count_crm_list_members",
+        {"list_name": "Hotshot", "filters": [{"field": "ssn", "operator": "eq", "value": "x"}]},
+    )
+    assert result["error"] == "invalid_filter"
+
+
+async def test_list_member_filter_rejects_unknown_operator(tools):
+    result = await tools.dispatch(
+        "get_crm_list_members",
+        {"list_name": "Hotshot", "filters": [{"field": "city", "operator": "sql_injection", "value": "x"}]},
+    )
+    assert result["error"] == "invalid_filter"
+
+
+async def test_get_crm_list_members_requires_list_name(tools):
+    result = await tools.dispatch("get_crm_list_members", {})
+    assert result["error"] == "invalid_filter"
+
+
+def test_list_tools_present_in_registry_no_write_tools():
+    from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS
+
+    names = {t["name"] for t in CRM_TOOL_DEFINITIONS}
+    assert names == {
+        "count_crm_contacts",
+        "search_crm_contacts",
+        "get_crm_contact",
+        "list_crm_lists",
+        "get_crm_list",
+        "get_crm_list_members",
+        "count_crm_list_members",
+    }
+    for forbidden in ["create", "update", "delete", "bulk_add", "bulk_remove", "remove"]:
+        assert not any(forbidden in name.lower() for name in names)

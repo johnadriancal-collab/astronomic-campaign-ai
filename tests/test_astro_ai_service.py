@@ -27,7 +27,7 @@ from app.models.astro_ai import AstroChatMessage, AstroChatRole
 from app.models.crm import CrmContact, CrmCustomFieldDefinition, CustomFieldType
 from app.repositories.crm_custom_field_store import MemoryCrmCustomFieldStore
 from app.services.astro_ai_service import (
-    CRM_SYSTEM_PROMPT_TEMPLATE,
+    HUB_SYSTEM_PROMPT_TEMPLATE,
     MAX_MESSAGE_LENGTH,
     MAX_MESSAGES,
     MAX_TOOL_ITERATIONS,
@@ -35,7 +35,15 @@ from app.services.astro_ai_service import (
     AstroAiService,
     AstroAiValidationError,
 )
+from app.models.activity import ActivityCategory, ActivitySource
+from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
+from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.mailbox_store import MemoryMailboxStore
+from app.services.activity_log_service import ActivityLogService
+from app.services.astro_activity_tools import AstroActivityTools
 from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS, AstroCrmTools
+from app.services.astro_hub_tools import AstroHubTools
+from app.services.astro_mailbox_tools import AstroMailboxTools
 from app.services.crm_service import CrmService
 
 pytestmark = pytest.mark.asyncio
@@ -297,7 +305,7 @@ async def crm_tools():
 
 @pytest.fixture
 def service_with_crm(claude_client, crm_tools):
-    return AstroAiService(claude_client=claude_client, crm_tools=crm_tools)
+    return AstroAiService(claude_client=claude_client, hub_tools=AstroHubTools(crm_tools=crm_tools))
 
 
 def tool_use_response(text: str, tool_name: str, tool_input: dict, tool_id: str = "toolu_1"):
@@ -477,11 +485,153 @@ async def test_system_prompt_includes_live_crm_field_vocabulary_when_tools_confi
     assert "custom:investor_type" in prompt
     assert "Angel Investor" in prompt
     assert prompt != SYSTEM_PROMPT
-    assert prompt.startswith(CRM_SYSTEM_PROMPT_TEMPLATE.split("{fields_description}")[0])
+    assert prompt.startswith(HUB_SYSTEM_PROMPT_TEMPLATE.split("{fields_description}")[0])
 
 
 async def test_no_write_tools_exist_in_the_crm_tool_registry():
     names = {t["name"] for t in CRM_TOOL_DEFINITIONS}
-    assert names == {"count_crm_contacts", "search_crm_contacts", "get_crm_contact"}
+    assert names == {
+        "count_crm_contacts",
+        "search_crm_contacts",
+        "get_crm_contact",
+        "list_crm_lists",
+        "get_crm_list",
+        "get_crm_list_members",
+        "count_crm_list_members",
+    }
     for forbidden in ["create", "update", "delete", "archive", "send", "apollo", "campaign", "mailbox"]:
         assert not any(forbidden in name.lower() for name in names)
+
+
+# --- Phase 3: multi-domain integration --------------------------------------
+
+
+@pytest_asyncio.fixture
+async def full_hub_tools(crm_tools):
+    """CRM (with the same Alice/Bob/Carol seed) + a connected mailbox +
+    one activity event -- enough to prove each domain's question routes
+    to the right tool through the real AstroAiService loop. Campaign
+    Manager is covered separately in test_astro_campaign_tools.py and
+    doesn't need its heavier fixture here."""
+    mailbox_store = MemoryMailboxStore()
+    await mailbox_store.create(
+        Mailbox(
+            mailbox_id=str(uuid.uuid4()),
+            provider=MailboxProvider.GOOGLE,
+            email="victoria@astronomicconnect.com",
+            display_name="Victoria Bennett",
+            status=MailboxStatus.CONNECTED,
+            google_user_id="g-1",
+            granted_scopes=["openid", "email", "profile"],
+            connected_at=_now(),
+            updated_at=_now(),
+        )
+    )
+    activity_log = ActivityLogService(MemoryActivityEventStore())
+    await activity_log.record(
+        event_type="contact.created",
+        category=ActivityCategory.CONTACTS,
+        source=ActivitySource.MANUAL_CRM,
+        summary="A contact was manually created in the CRM.",
+        entity_type="contact",
+    )
+
+    return AstroHubTools(
+        crm_tools=crm_tools,
+        mailbox_tools=AstroMailboxTools(mailbox_store),
+        activity_tools=AstroActivityTools(activity_log),
+    )
+
+
+@pytest.fixture
+def service_with_full_hub(claude_client, full_hub_tools):
+    return AstroAiService(claude_client=claude_client, hub_tools=full_hub_tools)
+
+
+async def test_mailbox_question_invokes_only_the_mailbox_tool(service_with_full_hub, claude_client):
+    claude_client.tool_call_sequence = [
+        tool_use_response("", "list_connected_mailboxes", {}),
+        final_answer_response("Victoria Bennett's mailbox (victoria@astronomicconnect.com) is connected."),
+    ]
+
+    reply = await service_with_full_hub.chat([user_message("Which inboxes are connected?")])
+
+    assert len(claude_client.calls) == 2
+    tool_result = claude_client.calls[1]["messages"][-1]["content"][0]["content"]
+    assert "victoria@astronomicconnect.com" in tool_result
+    assert reply.content == "Victoria Bennett's mailbox (victoria@astronomicconnect.com) is connected."
+
+
+async def test_activity_question_invokes_only_the_activity_tool(service_with_full_hub, claude_client):
+    claude_client.tool_call_sequence = [
+        tool_use_response("", "search_activity", {}),
+        final_answer_response("1 contact was created recently."),
+    ]
+
+    reply = await service_with_full_hub.chat([user_message("What happened in the Hub today?")])
+
+    assert len(claude_client.calls) == 2
+    tool_result = claude_client.calls[1]["messages"][-1]["content"][0]["content"]
+    assert '"total": 1' in tool_result
+    assert reply.content == "1 contact was created recently."
+
+
+async def test_list_question_invokes_only_the_list_tool(service_with_full_hub, claude_client):
+    claude_client.tool_call_sequence = [
+        tool_use_response("", "list_crm_lists", {}),
+        final_answer_response("You don't have any CRM lists yet."),
+    ]
+
+    reply = await service_with_full_hub.chat([user_message("What lists do we have?")])
+
+    assert len(claude_client.calls) == 2
+    tool_result = claude_client.calls[1]["messages"][-1]["content"][0]["content"]
+    assert '"lists": []' in tool_result
+
+
+async def test_cross_domain_question_can_use_two_different_domains_in_one_turn(service_with_full_hub, claude_client):
+    """Simulates Claude resolving a list, then separately counting CRM
+    contacts -- proving AstroHubTools correctly routes two DIFFERENT
+    domains' tool names within the same tool-use loop, not just within
+    one domain."""
+    claude_client.tool_call_sequence = [
+        tool_use_response("", "list_crm_lists", {}, tool_id="toolu_a"),
+        tool_use_response(
+            "",
+            "count_crm_contacts",
+            {"filters": [{"field": "custom:investor_type", "operator": "contains_any", "value": ["Angel Investor"]}]},
+            tool_id="toolu_b",
+        ),
+        final_answer_response("You have no lists yet, but there are 2 angel investors in the CRM."),
+    ]
+
+    reply = await service_with_full_hub.chat([user_message("What lists do we have, and how many angel investors are there?")])
+
+    assert len(claude_client.calls) == 3
+    first_tool_result = claude_client.calls[1]["messages"][-1]["content"][0]["content"]
+    second_tool_result = claude_client.calls[2]["messages"][-1]["content"][0]["content"]
+    assert '"lists": []' in first_tool_result
+    assert '"total": 2' in second_tool_result
+    assert reply.content == "You have no lists yet, but there are 2 angel investors in the CRM."
+
+
+async def test_general_question_still_invokes_no_tool_with_full_hub_configured(service_with_full_hub, claude_client):
+    claude_client.reply_text = "A family office is a private wealth management firm."
+
+    reply = await service_with_full_hub.chat([user_message("What is a family office?")])
+
+    assert len(claude_client.calls) == 1
+    assert reply.content == "A family office is a private wealth management firm."
+
+
+async def test_unauthorized_mailbox_credential_field_never_reaches_a_tool_result(service_with_full_hub, claude_client):
+    claude_client.tool_call_sequence = [
+        tool_use_response("", "list_connected_mailboxes", {}),
+        final_answer_response("Victoria's mailbox is connected."),
+    ]
+
+    await service_with_full_hub.chat([user_message("Which inboxes are connected?")])
+
+    tool_result = claude_client.calls[1]["messages"][-1]["content"][0]["content"].lower()
+    for forbidden in ["refresh_token", "access_token", "encrypted", "client_secret"]:
+        assert forbidden not in tool_result

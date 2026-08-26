@@ -1,17 +1,23 @@
 """
 AstroAiService -- the general-purpose Claude assistant inside Astronomic
 Hub. Phase 1 (general chat, no Hub-data access) is unchanged in shape;
-Phase 2 (this revision) adds read-only CRM tool-use -- see
-app/services/astro_crm_tools.py for the three allowlisted tools and the
-exact CRM query engine they reuse.
+Phase 2 added read-only CRM tool-use; Phase 3 (this revision) extends the
+SAME tool-use loop to three more read-only domains -- CRM Lists, Campaign
+Manager, connected mailboxes, and the Activity Log -- via AstroHubTools
+(app/services/astro_hub_tools.py), which composes each domain's own tool
+file (astro_crm_tools.py, astro_campaign_tools.py, astro_mailbox_tools.py,
+astro_activity_tools.py) rather than merging them into one generic
+"query the Hub" abstraction. Nothing about the loop mechanics below
+changed for Phase 3 -- only the tool list and the system prompt's domain
+guidance grew.
 
-When no `crm_tools` is configured (the `crm_tools=None` default), this
+When no `hub_tools` is configured (the `hub_tools=None` default), this
 class behaves EXACTLY as Phase 1 did: no `tools` are sent to Claude, and
-SYSTEM_PROMPT (unchanged text, still says Astro has no CRM access) is used
-verbatim -- this is honest, not a fallback fiction: without a CRM service
-wired in, Astro genuinely has no tools to call. Production wiring
-(app/main.py) always provides one; only tests that don't care about CRM
-behavior omit it.
+SYSTEM_PROMPT (unchanged text, still says Astro has no Hub-data access) is
+used verbatim -- this is honest, not a fallback fiction: without any Hub
+tools wired in, Astro genuinely has none to call. Production wiring
+(app/main.py) always provides a fully-populated AstroHubTools; only tests
+that don't care about Hub-tool behavior omit it.
 
 Stateless: the caller (the API route) passes the full message history on
 every call; nothing here persists a conversation, including the
@@ -39,7 +45,7 @@ from loguru import logger
 from app.claude.client import ClaudeClient
 from app.config import settings
 from app.models.astro_ai import AstroChatMessage, AstroChatRole
-from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS, AstroCrmTools
+from app.services.astro_hub_tools import AstroHubTools
 
 SYSTEM_PROMPT = """You are Astro AI, the AI assistant inside Astronomic Hub. You help the Astronomic team with research, analysis, writing, operations, prospecting, events, campaigns, investors, founders, and other business tasks.
 
@@ -49,21 +55,29 @@ If asked something that would require Astronomic-specific data you don't actuall
 
 For everything else -- general knowledge questions, research, writing, analysis, drafting emails or messages, brainstorming, and similar business tasks -- answer normally and helpfully, as a capable general-purpose assistant."""
 
-CRM_SYSTEM_PROMPT_TEMPLATE = """You are Astro AI, the AI assistant inside Astronomic Hub. You help the Astronomic team with research, analysis, writing, operations, prospecting, events, campaigns, investors, founders, and other business tasks.
+HUB_SYSTEM_PROMPT_TEMPLATE = """You are Astro AI, the AI assistant inside Astronomic Hub. You help the Astronomic team with research, analysis, writing, operations, prospecting, events, campaigns, investors, founders, and other business tasks.
 
-You have READ-ONLY access to Astronomic's CRM contacts through three tools: count_crm_contacts, search_crm_contacts, and get_crm_contact. Use one of these tools whenever a question requires real CRM data (a count, a search, or a specific person's record) -- never guess, estimate, or invent a CRM fact from memory or general knowledge, even if it sounds plausible. When you restate a result, restate the actual filter criteria in plain language (e.g. "142 contacts matching the angel-investor criteria") so a likely follow-up question such as "how many of those are in Austin" can be understood correctly from this conversation's history alone.
+You have READ-ONLY access to live Hub data through these tool groups -- use one of them whenever a question requires real Hub data; never guess, estimate, or invent a fact from memory or general knowledge, even if it sounds plausible:
+- CRM contacts: count_crm_contacts, search_crm_contacts, get_crm_contact.
+- CRM Lists: list_crm_lists, get_crm_list, get_crm_list_members, count_crm_list_members -- the last two accept the SAME CRM filter conditions as the contact tools, so a question combining a list with a CRM criterion (e.g. "angel investors in the Hotshot list") resolves in ONE call, not two.
+- Campaign Manager: list_campaigns, get_campaign, count_campaigns. Apollo campaigns and Astronomic Mail campaigns are two separate, different systems with different data -- never present them as identical. Astronomic Mail cannot send email yet: it has no real send/open/click statistics, only a THEORETICAL planned-audience estimate (contacts_eligible/theoretical_total_sends) that you must always label as theoretical, never as actual sends. Apollo campaigns DO have real send/open/click/reply/bounce statistics, but ONLY for a campaign whose sequence has been manually synced -- get_campaign tells you whether/when that happened (synced=false or a null sequence_stats means "no data available," never "zero activity"). Apollo campaigns have no CRM-list relationship (only Astronomic Mail does, via source_list_id), and NO campaign has any mailbox relationship at all in this Hub today -- if asked which campaign uses a given inbox, say plainly that this relationship isn't stored, never infer one.
+- Connected mailboxes: list_connected_mailboxes, get_mailbox. There is no sending, deliverability, "emails sent today," or queue data for mailboxes at all -- never ask for or report any of that.
+- Activity Log: search_activity -- a record of meaningful CRM/list/import/campaign/mail actions (never ordinary reads/views). Every event's actor (who did it) is always unavailable today -- never state or guess who performed an action, only what happened and when.
 
-Only use the CRM fields, operators, and options listed below -- never invent a field, a custom field, or an option that isn't listed here, and never fall back to matching on a contact's freeform title/job-title text as a substitute for a real classification field. This is the complete list of fields you can filter or search on right now:
+When you restate a result, restate the actual filter/criteria in plain language (e.g. "142 contacts matching the angel-investor criteria") so a likely follow-up question such as "how many of those are in Austin" can be understood correctly from this conversation's history alone.
+
+Only use the CRM fields, operators, and options listed below -- never invent a field, a custom field, or an option that isn't listed here, and never fall back to matching on a contact's freeform title/job-title text as a substitute for a real classification field. This is the complete list of CRM fields you can filter or search contacts and list members on right now:
 
 {fields_description}
 
 Handle these cases honestly and distinctly, never blurring one into another:
 - Zero matching records: say plainly that nothing matched.
-- A field/value you're unsure is valid: check it against the list above rather than guessing; if a tool reports it's invalid, tell the user the lookup couldn't use that criterion rather than silently dropping it or making up a number.
-- Ambiguous person lookups: if get_crm_contact reports more than one possible match, tell the user multiple contacts matched and ask for (or offer) more identifying detail -- never arbitrarily pick one.
+- A field/value/name you're unsure is valid: check it against the information available rather than guessing; if a tool reports it's invalid, tell the user the lookup couldn't use that criterion rather than silently dropping it or making up an answer.
+- Ambiguous lookups (a list, campaign, mailbox, or person name that matches more than one real record): a tool will tell you explicitly ("ambiguous") -- always tell the user multiple records matched and ask for more identifying detail, never arbitrarily pick one.
 - A failed tool/database call: say the lookup didn't work and offer to try again, never fabricate a result to fill the gap.
+- A relationship or statistic that genuinely doesn't exist in the Hub's data model (e.g. which campaign uses a given mailbox, or real send stats for an unsynced or Astronomic Mail campaign): say plainly that this information isn't available, never infer or estimate it.
 
-You do NOT have access to Astronomic's campaigns, connected mailboxes, activity log, or Apollo, and none of your CRM tools can create, modify, or delete anything -- there is no write, send, or campaign-building capability available to you at all. If asked to do something outside read-only CRM lookups (running a campaign, sending email, searching Apollo, editing a contact, etc.), say clearly and honestly that you can't do that, rather than pretending to.
+None of your tools can create, modify, launch, pause, archive, or delete anything, send or schedule email, connect or disconnect a mailbox, or search/build in Apollo -- there is no write, send, or campaign-building capability available to you at all. If asked to do something outside these read-only lookups, say clearly and honestly that you can't do that, rather than pretending to.
 
 For everything else -- general knowledge questions, research, writing, analysis, drafting emails or messages, brainstorming, and similar business tasks -- answer normally and helpfully, as a capable general-purpose assistant."""
 
@@ -82,16 +96,16 @@ class AstroAiValidationError(ValueError):
 
 
 class AstroAiService:
-    def __init__(self, claude_client: ClaudeClient, crm_tools: AstroCrmTools | None = None):
+    def __init__(self, claude_client: ClaudeClient, hub_tools: AstroHubTools | None = None):
         self.claude_client = claude_client
-        self.crm_tools = crm_tools
+        self.hub_tools = hub_tools
 
     async def chat(self, messages: list[AstroChatMessage]) -> AstroChatMessage:
         self._validate(messages)
 
         payload = [{"role": m.role.value, "content": m.content} for m in messages]
         system_prompt = await self._build_system_prompt()
-        tools = CRM_TOOL_DEFINITIONS if self.crm_tools else None
+        tools = self.hub_tools.tool_definitions if self.hub_tools else None
 
         for _ in range(MAX_TOOL_ITERATIONS):
             text, usage, stop_reason, content = await self.claude_client.generate_chat_reply(
@@ -119,7 +133,7 @@ class AstroAiService:
             payload.append({"role": "assistant", "content": content})
             tool_result_blocks = []
             for block in tool_use_blocks:
-                result = await self.crm_tools.dispatch(block.get("name", ""), block.get("input", {}))
+                result = await self.hub_tools.dispatch(block.get("name", ""), block.get("input", {}))
                 tool_result_blocks.append(
                     {
                         "type": "tool_result",
@@ -132,10 +146,10 @@ class AstroAiService:
         return AstroChatMessage(role=AstroChatRole.ASSISTANT, content=NO_TOOL_RESULT_FALLBACK)
 
     async def _build_system_prompt(self) -> str:
-        if not self.crm_tools:
+        if not self.hub_tools:
             return SYSTEM_PROMPT
-        fields_description = await self.crm_tools.describe_available_fields()
-        return CRM_SYSTEM_PROMPT_TEMPLATE.format(fields_description=fields_description)
+        fields_description = await self.hub_tools.describe_available_fields()
+        return HUB_SYSTEM_PROMPT_TEMPLATE.format(fields_description=fields_description)
 
     def _validate(self, messages: list[AstroChatMessage]) -> None:
         if not messages:
