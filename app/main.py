@@ -270,10 +270,10 @@ async def lifespan(app: FastAPI):
             mailbox_tools=AstroMailboxTools(mailbox_store),
             activity_tools=AstroActivityTools(activity_log_service),
             campaign_tools=AstroCampaignTools(
-                campaign_service=campaign_service,
-                mail_campaign_service=mail_campaign_service,
-                mail_suppression_service=mail_suppression_service,
-                email_sequence_store=email_sequence_sync_service.store,
+                campaign_service=app.state.campaign_service,
+                mail_campaign_service=app.state.mail_campaign_service,
+                mail_suppression_service=app.state.mail_suppression_service,
+                email_sequence_store=app.state.email_sequence_sync_service.store,
             ),
         ),
     )
