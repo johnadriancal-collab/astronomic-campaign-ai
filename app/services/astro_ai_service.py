@@ -39,12 +39,14 @@ valves, not per-environment deployment config.
 """
 
 import json
+from datetime import datetime
 
 from loguru import logger
 
 from app.claude.client import ClaudeClient
 from app.config import settings
 from app.models.astro_ai import AstroChatMessage, AstroChatRole
+from app.services.astro_activity_tools import BUSINESS_TIMEZONE
 from app.services.astro_hub_tools import AstroHubTools
 
 SYSTEM_PROMPT = """You are Astro AI, the AI assistant inside Astronomic Hub. You help the Astronomic team with research, analysis, writing, operations, prospecting, events, campaigns, investors, founders, and other business tasks.
@@ -62,7 +64,7 @@ You have READ-ONLY access to live Hub data through these tool groups -- use one 
 - CRM Lists: list_crm_lists, get_crm_list, get_crm_list_members, count_crm_list_members -- the last two accept the SAME CRM filter conditions as the contact tools, so a question combining a list with a CRM criterion (e.g. "angel investors in the Hotshot list") resolves in ONE call, not two.
 - Campaign Manager: list_campaigns, get_campaign, count_campaigns. Apollo campaigns and Astronomic Mail campaigns are two separate, different systems with different data -- never present them as identical. Astronomic Mail cannot send email yet: it has no real send/open/click statistics, only a THEORETICAL planned-audience estimate (contacts_eligible/theoretical_total_sends) that you must always label as theoretical, never as actual sends. Apollo campaigns DO have real send/open/click/reply/bounce statistics, but ONLY for a campaign whose sequence has been manually synced -- get_campaign tells you whether/when that happened (synced=false or a null sequence_stats means "no data available," never "zero activity"). Apollo campaigns have no CRM-list relationship (only Astronomic Mail does, via source_list_id), and NO campaign has any mailbox relationship at all in this Hub today -- if asked which campaign uses a given inbox, say plainly that this relationship isn't stored, never infer one.
 - Connected mailboxes: list_connected_mailboxes, get_mailbox. There is no sending, deliverability, "emails sent today," or queue data for mailboxes at all -- never ask for or report any of that.
-- Activity Log: search_activity -- a record of meaningful CRM/list/import/campaign/mail actions (never ordinary reads/views). Every event's actor (who did it) is always unavailable today -- never state or guess who performed an action, only what happened and when.
+- Activity Log: search_activity -- a record of meaningful CRM/list/import/campaign/mail actions (never ordinary reads/views). Every event's actor (who did it) is always unavailable today -- never state or guess who performed an action, only what happened and when. Whenever a question involves ANY date or time period -- explicit ("August 20", "between August 20 and 25") or relative ("today", "yesterday", "this week", "last week") -- you MUST translate it into date_from/date_to and pass them to search_activity; never call it with no date filter and then manually reason over the raw results yourself, since that only returns the 20 most-recent events overall and can silently miss earlier activity from the very period you were asked about. The current date/time is {current_datetime} (America/Chicago, Central Time) -- use this as your anchor for any relative date, and state the date range you used (in Central Time) in your answer so the user can adjust for their own timezone.
 
 When you restate a result, restate the actual filter/criteria in plain language (e.g. "142 contacts matching the angel-investor criteria") so a likely follow-up question such as "how many of those are in Austin" can be understood correctly from this conversation's history alone.
 
@@ -149,7 +151,15 @@ class AstroAiService:
         if not self.hub_tools:
             return SYSTEM_PROMPT
         fields_description = await self.hub_tools.describe_available_fields()
-        return HUB_SYSTEM_PROMPT_TEMPLATE.format(fields_description=fields_description)
+        # Computed fresh on every call (never cached) so "today"/"this
+        # week" are always anchored to the actual current moment -- see
+        # astro_activity_tools.py's module docstring for why
+        # America/Chicago (BUSINESS_TIMEZONE) and not UTC or a caller's
+        # local time.
+        current_datetime = datetime.now(BUSINESS_TIMEZONE).strftime("%A, %B %d, %Y, %I:%M %p")
+        return HUB_SYSTEM_PROMPT_TEMPLATE.format(
+            fields_description=fields_description, current_datetime=current_datetime
+        )
 
     def _validate(self, messages: list[AstroChatMessage]) -> None:
         if not messages:

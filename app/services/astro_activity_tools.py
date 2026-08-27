@@ -13,6 +13,20 @@ system exists in this app) -- the tool description and system-prompt
 guidance must make Astro understand this explicitly, so it never invents
 a "who" for an event.
 
+Timezone note (fixed after Phase 3 production verification found Astro
+answering "what happened today" by fetching the 20 most-recent events with
+no date filter and reasoning over their timestamps itself -- unreliable
+once a day has more than 20 events): this app has no declared backend
+"business timezone" anywhere (confirmed by inspection -- the only
+timezone value in the whole codebase is the frontend's
+DEFAULT_TIMEZONE="America/Chicago", scoped solely to per-campaign
+mail-sending-schedule defaults, never anything to do with Activity Log or
+"today"). America/Chicago was explicitly chosen for THIS purpose by the
+user. `ActivityEvent.created_at` remains stored/compared in UTC exactly as
+before; a date/datetime given here WITHOUT its own timezone is interpreted
+as America/Chicago wall-clock time, then converted to UTC for comparison
+-- never silently assumed to already be UTC.
+
 Known, pre-existing technical debt (NOT introduced by this file, not
 addressed in this phase per explicit scope): ActivityLogService.list_events()
 loads the ENTIRE activity_events table on every call before filtering in
@@ -22,6 +36,7 @@ larger scale. No caching or store-level filtering is introduced here.
 """
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from loguru import logger
 
@@ -29,6 +44,11 @@ from app.models.activity import ActivityCategory, ActivityEvent
 from app.services.activity_log_service import ActivityLogService
 
 ACTIVITY_SEARCH_LIMIT = 20
+
+# The Hub's chosen convention for interpreting a date/datetime that arrives
+# with no timezone of its own -- see the module docstring above for why
+# this (and not UTC, and not the caller's local time) was chosen.
+BUSINESS_TIMEZONE = ZoneInfo("America/Chicago")
 
 _CATEGORY_VALUES = [c.value for c in ActivityCategory]
 
@@ -38,10 +58,17 @@ ASTRO_ACTIVITY_TOOL_DEFINITIONS: list[dict] = [
         "description": (
             "Search the Hub's Activity Log -- a record of meaningful CRM/contact/list/import/"
             "campaign/email-intake actions (never ordinary reads/views). Returns at most 20 "
-            "events plus the true total match count. Omit all filters to get the most recent "
-            "activity. IMPORTANT: every event's 'actor' is always unavailable (no user-identity "
-            "system exists yet) -- never state or guess who performed an action, only what "
-            "happened and when."
+            "events plus the true total match count. IMPORTANT: whenever the question specifies "
+            "or implies ANY date or time period -- explicit ('August 20', 'between August 20 and "
+            "25') or relative ('today', 'yesterday', 'this week', 'last week') -- you MUST "
+            "translate it into date_from/date_to and pass them here. Never call this with no "
+            "date filter and then manually reason over the returned timestamps yourself: with no "
+            "date filter this returns only the 20 most-recent events overall, which can silently "
+            "miss earlier activity from the very period you were asked about. Only omit "
+            "date_from/date_to when the question has no date/time scope at all (e.g. 'show me "
+            "recent activity'). Also IMPORTANT: every event's 'actor' is always unavailable (no "
+            "user-identity system exists yet) -- never state or guess who performed an action, "
+            "only what happened and when."
         ),
         "input_schema": {
             "type": "object",
@@ -52,8 +79,28 @@ ASTRO_ACTIVITY_TOOL_DEFINITIONS: list[dict] = [
                     "description": "Restrict to one category, e.g. 'contacts', 'lists', 'campaigns', 'mail', 'imports'.",
                 },
                 "q": {"type": "string", "description": "Case-insensitive text to match against the event summary/entity name."},
-                "date_from": {"type": "string", "description": "ISO 8601 date/datetime lower bound, e.g. '2026-08-20'."},
-                "date_to": {"type": "string", "description": "ISO 8601 date/datetime upper bound."},
+                "date_from": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 date or datetime marking the START of the period, e.g. "
+                        "'2026-08-20' or '2026-08-20T09:00:00-05:00'. A bare date with no time/"
+                        "timezone (e.g. '2026-08-20') is interpreted as the start of that day in "
+                        "America/Chicago (Central Time) -- the Hub's convention for dates with no "
+                        "timezone of their own, given in your system instructions along with the "
+                        "current date/time. Provide this whenever the question specifies or "
+                        "implies a date/time period."
+                    ),
+                },
+                "date_to": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 date or datetime marking the END of the period, inclusive, e.g. "
+                        "'2026-08-25'. A bare date with no time/timezone is interpreted as the END "
+                        "of that day (23:59:59) in America/Chicago (Central Time), so a single-day "
+                        "question can use the SAME bare date for both date_from and date_to and "
+                        "correctly cover the whole day."
+                    ),
+                },
                 "limit": {"type": "integer", "description": "Max events to return. Capped at 20 regardless of what you request."},
             },
             "required": [],
@@ -75,17 +122,28 @@ def _project_event(event: ActivityEvent) -> dict:
     }
 
 
-def _parse_datetime(value: str | None) -> datetime | None:
+def _parse_datetime(value: str | None, *, end_of_day: bool) -> datetime | None:
+    """`end_of_day` distinguishes date_from (bare date -> start of that
+    day) from date_to (bare date -> end of that day) so a single-day
+    question can pass the same bare date for both and correctly cover the
+    whole day -- see the date_to schema description above for why this
+    matters (without it, a bare date_to would resolve to that day's
+    midnight and exclude almost the entire day it names)."""
     if not value:
         return None
     parsed = datetime.fromisoformat(value)
-    # ActivityEvent.created_at is always UTC-aware; a bare date/datetime
-    # string from Claude (e.g. "2026-08-20") parses as naive, which would
-    # raise on comparison against an aware datetime -- assume UTC rather
-    # than reject an otherwise-reasonable date string.
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
+        # No timezone given -- interpret as America/Chicago (BUSINESS_TIMEZONE,
+        # see module docstring for why), never silently assume UTC.
+        is_bare_date = len(value.strip()) == 10  # exactly "YYYY-MM-DD", no time component
+        if is_bare_date and end_of_day:
+            parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+        parsed = parsed.replace(tzinfo=BUSINESS_TIMEZONE)
+    # ActivityEvent.created_at is always UTC-aware; convert whatever
+    # timezone this value ended up in (BUSINESS_TIMEZONE above, or
+    # whatever explicit offset/Z the caller supplied) to UTC so the
+    # comparison in ActivityLogService.list_events() is apples-to-apples.
+    return parsed.astimezone(timezone.utc)
 
 
 class AstroActivityTools:
@@ -113,8 +171,8 @@ class AstroActivityTools:
         category_raw = tool_input.get("category")
         category = ActivityCategory(category_raw) if category_raw else None
         q = tool_input.get("q") or None
-        date_from = _parse_datetime(tool_input.get("date_from"))
-        date_to = _parse_datetime(tool_input.get("date_to"))
+        date_from = _parse_datetime(tool_input.get("date_from"), end_of_day=False)
+        date_to = _parse_datetime(tool_input.get("date_to"), end_of_day=True)
         requested_limit = int(tool_input.get("limit") or ACTIVITY_SEARCH_LIMIT)
         limit = max(1, min(requested_limit, ACTIVITY_SEARCH_LIMIT))
 

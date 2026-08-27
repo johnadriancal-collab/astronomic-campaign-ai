@@ -4,14 +4,21 @@ surface. Exercised against a REAL ActivityLogService (in-memory store).
 """
 
 import ast
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
-from app.models.activity import ActivityCategory, ActivitySource
+from app.models.activity import ActivityCategory, ActivityEvent, ActivitySource
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.services.activity_log_service import ActivityLogService
-from app.services.astro_activity_tools import ACTIVITY_SEARCH_LIMIT, ASTRO_ACTIVITY_TOOL_DEFINITIONS, AstroActivityTools
+from app.services.astro_activity_tools import (
+    ACTIVITY_SEARCH_LIMIT,
+    ASTRO_ACTIVITY_TOOL_DEFINITIONS,
+    BUSINESS_TIMEZONE,
+    AstroActivityTools,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -167,3 +174,160 @@ def test_astro_activity_tools_never_imports_write_capable_modules():
     }
     hit = forbidden & imported_modules
     assert not hit, f"astro_activity_tools.py imports forbidden module(s): {hit}"
+
+
+# --- date-scoping fix (Phase 3 production verification finding) -----------
+#
+# Root cause recap: "what happened today" was calling search_activity with
+# no date filter at all, fetching the 20 most-recent events, and having
+# Claude reason over their timestamps itself -- unreliable once a day has
+# more than 20 events. These tests prove the ACTUAL server-side date
+# filtering (not Claude's own reasoning) is correct at the boundaries.
+
+
+def _event_at(created_at: datetime, summary: str) -> ActivityEvent:
+    return ActivityEvent(
+        event_id=str(uuid.uuid4()),
+        event_type="contact.created",
+        category=ActivityCategory.CONTACTS,
+        created_at=created_at,
+        source=ActivitySource.MANUAL_CRM,
+        summary=summary,
+    )
+
+
+@pytest.fixture
+def business_noon():
+    """Noon on August 20, 2026, America/Chicago -- a fixed anchor so
+    boundary tests are deterministic regardless of when they actually run."""
+    return datetime(2026, 8, 20, 12, 0, 0, tzinfo=BUSINESS_TIMEZONE)
+
+
+async def test_date_from_only_excludes_earlier_events(tools, activity_log_service, business_noon):
+    await activity_log_service.store.create(_event_at(business_noon.astimezone(timezone.utc) - timedelta(days=1), "before"))
+    await activity_log_service.store.create(_event_at(business_noon.astimezone(timezone.utc) + timedelta(hours=1), "after"))
+
+    result = await tools.dispatch("search_activity", {"date_from": business_noon.isoformat()})
+
+    assert result["total"] == 1
+    assert result["events"][0]["summary"] == "after"
+
+
+async def test_date_to_only_excludes_later_events(tools, activity_log_service, business_noon):
+    await activity_log_service.store.create(_event_at(business_noon.astimezone(timezone.utc) - timedelta(hours=1), "before"))
+    await activity_log_service.store.create(_event_at(business_noon.astimezone(timezone.utc) + timedelta(days=1), "after"))
+
+    result = await tools.dispatch("search_activity", {"date_to": business_noon.isoformat()})
+
+    assert result["total"] == 1
+    assert result["events"][0]["summary"] == "before"
+
+
+async def test_date_from_and_date_to_together_bound_both_sides(tools, activity_log_service, business_noon):
+    utc_noon = business_noon.astimezone(timezone.utc)
+    await activity_log_service.store.create(_event_at(utc_noon - timedelta(days=2), "too early"))
+    await activity_log_service.store.create(_event_at(utc_noon, "in range"))
+    await activity_log_service.store.create(_event_at(utc_noon + timedelta(days=2), "too late"))
+
+    result = await tools.dispatch(
+        "search_activity",
+        {
+            "date_from": (business_noon - timedelta(days=1)).isoformat(),
+            "date_to": (business_noon + timedelta(days=1)).isoformat(),
+        },
+    )
+
+    assert result["total"] == 1
+    assert result["events"][0]["summary"] == "in range"
+
+
+async def test_explicit_timezone_offset_is_respected_not_reinterpreted(tools, activity_log_service):
+    """An input that already carries its own UTC offset must be honored
+    as-is -- never silently reinterpreted as America/Chicago."""
+    # 2026-08-20T00:00:00-05:00 == 2026-08-20T05:00:00Z
+    event_just_after = datetime(2026, 8, 20, 5, 0, 1, tzinfo=timezone.utc)
+    event_just_before = datetime(2026, 8, 20, 4, 59, 59, tzinfo=timezone.utc)
+    await activity_log_service.store.create(_event_at(event_just_after, "after"))
+    await activity_log_service.store.create(_event_at(event_just_before, "before"))
+
+    result = await tools.dispatch("search_activity", {"date_from": "2026-08-20T00:00:00-05:00"})
+
+    assert result["total"] == 1
+    assert result["events"][0]["summary"] == "after"
+
+
+async def test_bare_date_covers_the_whole_business_day_in_america_chicago(tools, activity_log_service):
+    """The exact 'what happened on August 20' / 'today' scenario: a bare
+    date used for BOTH date_from and date_to must capture the entire
+    America/Chicago day, not just its literal midnight instant."""
+    start_of_day_chicago = datetime(2026, 8, 20, 0, 0, 0, tzinfo=BUSINESS_TIMEZONE).astimezone(timezone.utc)
+    end_of_day_chicago = datetime(2026, 8, 20, 23, 59, 59, tzinfo=BUSINESS_TIMEZONE).astimezone(timezone.utc)
+    mid_afternoon_chicago = datetime(2026, 8, 20, 15, 0, 0, tzinfo=BUSINESS_TIMEZONE).astimezone(timezone.utc)
+
+    await activity_log_service.store.create(_event_at(start_of_day_chicago, "start of day"))
+    await activity_log_service.store.create(_event_at(mid_afternoon_chicago, "mid afternoon"))
+    await activity_log_service.store.create(_event_at(end_of_day_chicago, "end of day"))
+    await activity_log_service.store.create(_event_at(start_of_day_chicago - timedelta(seconds=1), "just before midnight"))
+    await activity_log_service.store.create(_event_at(end_of_day_chicago + timedelta(minutes=2), "just after end of day"))
+
+    result = await tools.dispatch("search_activity", {"date_from": "2026-08-20", "date_to": "2026-08-20"})
+
+    assert result["total"] == 3
+    summaries = {e["summary"] for e in result["events"]}
+    assert summaries == {"start of day", "mid afternoon", "end of day"}
+
+
+async def test_boundary_events_immediately_before_inside_after_period(tools, activity_log_service, business_noon):
+    """One second before, exactly at, and one second after the requested
+    window -- proves inclusive boundaries are exactly where expected."""
+    utc_noon = business_noon.astimezone(timezone.utc)
+    await activity_log_service.store.create(_event_at(utc_noon - timedelta(seconds=1), "just before"))
+    await activity_log_service.store.create(_event_at(utc_noon, "exactly at start"))
+    await activity_log_service.store.create(_event_at(utc_noon + timedelta(hours=12) - timedelta(seconds=1), "exactly at end"))
+    await activity_log_service.store.create(_event_at(utc_noon + timedelta(hours=12), "just after"))
+
+    result = await tools.dispatch(
+        "search_activity",
+        {
+            "date_from": business_noon.isoformat(),
+            "date_to": (business_noon + timedelta(hours=12) - timedelta(seconds=1)).isoformat(),
+        },
+    )
+
+    summaries = {e["summary"] for e in result["events"]}
+    assert summaries == {"exactly at start", "exactly at end"}
+    assert result["total"] == 2
+
+
+async def test_date_filtered_search_still_respects_the_twenty_result_ceiling(tools, activity_log_service, business_noon):
+    utc_noon = business_noon.astimezone(timezone.utc)
+    for i in range(ACTIVITY_SEARCH_LIMIT + 5):
+        await activity_log_service.store.create(_event_at(utc_noon + timedelta(minutes=i), f"event {i}"))
+
+    result = await tools.dispatch(
+        "search_activity",
+        {"date_from": business_noon.isoformat(), "date_to": (business_noon + timedelta(days=1)).isoformat()},
+    )
+
+    assert result["total"] > ACTIVITY_SEARCH_LIMIT
+    assert result["returned"] == ACTIVITY_SEARCH_LIMIT
+    assert len(result["events"]) == ACTIVITY_SEARCH_LIMIT
+
+
+def test_date_from_date_to_and_business_timezone_documented_in_tool_schema():
+    """The schema description is what teaches Claude the America/Chicago
+    convention and the start-of-day/end-of-day bare-date behavior."""
+    tool = next(t for t in ASTRO_ACTIVITY_TOOL_DEFINITIONS if t["name"] == "search_activity")
+    date_from_desc = tool["input_schema"]["properties"]["date_from"]["description"]
+    date_to_desc = tool["input_schema"]["properties"]["date_to"]["description"]
+    assert "America/Chicago" in date_from_desc
+    assert "America/Chicago" in date_to_desc
+    assert "end" in date_to_desc.lower()
+
+
+def test_tool_description_mandates_date_translation_for_relative_questions():
+    tool = next(t for t in ASTRO_ACTIVITY_TOOL_DEFINITIONS if t["name"] == "search_activity")
+    text = tool["description"].lower()
+    assert "must" in text
+    assert "today" in text and "yesterday" in text
+    assert "20 most-recent" in text or "20 most recent" in text

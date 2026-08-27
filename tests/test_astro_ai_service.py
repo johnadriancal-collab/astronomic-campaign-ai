@@ -485,7 +485,45 @@ async def test_system_prompt_includes_live_crm_field_vocabulary_when_tools_confi
     assert "custom:investor_type" in prompt
     assert "Angel Investor" in prompt
     assert prompt != SYSTEM_PROMPT
-    assert prompt.startswith(HUB_SYSTEM_PROMPT_TEMPLATE.split("{fields_description}")[0])
+    # {current_datetime} and {fields_description} are both runtime-
+    # substituted (the exact datetime is non-deterministic down to the
+    # second), so check the static text surrounding each placeholder
+    # appears in the right order rather than an exact prefix match.
+    before_current_datetime, after_current_datetime = HUB_SYSTEM_PROMPT_TEMPLATE.split("{current_datetime}")
+    assert prompt.startswith(before_current_datetime)
+    before_fields, _ = after_current_datetime.split("{fields_description}")
+    assert before_fields in prompt
+
+
+async def test_system_prompt_includes_the_real_current_date_in_america_chicago(service_with_crm, claude_client):
+    """Root cause of the Phase 3 date-scoping bug: Astro had no way to
+    know the actual current date, so it couldn't compute 'today'. This
+    proves the prompt now carries a real, freshly-computed anchor."""
+    from app.services.astro_activity_tools import BUSINESS_TIMEZONE
+
+    before = datetime.now(BUSINESS_TIMEZONE)
+    await service_with_crm.chat([user_message("hi")])
+    after = datetime.now(BUSINESS_TIMEZONE)
+
+    prompt = claude_client.last_call["system_prompt"]
+    assert str(before.year) in prompt
+    # The prompt states a specific day name (e.g. "Wednesday") -- assert
+    # whichever day the call actually landed on is present, tolerant of a
+    # midnight rollover between `before` and `after`.
+    assert before.strftime("%A") in prompt or after.strftime("%A") in prompt
+    assert "America/Chicago" in prompt
+
+
+async def test_activity_tool_guidance_mandates_date_translation_for_relative_questions(service_with_crm, claude_client):
+    """Phase 3 fix: Astro must never call search_activity with no date
+    filter and then self-filter timestamps -- that only sees the 20
+    most-recent events and can miss earlier same-period activity."""
+    await service_with_crm.chat([user_message("hi")])
+
+    prompt = claude_client.last_call["system_prompt"]
+    assert "date_from" in prompt and "date_to" in prompt
+    assert "20 most-recent events" in prompt or "20 most recent events" in prompt
+    assert "today" in prompt.lower() and "yesterday" in prompt.lower()
 
 
 async def test_no_write_tools_exist_in_the_crm_tool_registry():
@@ -562,18 +600,79 @@ async def test_mailbox_question_invokes_only_the_mailbox_tool(service_with_full_
     assert reply.content == "Victoria Bennett's mailbox (victoria@astronomicconnect.com) is connected."
 
 
-async def test_activity_question_invokes_only_the_activity_tool(service_with_full_hub, claude_client):
+async def test_activity_question_with_no_date_scope_invokes_the_activity_tool(service_with_full_hub, claude_client):
+    """'Show me recent activity' has no date scope at all -- omitting
+    date_from/date_to here is correct, not the Phase 3 bug (that bug was
+    specifically about DATE-SCOPED questions like 'today')."""
     claude_client.tool_call_sequence = [
         tool_use_response("", "search_activity", {}),
         final_answer_response("1 contact was created recently."),
     ]
 
-    reply = await service_with_full_hub.chat([user_message("What happened in the Hub today?")])
+    reply = await service_with_full_hub.chat([user_message("Show me recent activity.")])
 
     assert len(claude_client.calls) == 2
     tool_result = claude_client.calls[1]["messages"][-1]["content"][0]["content"]
     assert '"total": 1' in tool_result
     assert reply.content == "1 contact was created recently."
+
+
+async def test_todays_activity_question_uses_real_date_filtering_through_the_tool_path(service_with_full_hub, claude_client):
+    """The actual Phase 3 bug scenario, fixed: 'what happened today' must
+    resolve via search_activity's REAL date_from/date_to filtering against
+    the real ActivityLogService -- not via Claude fetching everything and
+    eyeballing timestamps. Seeds one event 3 days ago (outside 'today')
+    and one event within today's America/Chicago window, and asserts the
+    tool_result actually reflects the narrowed (not the full) count."""
+    from datetime import timedelta
+
+    from app.models.activity import ActivityEvent
+    from app.services.astro_activity_tools import BUSINESS_TIMEZONE
+
+    activity_store = service_with_full_hub.hub_tools.activity_tools.activity_log_service.store
+    now_chicago = datetime.now(BUSINESS_TIMEZONE)
+    today_start_utc = now_chicago.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+
+    await activity_store.create(
+        ActivityEvent(
+            event_id=str(uuid.uuid4()),
+            event_type="contact.created",
+            category=ActivityCategory.CONTACTS,
+            created_at=today_start_utc - timedelta(days=3),
+            source=ActivitySource.MANUAL_CRM,
+            summary="Three days ago -- must NOT be counted as 'today'.",
+        )
+    )
+    await activity_store.create(
+        ActivityEvent(
+            event_id=str(uuid.uuid4()),
+            event_type="contact.created",
+            category=ActivityCategory.CONTACTS,
+            created_at=today_start_utc + timedelta(hours=1),
+            source=ActivitySource.MANUAL_CRM,
+            summary="Earlier today -- MUST be counted.",
+        )
+    )
+    # (the fixture's own seeded event, created via record() at "now", is
+    # also within today's window, so the correct total is 2: that one +
+    # "Earlier today" -- NOT 3, which would mean date filtering was a
+    # no-op, and NOT 1, which would mean today's own earlier event got
+    # missed.)
+
+    claude_client.tool_call_sequence = [
+        tool_use_response(
+            "",
+            "search_activity",
+            {"date_from": now_chicago.strftime("%Y-%m-%d"), "date_to": now_chicago.strftime("%Y-%m-%d")},
+        ),
+        final_answer_response("2 things happened in the Hub today (Central Time)."),
+    ]
+
+    reply = await service_with_full_hub.chat([user_message("What happened in the Hub today?")])
+
+    tool_result = claude_client.calls[1]["messages"][-1]["content"][0]["content"]
+    assert '"total": 2' in tool_result
+    assert reply.content == "2 things happened in the Hub today (Central Time)."
 
 
 async def test_list_question_invokes_only_the_list_tool(service_with_full_hub, claude_client):
