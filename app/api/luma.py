@@ -37,7 +37,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
 
 from app.dependencies import get_luma_sync_service, verify_luma_webhook_request
-from app.models.luma import LumaBackfillCheckpoint, LumaQuestionMapping, LumaQuestionMappingCreateRequest, LumaQuestionMappingUpdateRequest
+from app.models.luma import LumaApprovalStatus, LumaBackfillCheckpoint, LumaEventBackfillResult, LumaQuestionMapping, LumaQuestionMappingCreateRequest, LumaQuestionMappingUpdateRequest
 from app.services.luma_sync_service import LumaMappingNotFoundError, LumaSyncError, LumaSyncService
 
 router = APIRouter(prefix="/sync", tags=["luma"])
@@ -82,16 +82,32 @@ async def luma_webhook(
     return {"status": "ok"}
 
 
-@router.post("/luma-backfill", response_model=LumaBackfillCheckpoint)
-async def luma_backfill(resume: bool = True, service: LumaSyncService = Depends(get_luma_sync_service)):
+@router.post("/luma-backfill")
+async def luma_backfill(
+    resume: bool = True,
+    event_id: str | None = None,
+    approval_status: LumaApprovalStatus | None = None,
+    service: LumaSyncService = Depends(get_luma_sync_service),
+) -> LumaBackfillCheckpoint | LumaEventBackfillResult:
     """
-    Runs the one-time historical import: every event on the configured
-    calendar, every guest on every event, through the exact same
-    process_guest_event() path the live webhook uses. `resume` (default
-    True) continues from the last durable checkpoint if a prior run was
-    interrupted or failed; pass false to force a fresh run.
+    Without `event_id`: runs the full historical import -- every event on
+    the configured calendar, every guest on every event, through the exact
+    same process_guest_event() path the live webhook uses. `resume`
+    (default True) continues from the last durable checkpoint if a prior
+    run was interrupted or failed; pass false to force a fresh run.
+
+    With `event_id`: scopes the run to exactly that one Luma event (never
+    touches any other event's guest list, never touches the full-calendar
+    checkpoint) -- see LumaSyncService.run_event_backfill for the full
+    contract. `approval_status`, only meaningful alongside `event_id`,
+    additionally filters to guests with that exact Luma approval status;
+    guests that don't match are never processed at all. `resume` is
+    ignored in this mode -- there is no durable checkpoint to resume, it's
+    always safe to rerun from scratch (see run_event_backfill's docstring).
     """
     try:
+        if event_id is not None:
+            return await service.run_event_backfill(event_id, approval_status=approval_status)
         return await service.run_backfill(resume=resume)
     except LumaSyncError as e:
         raise HTTPException(status_code=503, detail=str(e))

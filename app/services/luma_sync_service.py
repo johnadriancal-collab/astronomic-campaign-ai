@@ -52,6 +52,7 @@ from app.models.luma import (
     LumaBackfillCheckpoint,
     LumaBackfillStatus,
     LumaEvent,
+    LumaEventBackfillResult,
     LumaEventTicket,
     LumaMatchStatus,
     LumaQuestionMapping,
@@ -828,3 +829,124 @@ class LumaSyncService:
             if not has_more_guests:
                 return
             guest_cursor = next_guest_cursor
+
+    # --- targeted, single-event backfill -----------------------------------
+
+    async def _find_calendar_event(self, event_id: str) -> dict | None:
+        """Locates ONE event's full payload by id. Luma's API has no
+        single-event GET, only the paginated calendar list, so this pages
+        through calendar events (bounded by the small number of events on
+        one calendar) until it finds a match, then stops -- it never pages
+        through any event's GUEST list looking for this, which is the
+        expensive traversal event-scoped backfill exists to avoid."""
+        cursor = None
+        while True:
+            page = await self.luma_client.list_calendar_events(cursor=cursor)
+            for entry in page.get("entries") or []:
+                if entry.get("id") == event_id:
+                    return entry
+            if not page.get("has_more"):
+                return None
+            cursor = page.get("next_cursor")
+
+    async def run_event_backfill(
+        self, event_id: str, approval_status: LumaApprovalStatus | None = None
+    ) -> LumaEventBackfillResult:
+        """One-time targeted backfill for exactly ONE Luma event -- reuses
+        process_guest_event() (the exact same path webhooks and the
+        full-calendar backfill both use), so every existing safety
+        guarantee (guest-id idempotency, CRM matching/dedup,
+        POSSIBLE_DUPLICATE handling, identity-conflict protection,
+        question mappings, raw-answer preservation, Activity Log
+        behavior) applies unchanged -- nothing here re-implements or
+        bypasses any of it.
+
+        Deliberately does NOT use the durable LumaBackfillCheckpoint this
+        class's full-calendar run_backfill() depends on: that checkpoint's
+        cursor/resume state is designed for a long, multi-event,
+        possibly-interrupted job, and sharing it with this small,
+        single-event call would risk corrupting state a LATER
+        full-calendar backfill needs to resume correctly. Safe to rerun
+        from scratch instead -- every guest goes through the same
+        idempotent, dedup-aware path a resumed run would use anyway (a
+        guest already enriched with unchanged data simply produces no
+        new CRM write and no new Activity Log entry), so no persisted
+        cursor is needed for correctness here, only for pagination within
+        this one call.
+
+        approval_status, when given, is an exact-match filter against each
+        guest's OWN `approval_status` -- a guest that doesn't match is
+        never passed to process_guest_event() at all: no registration, no
+        contact, no Activity Log entry for it. Guests on OTHER events are
+        never even fetched -- only this one event's guest list is paged.
+        """
+        if self.luma_client is None:
+            raise LumaSyncError("Backfill requires a configured LumaClient.")
+
+        event_payload = await self._find_calendar_event(event_id)
+        if event_payload is None:
+            raise LumaSyncError(f"No calendar event found with id {event_id!r}.")
+
+        counts = LumaSyncCounts(events_processed=1)
+        guests_seen = 0
+        guests_matched = 0
+        cursor = None
+        while True:
+            guests_page = await self.luma_client.list_event_guests(event_id, cursor=cursor)
+            for guest_payload in guests_page.get("entries") or []:
+                guests_seen += 1
+                if approval_status is not None and guest_payload.get("approval_status") != approval_status.value:
+                    continue
+                guests_matched += 1
+                try:
+                    result = await self.process_guest_event(event_payload, guest_payload, webhook_delivery_id=None)
+                    _accumulate_counts(counts, result)
+                except Exception as e:  # noqa: BLE001 -- one bad guest must never abort the rest of this event
+                    counts.errors += 1
+                    logger.error(
+                        f"Luma event backfill: failed to process guest in event {event_id}: {type(e).__name__}: {e}"
+                    )
+
+            if not guests_page.get("has_more"):
+                break
+            cursor = guests_page.get("next_cursor")
+
+        event_name = event_payload.get("name") or "(untitled Luma event)"
+
+        # Emitted exactly once per invocation (never per-guest) -- only
+        # reached if the run above completed without an unhandled
+        # exception; a per-guest failure is already isolated and counted
+        # in counts.errors above, so this "completed" event is accurate
+        # even when some guests failed. Aggregate counts and structural
+        # identifiers only -- no guest name, email, registration answer,
+        # contact payload, or credential ever reaches this metadata.
+        await self.activity_log.record(
+            event_type="luma.event_backfill.completed",
+            category=ActivityCategory.LUMA,
+            source=ActivitySource.LUMA_SYNC,
+            summary=f"Targeted Luma backfill completed for {event_name}: {guests_matched} of {guests_seen} guests processed.",
+            entity_type="luma_event",
+            entity_id=event_id,
+            entity_name=event_name,
+            metadata={
+                "event_id": event_id,
+                "event_name": event_name,
+                "approval_status_filter": approval_status.value if approval_status is not None else None,
+                "guests_seen": guests_seen,
+                "guests_matching_filter": guests_matched,
+                "registrations_created": counts.registrations_created,
+                "registrations_updated": counts.registrations_updated,
+                "contacts_created": counts.contacts_created,
+                "contacts_enriched": counts.contacts_enriched,
+                "needs_review": counts.needs_review,
+                "errors": counts.errors,
+            },
+        )
+
+        return LumaEventBackfillResult(
+            event_id=event_id,
+            event_name=event_name,
+            guests_seen=guests_seen,
+            guests_matching_filter=guests_matched,
+            counts=counts,
+        )

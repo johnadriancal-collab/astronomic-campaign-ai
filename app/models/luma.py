@@ -173,6 +173,21 @@ class LumaSyncCounts(BaseModel):
     errors: int = 0
 
 
+class LumaEventBackfillResult(BaseModel):
+    """Result of one targeted, single-event backfill run (see
+    LumaSyncService.run_event_backfill) -- deliberately NOT a
+    LumaBackfillCheckpoint: this is a one-shot summary of a single
+    synchronous call scoped to one event's guest list, not a durable,
+    resumable, multi-event job, so it carries no cursor/status/resume
+    fields."""
+
+    event_id: str
+    event_name: str
+    guests_seen: int
+    guests_matching_filter: int
+    counts: LumaSyncCounts
+
+
 class LumaBackfillStatus(str, Enum):
     NOT_STARTED = "not_started"
     RUNNING = "running"
