@@ -93,6 +93,13 @@ def make_guest(
     return base
 
 
+_CHECK_SIZE_PERSONAL_OPTIONS = [
+    "$1k - $10k", "$10k - $25k", "$25k - $50k", "$50k - $100k", "$100k - $250k",
+    "$250k - $500k", "$500k - $1M", "$1M - $2M", "$2M - $5M", "$5M - $10M",
+    "$10M+", "Other:",
+]
+
+
 @pytest_asyncio.fixture
 async def crm_service():
     custom_field_store = MemoryCrmCustomFieldStore()
@@ -103,6 +110,30 @@ async def crm_service():
             label="Investor Type",
             field_type=CustomFieldType.MULTI_SELECT,
             options=["Angel Investor", "Family Office"],
+            active=True,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+    )
+    await custom_field_store.create(
+        CrmCustomFieldDefinition(
+            crm_custom_field_id=str(uuid.uuid4()),
+            field_key="check_size_personal",
+            label="Check Size (Personal)",
+            field_type=CustomFieldType.MULTI_SELECT,
+            options=_CHECK_SIZE_PERSONAL_OPTIONS,
+            active=True,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+    )
+    await custom_field_store.create(
+        CrmCustomFieldDefinition(
+            crm_custom_field_id=str(uuid.uuid4()),
+            field_key="deploying_capital",
+            label="Deploying Capital",
+            field_type=CustomFieldType.SINGLE_SELECT,
+            options=["Yes", "No"],
             active=True,
             created_at=_now(),
             updated_at=_now(),
@@ -668,3 +699,173 @@ def test_no_hardcoded_luma_question_label_in_ingestion_source():
         source = inspect.getsource(module)
         for hardcoded in ["What is your LinkedIn profile", "What company do you work for", "What type of investor are you"]:
             assert hardcoded not in source, f"{module.__name__} hardcodes a real Luma question label: {hardcoded!r}"
+
+
+# --- Check Size translation, Investor Type translation, generic ------------
+# --- scalar->multi-select wrapping, CRM option-allowlist validation --------
+
+
+async def test_check_size_dropdown_answer_is_translated_into_crm_buckets(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Check Size", question_type="dropdown",
+        target_field_key="custom:check_size_personal", normalizer="check_size_personal_bucket",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Check Size", "question_id": "q-1", "question_type": "dropdown", "value": "$25K–$100K"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+
+
+async def test_check_size_translation_union_merges_with_an_existing_value(luma_service, crm_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Check Size", question_type="dropdown",
+        target_field_key="custom:check_size_personal", normalizer="check_size_personal_bucket",
+    )
+    existing = make_contact(email="alice@example.com", custom_fields={"check_size_personal": ["$1M - $2M"]})
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Check Size", "question_id": "q-1", "question_type": "dropdown", "value": "Under $25K"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert set(result.contact.custom_fields["check_size_personal"]) == {"$1M - $2M", "$1k - $10k", "$10k - $25k"}
+
+
+async def test_unrecognized_check_size_value_never_writes_the_field(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Check Size", question_type="dropdown",
+        target_field_key="custom:check_size_personal", normalizer="check_size_personal_bucket",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Check Size", "question_id": "q-1", "question_type": "dropdown", "value": "Some old free-text answer"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "check_size_personal" not in result.contact.custom_fields
+
+
+async def test_syndicate_lead_investor_type_is_translated_to_its_crm_equivalent(luma_service, crm_service, mapping_store):
+    field = await crm_service.custom_field_store.get_by_field_key("investor_type")
+    await crm_service.custom_field_store.save(
+        field.model_copy(update={"options": [*field.options, "I sponsor deals that I find"]})
+    )
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type="multi-select",
+        target_field_key="custom:investor_type", normalizer="investor_type_label",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Investor Type", "question_id": "q-1", "question_type": "multi-select", "value": ["Syndicate Lead"]}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investor_type"] == ["I sponsor deals that I find"]
+
+
+async def test_investor_type_labels_with_no_crm_equivalent_are_dropped_not_written(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type="multi-select",
+        target_field_key="custom:investor_type", normalizer="investor_type_label",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": "Investor Type", "question_id": "q-1", "question_type": "multi-select",
+                "value": ["Fund Manager / General Partner", "Corporate Venture"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "investor_type" not in result.contact.custom_fields
+
+
+async def test_investor_type_mixed_list_keeps_valid_entries_and_drops_the_rest(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type="multi-select",
+        target_field_key="custom:investor_type", normalizer="investor_type_label",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": "Investor Type", "question_id": "q-1", "question_type": "multi-select",
+                "value": ["Angel Investor", "Corporate Venture"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investor_type"] == ["Angel Investor"]
+
+
+async def test_deploying_capital_scalar_dropdown_maps_to_a_single_select_field(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type="dropdown",
+        target_field_key="custom:deploying_capital",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Deploying Capital", "question_id": "q-1", "question_type": "dropdown", "value": "Yes"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["deploying_capital"] == "Yes"
+
+
+async def test_single_select_value_outside_the_crm_allowlist_is_never_written(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type="dropdown",
+        target_field_key="custom:deploying_capital",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Deploying Capital", "question_id": "q-1", "question_type": "dropdown", "value": "Maybe later"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "deploying_capital" not in result.contact.custom_fields
+
+
+async def test_scalar_answer_is_wrapped_into_a_list_for_a_multi_select_target(luma_service, mapping_store):
+    """No normalizer at all -- a bare scalar answer mapped straight onto a
+    multi_select custom field must still land as a one-item list, never a
+    raw scalar written into a list-typed field."""
+    await _seed_mapping(
+        mapping_store, question_label="Check Size", question_type="dropdown",
+        target_field_key="custom:check_size_personal",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Check Size", "question_id": "q-1", "question_type": "dropdown", "value": "$1M - $2M"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["check_size_personal"] == ["$1M - $2M"]
+
+
+async def test_raw_registration_answers_are_never_rewritten_by_translation(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Check Size", question_type="dropdown",
+        target_field_key="custom:check_size_personal", normalizer="check_size_personal_bucket",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Check Size", "question_id": "q-1", "question_type": "dropdown", "value": "$25K–$100K"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.registration.registration_answers[0].value == "$25K–$100K"

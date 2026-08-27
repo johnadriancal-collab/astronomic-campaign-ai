@@ -58,8 +58,66 @@ def normalize_linkedin_url(value: Any) -> str | None:
     return None  # unrelated/invalid input -- never populate linkedin_url from garbage
 
 
+_INVESTOR_TYPE_LABEL_TRANSLATIONS = {
+    "syndicate lead": "I sponsor deals that I find",
+}
+
+
+def normalize_investor_type_labels(value: Any) -> Any:
+    """
+    Translates known Luma "Investor Type" labels that don't correspond
+    verbatim to an existing CRM option into their CRM equivalent --
+    currently just "Syndicate Lead" -> "I sponsor deals that I find".
+
+    Any OTHER value (matched or not) is passed through UNCHANGED. This is
+    deliberately NOT where an untranslatable value (e.g. "Fund Manager /
+    General Partner", "Corporate Venture") gets dropped -- that's the
+    generic CRM option-allowlist filter's job
+    (luma_sync_service._filter_to_allowed_options), applied uniformly to
+    every controlled CRM select field, not special-cased here.
+
+    Handles both the native multi-select list shape Luma actually sends
+    and a bare scalar, defensively.
+    """
+    if isinstance(value, list):
+        return [_INVESTOR_TYPE_LABEL_TRANSLATIONS.get(str(v).strip().lower(), v) for v in value]
+    if isinstance(value, str):
+        return _INVESTOR_TYPE_LABEL_TRANSLATIONS.get(value.strip().lower(), value)
+    return value
+
+
+# Luma's 5 coarse "typical check size" dropdown buckets translated into the
+# CRM's finer-grained custom:check_size_personal taxonomy. Where one Luma
+# bucket spans multiple CRM buckets, every CRM bucket it could plausibly
+# fall into is included (never approximating down to a single guess) --
+# this exact table was specified and approved, not invented here. Keys use
+# an EN DASH ("–"), matching Luma's actual answer strings exactly, not
+# a hyphen.
+_CHECK_SIZE_PERSONAL_BUCKET_TRANSLATIONS = {
+    "under $25k": ["$1k - $10k", "$10k - $25k"],
+    "$25k–$100k": ["$25k - $50k", "$50k - $100k"],
+    "$100k–$250k": ["$100k - $250k"],
+    "$250k–$500k": ["$250k - $500k"],
+    "$500k+": ["$500k - $1M", "$1M - $2M", "$2M - $5M", "$5M - $10M", "$10M+"],
+}
+
+
+def normalize_check_size_personal_bucket(value: Any) -> list[str] | None:
+    """
+    Translates a Luma "typical check size" dropdown answer into the list
+    of custom:check_size_personal CRM options it could plausibly map to.
+    An unrecognized Luma value returns None -- skipped, never written as
+    an arbitrary/uncontrolled CRM value.
+    """
+    if not isinstance(value, str):
+        return None
+    return _CHECK_SIZE_PERSONAL_BUCKET_TRANSLATIONS.get(value.strip().lower())
+
+
 _NORMALIZERS = {
     LumaAnswerNormalizer.LINKEDIN_URL: normalize_linkedin_url,
+    LumaAnswerNormalizer.INVESTOR_TYPE_LABEL: normalize_investor_type_labels,
+    LumaAnswerNormalizer.CHECK_SIZE_PERSONAL_BUCKET: normalize_check_size_personal_bucket,
 }
 
 

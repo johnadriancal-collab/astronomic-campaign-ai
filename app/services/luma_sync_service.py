@@ -41,7 +41,9 @@ from app.models.crm import (
     EXTERNAL_FIELD_NAMES,
     THESIS_FIELD_NAMES,
     CrmContact,
+    CrmCustomFieldDefinition,
     CrmImportRowStatus,
+    CustomFieldType,
     normalize_email,
     normalize_linkedin_url,
 )
@@ -130,6 +132,55 @@ def _derive_checked_in_at(tickets: list[dict]) -> str | None:
 def _contact_display_name(contact: CrmContact) -> str:
     name = " ".join(part for part in (contact.first_name, contact.last_name) if part).strip()
     return name or contact.email or contact.crm_contact_id
+
+
+def _wrap_scalar_for_multi_select(value: Any, field_def: CrmCustomFieldDefinition) -> Any:
+    """A mapped/normalized answer may still be a bare scalar (e.g. a
+    dropdown question) even though its CRM target is a multi_select
+    custom field -- wrap it as a one-item list so it reaches
+    apply_import_mapping()'s union-merge list handling instead of being
+    written as a raw scalar into a list-typed field."""
+    if field_def.field_type == CustomFieldType.MULTI_SELECT and not isinstance(value, list):
+        return [value]
+    return value
+
+
+def _filter_to_allowed_options(value: Any, field_def: CrmCustomFieldDefinition) -> Any | None:
+    """Never permit a value outside a controlled CRM select field's live,
+    configured `options` to be written -- drops anything not present.
+    For multi_select, filters the list (an empty result after filtering
+    returns None, meaning "write nothing"). For single_select, the whole
+    value is dropped (None) unless it's an exact allowed option. This is
+    what makes an untranslated Luma label (e.g. "Fund Manager / General
+    Partner", which has no CRM equivalent) safely skip instead of writing
+    an uncontrolled value -- no special-casing needed for it elsewhere."""
+    if field_def.field_type == CustomFieldType.MULTI_SELECT:
+        candidates = value if isinstance(value, list) else [value]
+        allowed = [v for v in candidates if v in field_def.options]
+        return allowed or None
+    if field_def.field_type == CustomFieldType.SINGLE_SELECT:
+        candidate = value[0] if isinstance(value, list) and value else value
+        return candidate if candidate in field_def.options else None
+    return value
+
+
+def _enforce_custom_field_constraints(
+    target_field_key: str, value: Any, custom_fields_by_key: dict[str, CrmCustomFieldDefinition]
+) -> Any | None:
+    """Applies the two generic safety rules above to any mapping targeting
+    a controlled-option ("custom:<key>" single_select/multi_select) CRM
+    field -- scoped entirely to this Luma layer, never touching
+    CrmService/apply_import_mapping. Non-custom targets and custom fields
+    that aren't select types pass through unconstrained (no options list
+    to validate against). Returns None if nothing valid remains, same
+    contract as a failed normalizer."""
+    if not target_field_key.startswith(CUSTOM_FIELD_PREFIX):
+        return value
+    field_def = custom_fields_by_key.get(target_field_key[len(CUSTOM_FIELD_PREFIX) :])
+    if field_def is None or field_def.field_type not in (CustomFieldType.SINGLE_SELECT, CustomFieldType.MULTI_SELECT):
+        return value
+    value = _wrap_scalar_for_multi_select(value, field_def)
+    return _filter_to_allowed_options(value, field_def)
 
 
 def _diff_contact_field_keys(before: CrmContact, after: CrmContact) -> list[str]:
@@ -477,6 +528,7 @@ class LumaSyncService:
             mapped_fields["phone"] = guest["phone_number"]
 
         mappings = await self.mapping_store.list(include_inactive=False)
+        custom_fields_by_key = {f.field_key: f for f in await self.crm_service.list_custom_fields()}
         for answer in guest.get("registration_answers") or []:
             label = (answer.get("label") or "").strip().lower()
             question_type = answer.get("question_type")
@@ -501,6 +553,11 @@ class LumaSyncService:
                         # Normalization failed (blank/unrelated/invalid input) --
                         # never populate the target field from a bad transform.
                         continue
+                extracted = _enforce_custom_field_constraints(mapping.target_field_key, extracted, custom_fields_by_key)
+                if extracted is None:
+                    # Nothing survived the CRM option-allowlist filter --
+                    # never write a value outside the field's configured options.
+                    continue
                 mapped_fields[mapping.target_field_key] = extracted
         return mapped_fields
 

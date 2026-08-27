@@ -109,6 +109,8 @@ class LumaAnswerNormalizer(str, Enum):
     unit-tested) implementation each member dispatches to."""
 
     LINKEDIN_URL = "linkedin_url"
+    INVESTOR_TYPE_LABEL = "investor_type_label"
+    CHECK_SIZE_PERSONAL_BUCKET = "check_size_personal_bucket"
 
 
 class LumaQuestionMapping(BaseModel):
