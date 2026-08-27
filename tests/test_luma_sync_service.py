@@ -133,7 +133,19 @@ async def crm_service():
             field_key="deploying_capital",
             label="Deploying Capital",
             field_type=CustomFieldType.SINGLE_SELECT,
-            options=["Yes", "No"],
+            options=["Yes, actively", "Selectively", "Not at the moment"],
+            active=True,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+    )
+    await custom_field_store.create(
+        CrmCustomFieldDefinition(
+            crm_custom_field_id=str(uuid.uuid4()),
+            field_key="role",
+            label="Role",
+            field_type=CustomFieldType.MULTI_SELECT,
+            options=["Investor", "Founder", "CEO"],
             active=True,
             created_at=_now(),
             updated_at=_now(),
@@ -815,12 +827,12 @@ async def test_deploying_capital_scalar_dropdown_maps_to_a_single_select_field(l
     )
     guest = make_guest(
         registration_answers=[
-            {"label": "Deploying Capital", "question_id": "q-1", "question_type": "dropdown", "value": "Yes"}
+            {"label": "Deploying Capital", "question_id": "q-1", "question_type": "dropdown", "value": "Yes, actively"}
         ]
     )
     result = await luma_service.process_guest_event(make_event(), guest)
 
-    assert result.contact.custom_fields["deploying_capital"] == "Yes"
+    assert result.contact.custom_fields["deploying_capital"] == "Yes, actively"
 
 
 async def test_single_select_value_outside_the_crm_allowlist_is_never_written(luma_service, mapping_store):
@@ -869,3 +881,133 @@ async def test_raw_registration_answers_are_never_rewritten_by_translation(luma_
     result = await luma_service.process_guest_event(make_event(), guest)
 
     assert result.registration.registration_answers[0].value == "$25K–$100K"
+
+
+# --- automatic Role=Investor tagging from the investor questionnaire -------
+
+
+async def _seed_investor_mappings(mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type="multi-select",
+        target_field_key="custom:investor_type",
+    )
+    await _seed_mapping(
+        mapping_store, question_label="Check Size", question_type="dropdown",
+        target_field_key="custom:check_size_personal", normalizer="check_size_personal_bucket",
+    )
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type="dropdown",
+        target_field_key="custom:deploying_capital",
+    )
+
+
+async def test_investor_questionnaire_answer_tags_role_investor(luma_service, mapping_store):
+    await _seed_investor_mappings(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Investor Type", "question_id": "q-1", "question_type": "multi-select", "value": ["Angel Investor"]},
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["role"] == ["Investor"]
+
+
+async def test_existing_role_values_are_preserved_and_union_merged(luma_service, crm_service, mapping_store):
+    await _seed_investor_mappings(mapping_store)
+    existing = make_contact(email="alice@example.com", custom_fields={"role": ["Founder"]})
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Investor Type", "question_id": "q-1", "question_type": "multi-select", "value": ["Angel Investor"]},
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert set(result.contact.custom_fields["role"]) == {"Founder", "Investor"}
+
+
+async def test_rerunning_the_same_registration_does_not_duplicate_investor_role(luma_service, mapping_store):
+    await _seed_investor_mappings(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Investor Type", "question_id": "q-1", "question_type": "multi-select", "value": ["Angel Investor"]},
+        ]
+    )
+    await luma_service.process_guest_event(make_event(), guest)
+    second_result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert second_result.contact.custom_fields["role"] == ["Investor"]  # not ["Investor", "Investor"]
+    assert "custom:role" not in second_result.changed_field_keys  # unchanged on rerun -- no-op
+
+
+@pytest.mark.parametrize("deploying_capital_value", ["Not at the moment", "Selectively", "Yes, actively"])
+async def test_any_deploying_capital_answer_classifies_as_investor(luma_service, mapping_store, deploying_capital_value):
+    await _seed_investor_mappings(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Deploying Capital", "question_id": "q-1", "question_type": "dropdown", "value": deploying_capital_value},
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["role"] == ["Investor"]
+
+
+async def test_invited_never_registered_guests_are_never_classified():
+    """No registration_answers at all (never actually registered) -- no
+    investor signal present, so no Role tagging. (Luma never sends a
+    guest.registered/guest.updated webhook, and event-scoped backfill's
+    approval_status filter never calls process_guest_event, for a guest who
+    only exists as an "invited" record -- this test proves the underlying
+    _build_mapped_fields logic itself also never invents a signal from
+    nothing, as a second, independent guarantee.)"""
+    from app.repositories.crm_custom_field_store import MemoryCrmCustomFieldStore
+    from app.repositories.luma_event_store import MemoryLumaEventStore
+    from app.repositories.luma_question_mapping_store import MemoryLumaQuestionMappingStore
+    from app.repositories.luma_registration_store import MemoryLumaRegistrationStore
+    from app.services.crm_service import CrmService
+
+    crm = CrmService(custom_field_store=MemoryCrmCustomFieldStore())
+    service = LumaSyncService(
+        crm_service=crm, event_store=MemoryLumaEventStore(), registration_store=MemoryLumaRegistrationStore(),
+        mapping_store=MemoryLumaQuestionMappingStore(), activity_log=crm.activity_log,
+    )
+    guest = make_guest(registration_answers=[])
+
+    result = await service.process_guest_event(make_event(), guest)
+
+    assert "role" not in result.contact.custom_fields
+
+
+async def test_check_size_investor_type_deploying_capital_mappings_still_apply_unchanged(luma_service, mapping_store):
+    """Role tagging is additive -- the existing translated values for the
+    three investor-signal fields themselves must be completely unaffected."""
+    await _seed_investor_mappings(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Investor Type", "question_id": "q-1", "question_type": "multi-select", "value": ["Angel Investor"]},
+            {"label": "Check Size", "question_id": "q-2", "question_type": "dropdown", "value": "$25K–$100K"},
+            {"label": "Deploying Capital", "question_id": "q-3", "question_type": "dropdown", "value": "Selectively"},
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investor_type"] == ["Angel Investor"]
+    assert result.contact.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+    assert result.contact.custom_fields["deploying_capital"] == "Selectively"
+    assert result.contact.custom_fields["role"] == ["Investor"]
+
+
+async def test_a_guest_with_no_investor_signal_gets_no_role_tag(luma_service, mapping_store):
+    await _seed_investor_mappings(mapping_store)
+    await _seed_mapping(mapping_store, question_label="Company", question_type="company", target_field_key="company", extract_key="company")
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Company", "question_id": "q-1", "question_type": "company", "value": {"company": "Acme"}},
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "role" not in result.contact.custom_fields

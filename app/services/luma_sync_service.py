@@ -108,6 +108,24 @@ class LumaProcessResult:
 # value already belongs to a DIFFERENT contact.
 _IDENTITY_FIELDS: tuple[str, ...] = ("email", "apollo_contact_id", "linkedin_url")
 
+# A guest counts as having answered the investor questionnaire when their
+# mapped, VALIDATED answers land on any one of these CRM target field keys
+# -- deliberately keyed by the CRM-side target, not by any specific Luma
+# question label or event id, so a differently-worded questionnaire on a
+# future investor event gets the same automatic Role=Investor tagging as
+# long as its mappings target the same CRM fields. Checked against
+# mapped_fields AFTER extract_key/normalizer/option-allowlist filtering, so
+# an unrecognized/invalid raw answer (e.g. an Investor Type value with no
+# CRM equivalent) doesn't count as "meaningful investor information" on
+# its own.
+_INVESTOR_SIGNAL_FIELD_KEYS: tuple[str, ...] = (
+    "custom:investor_type",
+    "custom:check_size_personal",
+    "custom:deploying_capital",
+)
+_INVESTOR_ROLE_TARGET_FIELD_KEY = "custom:role"
+_INVESTOR_ROLE_VALUE = "Investor"
+
 
 def _derive_location_summary(event_payload: dict) -> str | None:
     """Best-effort only -- Luma's Event schema doesn't expose a single
@@ -560,6 +578,23 @@ class LumaSyncService:
                     # never write a value outside the field's configured options.
                     continue
                 mapped_fields[mapping.target_field_key] = extracted
+
+        # Automatic Role=Investor tagging: the guest supplied at least one
+        # validated, meaningful answer to the investor questionnaire. Never
+        # overwrites -- this only ever ADDS to mapped_fields, and the
+        # shared apply_import_mapping() union-merges it with any Role
+        # value the contact already has (e.g. "Founder" -> "Founder,
+        # Investor"), exactly like every other multi-select custom field
+        # here. Idempotent by construction: re-adding "Investor" to an
+        # already-tagged contact is a no-op via the same list union-merge
+        # every other repeated Luma sync already relies on.
+        if any(key in mapped_fields for key in _INVESTOR_SIGNAL_FIELD_KEYS):
+            role_value = _enforce_custom_field_constraints(
+                _INVESTOR_ROLE_TARGET_FIELD_KEY, [_INVESTOR_ROLE_VALUE], custom_fields_by_key
+            )
+            if role_value is not None:
+                mapped_fields[_INVESTOR_ROLE_TARGET_FIELD_KEY] = role_value
+
         return mapped_fields
 
     def _parse_event(self, event_payload: dict, now: datetime) -> LumaEvent:

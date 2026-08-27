@@ -105,9 +105,10 @@ async def test_linkedin_conflict_is_skipped_while_other_fields_still_enrich(luma
     assert result.contact.company == "Astronomic"
     assert result.contact.title == "Investor"
     assert result.contact.custom_fields["investor_type"] == ["Angel Investor"]
+    assert result.contact.custom_fields["role"] == ["Investor"]  # auto-tagged from the investor questionnaire
     assert result.contact.linkedin_url is None  # NOT applied -- conflicts with `other`
     assert result.contact_outcome == "enriched"
-    assert set(result.changed_field_keys) == {"company", "title", "custom:investor_type"}
+    assert set(result.changed_field_keys) == {"company", "title", "custom:investor_type", "custom:role"}
     assert result.identity_conflicts == {"linkedin_url": other.crm_contact_id}
 
     # `other` is completely untouched -- no merge, no overwrite, no deletion.
