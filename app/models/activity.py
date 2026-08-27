@@ -37,6 +37,8 @@ class ActivityCategory(str, Enum):
     # never CAMPAIGNS, so its event stream is never confused with the
     # existing Apollo-oriented Campaign Manager's events.
     MAIL = "mail"
+    # Luma (lu.ma) event-registration sync -- app/services/luma_sync_service.py.
+    LUMA = "luma"
 
 
 class ActivitySource(str, Enum):
@@ -61,6 +63,9 @@ class ActivitySource(str, Enum):
     # Claude-free CRM query feature. Using ASTRO_SEARCH here would
     # misattribute Astro AI's exports to that unrelated feature.
     ASTRO_AI = "astro_ai"
+    # Luma (lu.ma) event-registration sync (webhook-triggered or backfill) --
+    # app/services/luma_sync_service.py.
+    LUMA_SYNC = "luma_sync"
 
 
 class ActivityEvent(BaseModel):

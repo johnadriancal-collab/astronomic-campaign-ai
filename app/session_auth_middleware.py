@@ -22,6 +22,11 @@ session cookie:
     check (verify_itf_webhook_token / verify_email_intake_webhook_token
     in app/dependencies.py). This is a second, independent auth
     mechanism for server-to-server calls, not a bypass of this one.
+  - /sync/luma-event: Luma's own webhook delivery (no browser, no session
+    cookie possible) -- authenticated by Luma's own signed-webhook
+    mechanism (verify_luma_webhook_request in app/dependencies.py), not a
+    token we issue. /sync/luma-backfill is deliberately NOT here -- it's
+    an internal admin action and stays behind the normal session gate.
 
 Everything else -- every CRM/campaign/lead/mailbox-data route, /docs,
 /redoc, /openapi.json, and even this backend's own "/" status page --
@@ -42,6 +47,7 @@ PUBLIC_PATHS = frozenset(
         "/mailboxes/google/callback",
         "/sync/itf-contact",
         "/sync/email-intake",
+        "/sync/luma-event",
     }
 )
 

@@ -8,10 +8,13 @@ import-time singleton.
 """
 
 import hmac
+from datetime import datetime, timezone
 
 from fastapi import Header, HTTPException, Request
 
 from app.config import settings
+from app.luma.webhook_signature import LumaWebhookSignatureError
+from app.luma.webhook_signature import verify_luma_webhook_signature as _verify_luma_webhook_signature
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_ai_service import AstroAiService
 from app.services.astro_export_store import AstroExportStore
@@ -25,6 +28,7 @@ from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
+from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mailbox_service import MailboxService
@@ -92,6 +96,36 @@ async def get_astro_ai_service(request: Request) -> AstroAiService:
 
 async def get_astro_export_store(request: Request) -> AstroExportStore:
     return request.app.state.astro_export_store
+
+
+async def get_luma_sync_service(request: Request) -> LumaSyncService:
+    return request.app.state.luma_sync_service
+
+
+async def verify_luma_webhook_request(request: Request) -> bytes:
+    """
+    Verifies Luma's own documented Svix-style webhook signature (see
+    app/luma/webhook_signature.py -- NOT a scheme invented here) and
+    returns the RAW body bytes so the route parses JSON from the exact
+    bytes the signature covers, rather than re-serializing a
+    FastAPI-parsed model (which could reorder/reformat and break the
+    signature check).
+
+    503 if LUMA_WEBHOOK_SECRET isn't configured (deployment gap, same
+    convention as every other webhook token above). 401 for ANY
+    missing/malformed/stale/invalid signature -- deliberately never
+    distinguishing which, so a forger gets no oracle to iterate against.
+    Fails closed in every case.
+    """
+    if not settings.luma_webhook_secret:
+        raise HTTPException(status_code=503, detail="Luma webhook is not configured.")
+    raw_body = await request.body()
+    signature_header = request.headers.get("webhook-signature")
+    try:
+        _verify_luma_webhook_signature(settings.luma_webhook_secret, raw_body, signature_header, datetime.now(timezone.utc))
+    except LumaWebhookSignatureError:
+        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+    return raw_body
 
 
 async def verify_email_intake_webhook_token(authorization: str | None = Header(default=None)) -> None:

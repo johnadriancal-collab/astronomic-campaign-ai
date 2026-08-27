@@ -54,6 +54,8 @@ from app.api.crm import router as crm_router
 from app.api.email_intake import crm_router as email_intake_crm_router
 from app.api.email_intake import sync_router as email_intake_sync_router
 from app.api.leads import router as leads_router
+from app.api.luma import mapping_router as luma_mapping_router
+from app.api.luma import router as luma_router
 from app.api.mail import router as mail_router
 from app.api.mailboxes import router as mailboxes_router
 from app.api.sync import router as sync_router
@@ -74,6 +76,10 @@ from app.repositories.sqlite_email_sequence_step_store import SQLiteEmailSequenc
 from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStore
 from app.repositories.sqlite_itf_ingestion_log_store import SQLiteItfIngestionLogStore
 from app.repositories.sqlite_lead_store import SQLiteLeadStore
+from app.repositories.sqlite_luma_backfill_checkpoint_store import SQLiteLumaBackfillCheckpointStore
+from app.repositories.sqlite_luma_event_store import SQLiteLumaEventStore
+from app.repositories.sqlite_luma_question_mapping_store import SQLiteLumaQuestionMappingStore
+from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrationStore
 from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
 from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
@@ -82,6 +88,7 @@ from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCreden
 from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
 from app.session_auth_middleware import enforce_session_auth
 from app.google.oauth_client import GoogleOAuthClient
+from app.luma.client import LumaClient
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_activity_tools import AstroActivityTools
 from app.services.astro_ai_service import AstroAiService, build_default_claude_client
@@ -100,6 +107,7 @@ from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
+from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mailbox_service import MailboxService
@@ -132,6 +140,10 @@ async def lifespan(app: FastAPI):
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
     auth_session_store = SQLiteAuthSessionStore(settings.database_path)
+    luma_event_store = SQLiteLumaEventStore(settings.database_path)
+    luma_registration_store = SQLiteLumaRegistrationStore(settings.database_path)
+    luma_question_mapping_store = SQLiteLumaQuestionMappingStore(settings.database_path)
+    luma_backfill_checkpoint_store = SQLiteLumaBackfillCheckpointStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -154,6 +166,10 @@ async def lifespan(app: FastAPI):
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
     await auth_session_store.connect()
+    await luma_event_store.connect()
+    await luma_registration_store.connect()
+    await luma_question_mapping_store.connect()
+    await luma_backfill_checkpoint_store.connect()
 
     activity_log_service = ActivityLogService(store=activity_event_store)
     app.state.activity_log_service = activity_log_service
@@ -287,6 +303,23 @@ async def lifespan(app: FastAPI):
         ),
     )
 
+    # Luma (lu.ma) -> Hub CRM sync (see app/services/luma_sync_service.py).
+    # Single-calendar Calendar API key scope only (approved architecture --
+    # no organization-key/multi-calendar abstraction). LumaClient is
+    # constructed even when LUMA_API_KEY is unset (matches
+    # build_default_claude_client's precedent above); it only raises
+    # LumaNotConfiguredError lazily, on an actual outbound call (i.e. only
+    # the backfill route needs it -- the webhook path never calls Luma).
+    app.state.luma_sync_service = LumaSyncService(
+        crm_service=crm_service,
+        event_store=luma_event_store,
+        registration_store=luma_registration_store,
+        mapping_store=luma_question_mapping_store,
+        activity_log=activity_log_service,
+        checkpoint_store=luma_backfill_checkpoint_store,
+        luma_client=LumaClient(),
+    )
+
     yield
     await campaign_store.close()
     await lead_store.close()
@@ -310,6 +343,10 @@ async def lifespan(app: FastAPI):
     await mailbox_store.close()
     await mailbox_credential_store.close()
     await auth_session_store.close()
+    await luma_event_store.close()
+    await luma_registration_store.close()
+    await luma_question_mapping_store.close()
+    await luma_backfill_checkpoint_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
@@ -327,6 +364,8 @@ app.include_router(email_intake_sync_router)
 app.include_router(email_intake_crm_router)
 app.include_router(mail_router)
 app.include_router(mailboxes_router)
+app.include_router(luma_router)
+app.include_router(luma_mapping_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">

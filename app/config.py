@@ -124,5 +124,26 @@ class Settings(BaseSettings):
     auth_password_hash: str | None = None
     cookie_secure: bool = True
 
+    # Luma (lu.ma) -> Hub CRM integration -- see app/luma/client.py and
+    # app/services/luma_sync_service.py. Both None until deliberately
+    # configured; the webhook route and any outbound Luma call return a
+    # clear 503 rather than crashing app startup, matching every other
+    # integration credential's precedent above.
+    #
+    # luma_api_key: a Calendar API key from Luma (Calendar Settings ->
+    # Developer -> API Keys), scoped to Astronomic's one Luma calendar --
+    # requires Luma Plus. Used ONLY for outbound calls this backend makes
+    # to Luma (event/guest listing for backfill); never sent to the
+    # frontend, never logged, never returned by any route.
+    #
+    # luma_webhook_secret: the per-webhook `whsec_...` signing secret Luma
+    # returns when the webhook is created (Calendar Settings -> Developer
+    # -> Webhooks, or POST /v2/webhooks/create) -- used to verify the
+    # `Webhook-Signature` header on every inbound delivery (see
+    # app/luma/webhook_signature.py). This is Luma's own documented
+    # signature scheme, not a bearer token we issue.
+    luma_api_key: str | None = None
+    luma_webhook_secret: str | None = None
+
 
 settings = Settings()
