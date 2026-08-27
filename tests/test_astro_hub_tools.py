@@ -108,7 +108,7 @@ def test_duplicate_tool_name_across_domains_raises_at_construction(monkeypatch, 
         AstroHubTools(crm_tools=crm_tools, mailbox_tools=mailbox_tools)
 
 
-def test_full_registry_contains_exactly_the_thirteen_approved_tools(crm_tools, mailbox_tools, activity_tools):
+def test_full_registry_contains_exactly_the_fourteen_approved_tools(crm_tools, mailbox_tools, activity_tools):
     from app.services.astro_campaign_tools import ASTRO_CAMPAIGN_TOOL_DEFINITIONS
 
     all_names = (
@@ -131,5 +131,6 @@ def test_full_registry_contains_exactly_the_thirteen_approved_tools(crm_tools, m
         "list_campaigns",
         "get_campaign",
         "count_campaigns",
+        "export_crm_contacts",
     }
-    assert len(all_names) == 13
+    assert len(all_names) == 14

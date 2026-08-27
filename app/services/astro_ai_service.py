@@ -45,7 +45,7 @@ from loguru import logger
 
 from app.claude.client import ClaudeClient
 from app.config import settings
-from app.models.astro_ai import AstroChatMessage, AstroChatRole
+from app.models.astro_ai import AstroChatAttachment, AstroChatMessage, AstroChatRole
 from app.services.astro_activity_tools import BUSINESS_TIMEZONE
 from app.services.astro_hub_tools import AstroHubTools
 
@@ -60,13 +60,15 @@ For everything else -- general knowledge questions, research, writing, analysis,
 HUB_SYSTEM_PROMPT_TEMPLATE = """You are Astro AI, the AI assistant inside Astronomic Hub. You help the Astronomic team with research, analysis, writing, operations, prospecting, events, campaigns, investors, founders, and other business tasks.
 
 You have READ-ONLY access to live Hub data through these tool groups -- use one of them whenever a question requires real Hub data; never guess, estimate, or invent a fact from memory or general knowledge, even if it sounds plausible:
-- CRM contacts: count_crm_contacts, search_crm_contacts, get_crm_contact.
+- CRM contacts: count_crm_contacts, search_crm_contacts, get_crm_contact, export_crm_contacts (downloads the COMPLETE matching set as a CSV, never limited to the 20-contact search preview).
 - CRM Lists: list_crm_lists, get_crm_list, get_crm_list_members, count_crm_list_members -- the last two accept the SAME CRM filter conditions as the contact tools, so a question combining a list with a CRM criterion (e.g. "angel investors in the Hotshot list") resolves in ONE call, not two.
 - Campaign Manager: list_campaigns, get_campaign, count_campaigns. Apollo campaigns and Astronomic Mail campaigns are two separate, different systems with different data -- never present them as identical. Astronomic Mail cannot send email yet: it has no real send/open/click statistics, only a THEORETICAL planned-audience estimate (contacts_eligible/theoretical_total_sends) that you must always label as theoretical, never as actual sends. Apollo campaigns DO have real send/open/click/reply/bounce statistics, but ONLY for a campaign whose sequence has been manually synced -- get_campaign tells you whether/when that happened (synced=false or a null sequence_stats means "no data available," never "zero activity"). Apollo campaigns have no CRM-list relationship (only Astronomic Mail does, via source_list_id), and NO campaign has any mailbox relationship at all in this Hub today -- if asked which campaign uses a given inbox, say plainly that this relationship isn't stored, never infer one.
 - Connected mailboxes: list_connected_mailboxes, get_mailbox. There is no sending, deliverability, "emails sent today," or queue data for mailboxes at all -- never ask for or report any of that.
 - Activity Log: search_activity -- a record of meaningful CRM/list/import/campaign/mail actions (never ordinary reads/views). Every event's actor (who did it) is always unavailable today -- never state or guess who performed an action, only what happened and when. Whenever a question involves ANY date or time period -- explicit ("August 20", "between August 20 and 25") or relative ("today", "yesterday", "this week", "last week") -- you MUST translate it into date_from/date_to and pass them to search_activity; never call it with no date filter and then manually reason over the raw results yourself, since that only returns the 20 most-recent events overall and can silently miss earlier activity from the very period you were asked about. The current date/time is {current_datetime} (America/Chicago, Central Time) -- use this as your anchor for any relative date, and state the date range you used (in Central Time) in your answer so the user can adjust for their own timezone.
 
 When you restate a result, restate the actual filter/criteria in plain language (e.g. "142 contacts matching the angel-investor criteria") so a likely follow-up question such as "how many of those are in Austin" can be understood correctly from this conversation's history alone.
+
+When the user asks to export, download, or get a CSV of a set of contacts (e.g. "export them," "download this list," "give me a CSV of those 287"), call export_crm_contacts using the SAME filter criteria most recently established in this conversation -- never re-derive the population from a short preview list you already showed (search results are capped at 20; export_crm_contacts always re-queries the complete matching set on its own, so a filter that matched 287 contacts exports all 287). Only ask the user to clarify first if which prior result they mean is genuinely ambiguous. After a successful export, just confirm what was exported in plain language (e.g. "Exported 287 contacts.") -- never invent, describe, or repeat a download link or URL yourself; the file's download link is attached and rendered automatically from the tool's result, not from your words. If export_crm_contacts returns a "too_large" result, tell the user the segment is too big to export and ask them to narrow their criteria; if it returns "no_matches," say plainly that nothing matched.
 
 Only use the CRM fields, operators, and options listed below -- never invent a field, a custom field, or an option that isn't listed here, and never fall back to matching on a contact's freeform title/job-title text as a substitute for a real classification field. This is the complete list of CRM fields you can filter or search contacts and list members on right now:
 
@@ -108,6 +110,11 @@ class AstroAiService:
         payload = [{"role": m.role.value, "content": m.content} for m in messages]
         system_prompt = await self._build_system_prompt()
         tools = self.hub_tools.tool_definitions if self.hub_tools else None
+        # Populated from a successful export_crm_contacts tool result, never
+        # from Claude's own text -- see the module docstring on
+        # AstroChatAttachment. Only the LAST successful export in this turn
+        # is kept if more than one somehow happens.
+        pending_attachment: AstroChatAttachment | None = None
 
         for _ in range(MAX_TOOL_ITERATIONS):
             text, usage, stop_reason, content = await self.claude_client.generate_chat_reply(
@@ -126,16 +133,28 @@ class AstroAiService:
             )
 
             if stop_reason != "tool_use":
-                return AstroChatMessage(role=AstroChatRole.ASSISTANT, content=text)
+                return AstroChatMessage(role=AstroChatRole.ASSISTANT, content=text, attachment=pending_attachment)
 
             tool_use_blocks = [b for b in content if b.get("type") == "tool_use"]
             if not tool_use_blocks:
-                return AstroChatMessage(role=AstroChatRole.ASSISTANT, content=text or NO_TOOL_RESULT_FALLBACK)
+                return AstroChatMessage(
+                    role=AstroChatRole.ASSISTANT, content=text or NO_TOOL_RESULT_FALLBACK, attachment=pending_attachment
+                )
 
             payload.append({"role": "assistant", "content": content})
             tool_result_blocks = []
             for block in tool_use_blocks:
-                result = await self.hub_tools.dispatch(block.get("name", ""), block.get("input", {}))
+                name = block.get("name", "")
+                result = await self.hub_tools.dispatch(name, block.get("input", {}))
+                if name == "export_crm_contacts" and result.get("status") == "ready":
+                    # The download URL is built HERE, deterministically, from
+                    # the tool's own export_id -- Claude never sees or
+                    # constructs this URL.
+                    pending_attachment = AstroChatAttachment(
+                        filename=result["filename"],
+                        url=f"/astro-ai/exports/{result['export_id']}",
+                        contact_count=result["contact_count"],
+                    )
                 tool_result_blocks.append(
                     {
                         "type": "tool_result",
@@ -145,7 +164,7 @@ class AstroAiService:
                 )
             payload.append({"role": "user", "content": tool_result_blocks})
 
-        return AstroChatMessage(role=AstroChatRole.ASSISTANT, content=NO_TOOL_RESULT_FALLBACK)
+        return AstroChatMessage(role=AstroChatRole.ASSISTANT, content=NO_TOOL_RESULT_FALLBACK, attachment=pending_attachment)
 
     async def _build_system_prompt(self) -> str:
         if not self.hub_tools:

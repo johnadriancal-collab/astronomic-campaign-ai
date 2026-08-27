@@ -87,6 +87,7 @@ from app.services.astro_activity_tools import AstroActivityTools
 from app.services.astro_ai_service import AstroAiService, build_default_claude_client
 from app.services.astro_campaign_tools import AstroCampaignTools
 from app.services.astro_crm_tools import AstroCrmTools
+from app.services.astro_export_store import AstroExportStore
 from app.services.astro_hub_tools import AstroHubTools
 from app.services.astro_mailbox_tools import AstroMailboxTools
 from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
@@ -263,10 +264,18 @@ async def lifespan(app: FastAPI):
     # `mailbox_store` directly (never `mailbox_service`, which also holds
     # a `MailboxCredentialStore` reference) -- see astro_mailbox_tools.py
     # for why that's a structural, not just conventional, guarantee.
+    # In-memory, 15-minute-TTL holding area for Astro AI's export_crm_contacts
+    # CSV bytes (app/services/astro_export_store.py). Process-local -- see
+    # that module's docstring for the documented single-instance constraint.
+    astro_export_store = AstroExportStore()
+    app.state.astro_export_store = astro_export_store
+
     app.state.astro_ai_service = AstroAiService(
         claude_client=build_default_claude_client(),
         hub_tools=AstroHubTools(
-            crm_tools=AstroCrmTools(crm_service),
+            crm_tools=AstroCrmTools(
+                crm_service, export_store=astro_export_store, activity_log_service=activity_log_service
+            ),
             mailbox_tools=AstroMailboxTools(mailbox_store),
             activity_tools=AstroActivityTools(activity_log_service),
             campaign_tools=AstroCampaignTools(

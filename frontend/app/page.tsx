@@ -1,8 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ArrowRight, Loader2, Sparkles } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ArrowRight, Download, Loader2, Sparkles } from "lucide-react";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ApiError, sendAstroChatMessage, type AstroChatMessage } from "@/lib/api";
@@ -75,7 +75,10 @@ export default function Home() {
             {(messages.length > 0 || loading) && (
               <div className="mb-3 flex max-h-96 flex-col gap-3 overflow-y-auto">
                 {messages.map((m, i) => (
-                  <div key={i} className={cn("flex", m.role === "user" ? "justify-end" : "justify-start")}>
+                  <div
+                    key={i}
+                    className={cn("flex flex-col gap-1.5", m.role === "user" ? "items-end" : "items-start")}
+                  >
                     <div
                       className={cn(
                         "max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm",
@@ -84,6 +87,16 @@ export default function Home() {
                     >
                       {m.content}
                     </div>
+                    {m.attachment && (
+                      <a
+                        href={`/backend${m.attachment.url}`}
+                        download={m.attachment.filename}
+                        className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1.5")}
+                      >
+                        <Download className="h-4 w-4" />
+                        Download CSV ({m.attachment.contact_count})
+                      </a>
+                    )}
                   </div>
                 ))}
                 {loading && (

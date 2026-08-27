@@ -19,20 +19,32 @@ logic count_crm_contacts uses), never a second classification system.
 
 Strictly read-only and strictly allowlisted: this module imports nothing
 from crm_service.py except query_contacts/get_filterable_fields/
-list_contact_lists/get_contact_list/get_list_contacts (never
-create_contact/update_contact/archive_contact/create_contact_list/
+list_contact_lists/get_contact_list/get_list_contacts/list_custom_fields
+(never create_contact/update_contact/archive_contact/create_contact_list/
 update_contact_list/delete_contact_list/bulk_add_to_list/
 bulk_remove_from_list), imports nothing Apollo- or campaign- or
 mailbox-related at all, and AstroCrmTools.dispatch() only ever calls one
 of the functions in _HANDLERS below -- an unrecognized tool name is
 rejected, never dynamically resolved.
+
+ONE narrow, deliberate exception to the above (added for
+export_crm_contacts, the CSV export tool): this file may call
+ActivityLogService.record() SOLELY to write a single audit event after a
+successful export (contact_count/format/segment description only --
+never contact rows). This is the only write path reachable from Astro
+AI's whole tool surface; it does not touch CrmService, and it cannot
+create, modify, or delete a CRM contact, list, or anything else.
 """
 
 from loguru import logger
 
+from app.models.activity import ActivityCategory, ActivitySource
 from app.models.crm import CrmContact, CrmContactListSummary, FilterCondition, FilterQuery
+from app.services.activity_log_service import ActivityLogService
+from app.services.astro_export_store import AstroExportStore
 from app.services.crm_filter_service import FilterValidationError, matches_query, validate_query
 from app.services.crm_service import CrmService
+from app.services.csv_export import build_csv, build_export_columns, build_export_filename
 
 # Anthropic tool-use schemas. `filters`' shape is intentionally generic
 # (field/operator/value) rather than one property per CRM field, so this
@@ -182,7 +194,45 @@ CRM_TOOL_DEFINITIONS: list[dict] = [
             "required": ["list_name"],
         },
     },
+    {
+        "name": "export_crm_contacts",
+        "description": (
+            "Export the COMPLETE set of CRM contacts matching zero or more filter conditions as "
+            "a downloadable CSV file -- the same filter/logic shape as count_crm_contacts/"
+            "search_crm_contacts, but the export is NEVER limited to the 20-contact search "
+            "preview: if 287 contacts match, the CSV contains all 287. Use this whenever the "
+            "user asks to export, download, or get a CSV of a set of contacts they've been "
+            "discussing -- reuse the SAME filters already established in the conversation for "
+            "phrases like 'export them', 'export those', or 'download this list'; only ask the "
+            "user to clarify first if the reference to a prior result is genuinely ambiguous. "
+            "Leave filters empty to export every CRM contact. If the match count exceeds "
+            "10,000, nothing is exported -- you'll get a 'too_large' result and should ask the "
+            "user to narrow their criteria rather than exporting a truncated or partial file. "
+            "On success you get back file metadata only (filename/contact_count/an opaque "
+            "export id) -- never the contact rows themselves, and never a download URL. The "
+            "download link is attached and rendered automatically; do not try to describe, "
+            "construct, or mention a URL yourself."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "filters": {"type": "array", "items": _FILTER_ITEM_SCHEMA},
+                "logic": {"type": "string", "enum": ["AND", "OR"]},
+                "label": {
+                    "type": "string",
+                    "description": (
+                        "A short, human-readable name for this segment, e.g. 'Austin Angel "
+                        "Investors' -- used only to generate a friendly filename, never a "
+                        "literal file path."
+                    ),
+                },
+            },
+            "required": ["filters"],
+        },
+    },
 ]
+
+EXPORT_MAX_CONTACTS = 10_000
 
 SEARCH_RESULT_LIMIT = 20
 _LOOKUP_CANDIDATE_LIMIT = 5
@@ -252,8 +302,20 @@ class AstroCrmTools:
     Search already use -- no parallel query path, no raw SQL, no write
     method is ever reachable from this class."""
 
-    def __init__(self, crm_service: CrmService):
+    def __init__(
+        self,
+        crm_service: CrmService,
+        export_store: AstroExportStore | None = None,
+        activity_log_service: ActivityLogService | None = None,
+    ):
         self.crm_service = crm_service
+        # Both optional so tests/callers that don't exercise export_crm_contacts
+        # can keep constructing this with just a CrmService, matching every
+        # other tool in this file -- production wiring (app/main.py) always
+        # provides both. See the module docstring for why activity_log_service
+        # is the one documented write-capable exception.
+        self.export_store = export_store
+        self.activity_log_service = activity_log_service
 
     async def describe_available_fields(self) -> str:
         """Live field/operator/option vocabulary, rendered for the system
@@ -443,6 +505,80 @@ class AstroCrmTools:
             "total": matched_total,
         }
 
+    async def _export_crm_contacts(self, tool_input: dict) -> dict:
+        if self.export_store is None:
+            # Only reachable if a caller constructs this class without an
+            # export_store -- production wiring always provides one.
+            return {"error": "tool_failed", "message": "Export isn't available right now -- please try again."}
+
+        filters = _parse_filters(tool_input.get("filters"))
+        logic = tool_input.get("logic", "AND")
+        label = (tool_input.get("label") or "").strip()
+
+        # Probe-then-fetch-all -- the SAME pattern frontend/lib/crm-bulk-selection.ts's
+        # fetchAllMatchingContacts() already uses to get a complete matching set
+        # without guessing a page size up front.
+        probe_query = FilterQuery(filters=filters, logic=logic, page=1, page_size=1)
+        probe_page = await self.crm_service.query_contacts(probe_query)
+        total = probe_page.total
+
+        if total == 0:
+            return {"status": "no_matches"}
+        if total > EXPORT_MAX_CONTACTS:
+            # Hard reject -- never a partial/truncated export.
+            return {
+                "error": "too_large",
+                "total": total,
+                "limit": EXPORT_MAX_CONTACTS,
+                "message": (
+                    f"{total} contacts match, which is over the {EXPORT_MAX_CONTACTS}-contact "
+                    "export limit. Ask the user to narrow their criteria before exporting."
+                ),
+            }
+
+        full_query = FilterQuery(filters=filters, logic=logic, page=1, page_size=total)
+        full_page = await self.crm_service.query_contacts(full_query)
+        contacts = full_page.items
+
+        custom_fields = await self.crm_service.list_custom_fields(include_inactive=False)
+        columns = build_export_columns(custom_fields)
+        csv_text = build_csv(columns, contacts)
+        filename = build_export_filename(label or _default_export_label(filters))
+
+        export_id = self.export_store.put(
+            filename=filename, contact_count=len(contacts), csv_bytes=csv_text.encode("utf-8")
+        )
+
+        if self.activity_log_service is not None:
+            segment_description = label or _describe_filters(filters, logic)
+            await self.activity_log_service.record(
+                event_type="contacts.exported",
+                category=ActivityCategory.EXPORTS,
+                source=ActivitySource.ASTRO_AI,
+                summary=f"{len(contacts)} contacts exported via Astro AI ({segment_description}).",
+                metadata={"contact_count": len(contacts), "format": "csv", "segment": segment_description},
+            )
+
+        return {
+            "status": "ready",
+            "export_id": export_id,
+            "filename": filename,
+            "contact_count": len(contacts),
+        }
+
+
+def _default_export_label(filters: list[FilterCondition]) -> str:
+    if not filters:
+        return "all crm contacts"
+    return " and ".join(f"{f.field} {f.value}" for f in filters)
+
+
+def _describe_filters(filters: list[FilterCondition], logic: str) -> str:
+    if not filters:
+        return "all contacts, no filters"
+    joiner = f" {logic} "
+    return joiner.join(f"{f.field}={f.value}" for f in filters)
+
 
 # Deliberately the ONLY tool-name -> function mapping AstroCrmTools.dispatch
 # will ever consult -- adding a write/Apollo/campaign/mailbox capability to
@@ -456,4 +592,5 @@ _HANDLERS = {
     "get_crm_list": AstroCrmTools._get_crm_list,
     "get_crm_list_members": AstroCrmTools._get_crm_list_members,
     "count_crm_list_members": AstroCrmTools._count_crm_list_members,
+    "export_crm_contacts": AstroCrmTools._export_crm_contacts,
 }

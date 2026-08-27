@@ -10,6 +10,7 @@ execution too, not just loop mechanics -- only Claude's own reasoning is
 faked (via FakeClaudeClient.tool_call_sequence).
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 
@@ -42,6 +43,7 @@ from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_activity_tools import AstroActivityTools
 from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS, AstroCrmTools
+from app.services.astro_export_store import AstroExportStore
 from app.services.astro_hub_tools import AstroHubTools
 from app.services.astro_mailbox_tools import AstroMailboxTools
 from app.services.crm_service import CrmService
@@ -300,7 +302,7 @@ async def crm_tools():
     await service.contact_store.create(
         make_contact(first_name="Carol", last_name="Family", city="Austin", custom_fields={"investor_type": ["Family Office"]})
     )
-    return AstroCrmTools(service)
+    return AstroCrmTools(service, export_store=AstroExportStore(), activity_log_service=service.activity_log)
 
 
 @pytest.fixture
@@ -536,9 +538,78 @@ async def test_no_write_tools_exist_in_the_crm_tool_registry():
         "get_crm_list",
         "get_crm_list_members",
         "count_crm_list_members",
+        "export_crm_contacts",
     }
     for forbidden in ["create", "update", "delete", "archive", "send", "apollo", "campaign", "mailbox"]:
         assert not any(forbidden in name.lower() for name in names)
+
+
+# --- Phase 4: export_crm_contacts's attachment metadata ---------------------
+
+
+async def test_successful_export_attaches_metadata_to_the_final_message(service_with_crm, claude_client):
+    claude_client.tool_call_sequence = [
+        tool_use_response(
+            "",
+            "export_crm_contacts",
+            {
+                "filters": [{"field": "custom:investor_type", "operator": "contains_any", "value": ["Angel Investor"]}],
+                "label": "Angel Investors",
+            },
+        ),
+        final_answer_response("Exported 2 contacts."),
+    ]
+
+    reply = await service_with_crm.chat([user_message("Export the angel investors.")])
+
+    tool_result = json.loads(claude_client.calls[1]["messages"][-1]["content"][0]["content"])
+    assert tool_result["status"] == "ready"
+    assert reply.attachment is not None
+    assert reply.attachment.filename == "angel-investors.csv"
+    assert reply.attachment.contact_count == 2
+    # The URL is built HERE, deterministically, from the tool's own
+    # export_id -- never from Claude's text (Claude's `content` never
+    # mentions a URL in this test's canned responses at all).
+    assert reply.attachment.url == f"/astro-ai/exports/{tool_result['export_id']}"
+    assert reply.content == "Exported 2 contacts."
+
+
+async def test_no_attachment_when_no_export_tool_was_called(service_with_crm, claude_client):
+    claude_client.tool_call_sequence = [
+        tool_use_response("", "count_crm_contacts", {"filters": []}),
+        final_answer_response("You have 3 contacts."),
+    ]
+
+    reply = await service_with_crm.chat([user_message("How many contacts do we have?")])
+
+    assert reply.attachment is None
+
+
+async def test_general_reply_with_no_tool_use_has_no_attachment(service_with_crm, claude_client):
+    claude_client.reply_text = "General knowledge answer."
+
+    reply = await service_with_crm.chat([user_message("What is a family office?")])
+
+    assert reply.attachment is None
+
+
+async def test_too_large_export_result_does_not_attach_anything(service_with_crm, claude_client, monkeypatch):
+    # Patches the export ceiling down to below the fixture's 3 seeded
+    # contacts, rather than seeding 10,000+ real contacts just to cross
+    # the real ceiling -- the ceiling-enforcement logic itself (exact
+    # value, hard reject, never partial) is covered directly in
+    # test_astro_crm_tools.py.
+    monkeypatch.setattr("app.services.astro_crm_tools.EXPORT_MAX_CONTACTS", 2)
+    claude_client.tool_call_sequence = [
+        tool_use_response("", "export_crm_contacts", {"filters": []}),
+        final_answer_response("That's too many to export -- can you narrow it down?"),
+    ]
+
+    reply = await service_with_crm.chat([user_message("Export every contact.")])
+
+    tool_result = json.loads(claude_client.calls[1]["messages"][-1]["content"][0]["content"])
+    assert tool_result["error"] == "too_large"
+    assert reply.attachment is None
 
 
 # --- Phase 3: multi-domain integration --------------------------------------

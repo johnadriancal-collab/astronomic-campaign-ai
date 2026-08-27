@@ -1362,9 +1362,16 @@ export function checkSession(): Promise<AuthStatus> {
 
 export type AstroChatRole = "user" | "assistant";
 
+export interface AstroChatAttachment {
+  filename: string;
+  url: string;
+  contact_count: number;
+}
+
 export interface AstroChatMessage {
   role: AstroChatRole;
   content: string;
+  attachment?: AstroChatAttachment | null;
 }
 
 export function sendAstroChatMessage(messages: AstroChatMessage[]): Promise<AstroChatMessage> {

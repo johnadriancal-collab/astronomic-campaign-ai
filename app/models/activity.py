@@ -56,6 +56,11 @@ class ActivitySource(str, Enum):
     SYSTEM = "system"
     # Astronomic Mail -- distinct from CAMPAIGN_SYSTEM (Apollo).
     MAIL_SYSTEM = "mail_system"
+    # Astro AI's chat-driven CRM export (app/services/astro_crm_tools.py) --
+    # distinct from ASTRO_SEARCH, which is a different, deterministic
+    # Claude-free CRM query feature. Using ASTRO_SEARCH here would
+    # misattribute Astro AI's exports to that unrelated feature.
+    ASTRO_AI = "astro_ai"
 
 
 class ActivityEvent(BaseModel):
