@@ -37,7 +37,14 @@ from loguru import logger
 
 from app.luma.client import LumaClient
 from app.models.activity import ActivityCategory, ActivitySource
-from app.models.crm import EXTERNAL_FIELD_NAMES, THESIS_FIELD_NAMES, CrmContact, CrmImportRowStatus, normalize_email
+from app.models.crm import (
+    EXTERNAL_FIELD_NAMES,
+    THESIS_FIELD_NAMES,
+    CrmContact,
+    CrmImportRowStatus,
+    normalize_email,
+    normalize_linkedin_url,
+)
 from app.models.luma import (
     LumaApprovalStatus,
     LumaBackfillCheckpoint,
@@ -85,6 +92,18 @@ class LumaProcessResult:
     contact_outcome: str  # "created" | "enriched" | "needs_review" | "unchanged"
     duplicate_delivery: bool = False
     changed_field_keys: list[str] = field(default_factory=list)
+    # {field_key: conflicting_contact_id} for every dedup-tier field an
+    # enrichment tried to change but was suppressed on -- see
+    # _detect_identity_conflicts(). Never includes the attempted VALUE.
+    identity_conflicts: dict[str, str] = field(default_factory=dict)
+
+
+# The exact three confident dedup-tier fields CrmService.classify_match()
+# itself trusts (see crm_service.py's dedup hierarchy) -- deliberately the
+# SAME set, not a separately-invented list. Each maps to the CrmContactStore
+# lookup method + normalizer (if any) used to check whether a field's new
+# value already belongs to a DIFFERENT contact.
+_IDENTITY_FIELDS: tuple[str, ...] = ("email", "apollo_contact_id", "linkedin_url")
 
 
 def _derive_location_summary(event_payload: dict) -> str | None:
@@ -247,6 +266,75 @@ class LumaSyncService:
             self._guest_locks[guest_id] = lock
         return lock
 
+    async def _detect_identity_conflicts(self, matched_contact: CrmContact, updated: CrmContact) -> dict[str, str]:
+        """For each confident dedup-tier field (_IDENTITY_FIELDS) whose
+        value `updated` would actually CHANGE relative to `matched_contact`,
+        checks whether that new value already belongs to a DIFFERENT
+        existing contact -- via the exact same normalized store lookups
+        CrmService.classify_match() itself uses, no new matching logic
+        invented here. Returns {field_key: conflicting_contact_id} for
+        every field that conflicts; never includes the attempted value."""
+        conflicts: dict[str, str] = {}
+        contact_store = self.crm_service.contact_store
+
+        if updated.email != matched_contact.email:
+            normalized = normalize_email(updated.email)
+            if normalized:
+                other = await contact_store.get_by_email(normalized)
+                if other is not None and other.crm_contact_id != matched_contact.crm_contact_id:
+                    conflicts["email"] = other.crm_contact_id
+
+        if updated.apollo_contact_id != matched_contact.apollo_contact_id:
+            if updated.apollo_contact_id:
+                other = await contact_store.get_by_apollo_contact_id(updated.apollo_contact_id)
+                if other is not None and other.crm_contact_id != matched_contact.crm_contact_id:
+                    conflicts["apollo_contact_id"] = other.crm_contact_id
+
+        if updated.linkedin_url != matched_contact.linkedin_url:
+            normalized = normalize_linkedin_url(updated.linkedin_url)
+            if normalized:
+                other = await contact_store.get_by_linkedin_url(normalized)
+                if other is not None and other.crm_contact_id != matched_contact.crm_contact_id:
+                    conflicts["linkedin_url"] = other.crm_contact_id
+
+        return conflicts
+
+    async def _enrich_existing_contact(
+        self, matched_contact: CrmContact, mapped_fields: dict[str, Any]
+    ) -> tuple[CrmContact, list[str], dict[str, str], str]:
+        """Applies apply_import_mapping() (unmodified), then detects and
+        suppresses any identity-field conflict BEFORE saving -- conflict
+        detection is the primary control flow; the store's own UNIQUE
+        constraint (the try/except below) is only a defensive backstop for
+        a genuine residual race between this check and the save, not the
+        normal path. A conflicting field is left at its CURRENT value
+        (never overwritten, never used to merge the two contacts) while
+        every other, non-conflicting enrichment still applies. Returns
+        (contact, changed_field_keys, identity_conflicts, outcome)."""
+        updated = self.crm_service.apply_import_mapping(matched_contact, mapped_fields, is_new=False)
+        identity_conflicts = await self._detect_identity_conflicts(matched_contact, updated)
+        if identity_conflicts:
+            reverted = {field_key: getattr(matched_contact, field_key) for field_key in identity_conflicts}
+            updated = updated.model_copy(update=reverted)
+
+        changed_field_keys = _diff_contact_field_keys(matched_contact, updated)
+        outcome = "unchanged"
+        if changed_field_keys:
+            try:
+                await self.crm_service.contact_store.save(updated)
+                outcome = "enriched"
+            except ValueError as e:
+                # A true residual race (another write landed between the
+                # proactive check above and this save) -- never crash the
+                # webhook over it. Nothing was actually persisted, so report
+                # no change rather than a false "enriched".
+                logger.error(
+                    f"Luma sync: contact save failed despite proactive conflict check (residual race): {type(e).__name__}: {e}"
+                )
+                updated = matched_contact
+                changed_field_keys = []
+        return updated, changed_field_keys, identity_conflicts, outcome
+
     async def process_guest_event(
         self, event_payload: dict, guest_payload: dict, webhook_delivery_id: str | None = None
     ) -> LumaProcessResult:
@@ -304,6 +392,7 @@ class LumaSyncService:
         contact_outcome = "unchanged"
         match_status = LumaMatchStatus.MATCHED
         changed_field_keys: list[str] = []
+        identity_conflicts: dict[str, str] = {}
 
         status, matched_contact, _matched_on = await self.crm_service.classify_match(mapped_fields)
         if status == CrmImportRowStatus.NEW:
@@ -322,12 +411,9 @@ class LumaSyncService:
                 # against the now-current state rather than raising.
                 status, matched_contact, _matched_on = await self.crm_service.classify_match(mapped_fields)
                 if status == CrmImportRowStatus.EXISTING:
-                    updated = self.crm_service.apply_import_mapping(matched_contact, mapped_fields, is_new=False)
-                    changed_field_keys = _diff_contact_field_keys(matched_contact, updated)
-                    if changed_field_keys:
-                        await self.crm_service.contact_store.save(updated)
-                        contact_outcome = "enriched"
-                    contact = updated
+                    contact, changed_field_keys, identity_conflicts, contact_outcome = await self._enrich_existing_contact(
+                        matched_contact, mapped_fields
+                    )
                 else:
                     # Extremely unlikely (the conflicting record would have
                     # to vanish between the failed create and this
@@ -335,12 +421,9 @@ class LumaSyncService:
                     match_status = LumaMatchStatus.NEEDS_REVIEW
                     contact_outcome = "needs_review"
         elif status == CrmImportRowStatus.EXISTING:
-            updated = self.crm_service.apply_import_mapping(matched_contact, mapped_fields, is_new=False)
-            changed_field_keys = _diff_contact_field_keys(matched_contact, updated)
-            if changed_field_keys:
-                await self.crm_service.contact_store.save(updated)
-                contact_outcome = "enriched"
-            contact = updated
+            contact, changed_field_keys, identity_conflicts, contact_outcome = await self._enrich_existing_contact(
+                matched_contact, mapped_fields
+            )
         else:  # POSSIBLE_DUPLICATE -- never attach, never guess, never create another contact
             match_status = LumaMatchStatus.NEEDS_REVIEW
             contact_outcome = "needs_review"
@@ -373,6 +456,7 @@ class LumaSyncService:
             registration_is_new=existing is None,
             contact_outcome=contact_outcome,
             changed_field_keys=changed_field_keys,
+            identity_conflicts=identity_conflicts,
         )
         await self._record_activity(luma_event, existing, result)
         return result
@@ -490,7 +574,7 @@ class LumaSyncService:
                 entity_id=contact.crm_contact_id,
                 entity_name=name,
             )
-        elif result.contact_outcome == "enriched" and contact is not None and result.changed_field_keys:
+        elif contact is not None and result.changed_field_keys:
             name = _contact_display_name(contact)
             await self.activity_log.record(
                 event_type="luma.contact.enriched",
@@ -501,6 +585,29 @@ class LumaSyncService:
                 entity_id=contact.crm_contact_id,
                 entity_name=name,
                 metadata={"fields_updated": result.changed_field_keys},
+            )
+
+        # Independent of the created/enriched branching above -- a conflict
+        # can co-occur with a successful partial enrichment (some fields
+        # applied, one identity field suppressed) or stand alone (every
+        # attempted change conflicted). Metadata is deliberately structural
+        # only: field keys and contact IDs, never the attempted value, the
+        # real email, or the real LinkedIn URL.
+        if contact is not None and result.identity_conflicts:
+            name = _contact_display_name(contact)
+            await self.activity_log.record(
+                event_type="luma.contact.identity_conflict",
+                category=ActivityCategory.LUMA,
+                source=ActivitySource.LUMA_SYNC,
+                summary=f"A Luma enrichment for {name} conflicted with another CRM contact's identity field and was not applied.",
+                entity_type="contact",
+                entity_id=contact.crm_contact_id,
+                entity_name=name,
+                metadata={
+                    "conflicting_fields": sorted(result.identity_conflicts.keys()),
+                    "matched_contact_id": contact.crm_contact_id,
+                    "conflicting_contact_ids": result.identity_conflicts,
+                },
             )
 
     # --- webhook entry point ----------------------------------------------
