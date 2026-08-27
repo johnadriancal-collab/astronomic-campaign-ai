@@ -101,18 +101,34 @@ class LumaRegistration(BaseModel):
     updated_at: datetime
 
 
+class LumaAnswerNormalizer(str, Enum):
+    """A small, closed set of SAFE, narrowly-typed value transforms a
+    mapping can request -- deliberately NOT a generic transformation/
+    execution engine (no arbitrary code, no user-supplied expressions).
+    See app/services/luma_answer_normalizers.py for the actual (pure,
+    unit-tested) implementation each member dispatches to."""
+
+    LINKEDIN_URL = "linkedin_url"
+
+
 class LumaQuestionMapping(BaseModel):
     """Configurable label -> CRM field mapping (never hardcoded in
     application logic). `extract_key` handles Luma's non-scalar question
     types (currently just `company`, whose value is {company, job_title})
     -- when set, the mapped value is `answer.value[extract_key]` rather
-    than `answer.value` itself."""
+    than `answer.value` itself. `normalizer`, when set, additionally runs
+    the (possibly extract_key'd) value through one of the closed set of
+    LumaAnswerNormalizer transforms before it's applied to the contact --
+    e.g. turning Luma's bare "/in/example" LinkedIn answer into a real
+    "https://www.linkedin.com/in/example" URL. Applied AFTER extract_key,
+    so the two compose (extract, then normalize the extracted value)."""
 
     luma_question_mapping_id: str
     question_label: str  # matched case-insensitively against registration_answers[].label
     question_type: str | None = None  # optional extra guard; None matches any question_type
     target_field_key: str  # a core/thesis field name, or "custom:<key>"
     extract_key: str | None = None  # e.g. "company" or "job_title" for question_type="company"
+    normalizer: LumaAnswerNormalizer | None = None
     active: bool = True
     created_at: datetime
     updated_at: datetime
@@ -123,6 +139,7 @@ class LumaQuestionMappingCreateRequest(BaseModel):
     question_type: str | None = None
     target_field_key: str
     extract_key: str | None = None
+    normalizer: LumaAnswerNormalizer | None = None
     active: bool = True
 
 
@@ -136,6 +153,7 @@ class LumaQuestionMappingUpdateRequest(BaseModel):
     question_type: str | None = None
     target_field_key: str | None = None
     extract_key: str | None = None
+    normalizer: LumaAnswerNormalizer | None = None
     active: bool | None = None
 
 

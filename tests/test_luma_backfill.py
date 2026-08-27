@@ -67,11 +67,18 @@ async def crm_service():
 
 
 def _guest_entry(guest_id: str, email: str) -> dict:
-    return {"guest": make_guest(guest_id=guest_id, email=email)}
+    """CONFIRMED against the real production GET /v1/events/guests/list
+    response (2026-08-27): each entry IS the guest object directly, not
+    nested under a "guest" key."""
+    return make_guest(guest_id=guest_id, email=email)
 
 
 def _event_entry(event_id: str) -> dict:
-    return {"event": make_event(event_id=event_id)}
+    """CONFIRMED against the real production GET /v1/calendars/events/list
+    response (2026-08-27): each entry IS the event object directly
+    (alongside sibling tags/submitted_by keys), not nested under an
+    "event" key as originally assumed from documentation alone."""
+    return make_event(event_id=event_id)
 
 
 def build_service(crm_service, luma_client, checkpoint_store=None):

@@ -344,3 +344,67 @@ def test_mapping_endpoints_never_referenced_in_frontend_source():
         if re.search(r"luma-question-mappings|luma_question_mapping", path.read_text(errors="ignore")):
             offenders.append(str(path))
     assert offenders == []
+
+
+# --- normalizer field on the mapping CRUD API -------------------------------
+
+
+def test_create_mapping_with_normalizer_persists_it(client):
+    _login(client)
+    resp = client.post(
+        "/crm/luma-question-mappings",
+        json={
+            "question_label": "LinkedIn Profile",
+            "question_type": "linkedin",
+            "target_field_key": "linkedin_url",
+            "normalizer": "linkedin_url",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["normalizer"] == "linkedin_url"
+
+    listed = client.get("/crm/luma-question-mappings").json()
+    match = next(m for m in listed if m["question_label"] == "LinkedIn Profile")
+    assert match["normalizer"] == "linkedin_url"
+
+
+def test_create_mapping_without_normalizer_defaults_to_null(client):
+    _login(client)
+    resp = client.post(
+        "/crm/luma-question-mappings", json={"question_label": "Title", "target_field_key": "title"}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["normalizer"] is None
+
+
+def test_create_mapping_rejects_unknown_normalizer_name(client):
+    _login(client)
+    resp = client.post(
+        "/crm/luma-question-mappings",
+        json={"question_label": "LinkedIn Profile", "target_field_key": "linkedin_url", "normalizer": "not_a_real_normalizer"},
+    )
+    assert resp.status_code == 422  # rejected at the Pydantic/enum layer, never reaches the service
+
+
+def test_update_mapping_can_set_the_normalizer(client):
+    _login(client)
+    created = client.post(
+        "/crm/luma-question-mappings", json={"question_label": "LinkedIn Profile", "target_field_key": "linkedin_url"}
+    ).json()
+    assert created["normalizer"] is None
+
+    resp = client.patch(f"/crm/luma-question-mappings/{created['luma_question_mapping_id']}", json={"normalizer": "linkedin_url"})
+    assert resp.status_code == 200
+    assert resp.json()["normalizer"] == "linkedin_url"
+
+
+def test_update_mapping_can_clear_the_normalizer(client):
+    _login(client)
+    created = client.post(
+        "/crm/luma-question-mappings",
+        json={"question_label": "LinkedIn Profile", "target_field_key": "linkedin_url", "normalizer": "linkedin_url"},
+    ).json()
+
+    resp = client.patch(f"/crm/luma-question-mappings/{created['luma_question_mapping_id']}", json={"normalizer": None})
+    assert resp.status_code == 200
+    assert resp.json()["normalizer"] is None

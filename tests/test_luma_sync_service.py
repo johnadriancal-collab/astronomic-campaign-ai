@@ -548,3 +548,123 @@ async def test_event_history_is_never_collapsed_into_a_single_text_field(luma_se
     assert len(result.registration.registration_answers) == 2
     assert result.registration.registration_answers[0].label == "Investor Type"
     assert result.registration.registration_answers[0].value == "Angel Investor"
+
+
+# --- LinkedIn normalizer, end-to-end through the mapping pipeline ----------
+
+
+async def test_linkedin_relative_path_is_normalized_end_to_end(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url", normalizer="linkedin_url"
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "LinkedIn Profile", "question_id": "q-1", "question_type": "linkedin", "value": "/in/john-adrian-c-9ba98176"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.linkedin_url == "https://www.linkedin.com/in/john-adrian-c-9ba98176"
+
+
+async def test_linkedin_full_url_is_normalized_end_to_end(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url", normalizer="linkedin_url"
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "LinkedIn Profile", "question_id": "q-1", "question_type": "linkedin", "value": "https://www.linkedin.com/in/alice"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.linkedin_url == "https://www.linkedin.com/in/alice"
+
+
+async def test_linkedin_missing_scheme_is_normalized_end_to_end(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url", normalizer="linkedin_url"
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "LinkedIn Profile", "question_id": "q-1", "question_type": "linkedin", "value": "linkedin.com/in/bob"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.linkedin_url == "https://www.linkedin.com/in/bob"
+
+
+async def test_invalid_linkedin_answer_never_populates_the_field(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url", normalizer="linkedin_url"
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "LinkedIn Profile", "question_id": "q-1", "question_type": "linkedin", "value": "not a linkedin url"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.linkedin_url is None
+
+
+async def test_blank_linkedin_answer_never_populates_the_field(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url", normalizer="linkedin_url"
+    )
+    guest = make_guest(
+        registration_answers=[{"label": "LinkedIn Profile", "question_id": "q-1", "question_type": "linkedin", "value": "   "}]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.linkedin_url is None
+
+
+async def test_normalizer_never_overwrites_an_existing_nonblank_linkedin_url(luma_service, crm_service, mapping_store):
+    """The normalizer only changes how a value is COMPUTED -- the fill-only
+    merge rule is completely unaffected, still enforced by
+    apply_import_mapping() exactly as for any other field."""
+    await _seed_mapping(
+        mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url", normalizer="linkedin_url"
+    )
+    existing = make_contact(email="alice@example.com", linkedin_url="https://www.linkedin.com/in/already-set")
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        registration_answers=[
+            {"label": "LinkedIn Profile", "question_id": "q-1", "question_type": "linkedin", "value": "/in/someone-else"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.linkedin_url == "https://www.linkedin.com/in/already-set"
+
+
+async def test_inactive_normalized_mapping_is_ignored_by_ingestion(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url",
+        normalizer="linkedin_url", active=False,
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "LinkedIn Profile", "question_id": "q-1", "question_type": "linkedin", "value": "/in/alice"}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.linkedin_url is None
+
+
+# --- no hardcoded Luma question label anywhere in ingestion logic ----------
+
+
+def test_no_hardcoded_luma_question_label_in_ingestion_source():
+    import inspect
+
+    from app.services import luma_answer_normalizers, luma_sync_service
+
+    for module in (luma_sync_service, luma_answer_normalizers):
+        source = inspect.getsource(module)
+        for hardcoded in ["What is your LinkedIn profile", "What company do you work for", "What type of investor are you"]:
+            assert hardcoded not in source, f"{module.__name__} hardcodes a real Luma question label: {hardcoded!r}"

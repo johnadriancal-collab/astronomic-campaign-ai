@@ -27,6 +27,7 @@ provenance). `source` is set (via apply_import_mapping's existing
 create-only rule) only on a brand-new contact, to "luma".
 """
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -55,6 +56,7 @@ from app.repositories.luma_question_mapping_store import LumaQuestionMappingStor
 from app.repositories.luma_registration_store import LumaRegistrationStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CUSTOM_FIELD_PREFIX, CrmService
+from app.services.luma_answer_normalizers import apply_normalizer
 
 # The only webhook event types Phase 1 processes -- event.*/calendar.*
 # lifecycle webhooks are deliberately out of scope this phase (see the
@@ -156,6 +158,19 @@ class LumaSyncService:
         self.activity_log = activity_log
         self.checkpoint_store = checkpoint_store
         self.luma_client = luma_client
+        # Per-guest-id concurrency guard -- see process_guest_event()'s
+        # docstring for the race this closes. Deliberately per-guest, not a
+        # single global lock: two DIFFERENT guests' webhooks still process
+        # fully in parallel, only deliveries for the SAME guest serialize.
+        # Grows one entry per unique guest_id ever seen for the life of the
+        # process (never pruned) -- an accepted, documented tradeoff at
+        # this app's scale (an asyncio.Lock is a few dozen bytes; even tens
+        # of thousands of guests is negligible memory), same spirit as
+        # AstroExportStore's single-instance-only tradeoff elsewhere in
+        # this app. dict.setdefault() below is a synchronous, non-`await`
+        # operation, so it's atomic with respect to other coroutines on
+        # this event loop -- no meta-lock is needed to protect it.
+        self._guest_locks: dict[str, asyncio.Lock] = {}
 
     # --- question mapping management ---------------------------------------
     #
@@ -177,6 +192,7 @@ class LumaSyncService:
             question_type=data.get("question_type"),
             target_field_key=data["target_field_key"],
             extract_key=data.get("extract_key"),
+            normalizer=data.get("normalizer"),
             active=data.get("active", True),
             created_at=now,
             updated_at=now,
@@ -224,13 +240,50 @@ class LumaSyncService:
 
     # --- shared core path: webhook AND backfill both call this -----------
 
+    def _lock_for_guest(self, guest_id: str) -> asyncio.Lock:
+        lock = self._guest_locks.get(guest_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._guest_locks[guest_id] = lock
+        return lock
+
     async def process_guest_event(
         self, event_payload: dict, guest_payload: dict, webhook_delivery_id: str | None = None
     ) -> LumaProcessResult:
+        """
+        Concurrency-safe entry point. Luma can and does deliver multiple
+        near-simultaneous webhook requests for the SAME guest (observed
+        directly in production: 3 deliveries ~150 microseconds apart for
+        one registration) -- without serializing per guest_id, each
+        concurrent request would independently read "no existing
+        registration yet" before any of them had saved one, and each would
+        conclude it's creating a brand-new registration (and, absent the
+        contact-side hardening in _process_guest_event_locked below, could
+        race on contact creation too). Root cause: the "is this new"
+        decision was a check-then-act read separated from the eventual
+        write by several awaited I/O calls, with no lock between them.
+
+        Fix: an asyncio.Lock keyed by guest_id (see _lock_for_guest above)
+        wraps the ENTIRE per-guest critical section -- concurrent
+        deliveries for the same guest now queue and process one at a time,
+        so the second one's "existing" read correctly observes the first
+        one's already-committed registration and takes the update path
+        instead of racing into "new" again. Deliberately per-guest, not a
+        single global lock -- two different guests' webhooks still run
+        fully in parallel; only same-guest deliveries serialize. Backfill
+        and the webhook handler both call this same method, so both get
+        this guarantee identically -- no separate, differently-behaved
+        backfill code path.
+        """
         guest_id = guest_payload.get("id")
         if not guest_id:
             raise LumaSyncError("Guest payload is missing an id.")
+        async with self._lock_for_guest(guest_id):
+            return await self._process_guest_event_locked(guest_id, event_payload, guest_payload, webhook_delivery_id)
 
+    async def _process_guest_event_locked(
+        self, guest_id: str, event_payload: dict, guest_payload: dict, webhook_delivery_id: str | None
+    ) -> LumaProcessResult:
         now = datetime.now(timezone.utc)
         luma_event = self._parse_event(event_payload, now)
         await self.event_store.save(luma_event)
@@ -254,8 +307,33 @@ class LumaSyncService:
 
         status, matched_contact, _matched_on = await self.crm_service.classify_match(mapped_fields)
         if status == CrmImportRowStatus.NEW:
-            contact = await self.crm_service.create_contact_from_import(mapped_fields)
-            contact_outcome = "created"
+            try:
+                contact = await self.crm_service.create_contact_from_import(mapped_fields)
+                contact_outcome = "created"
+            except ValueError:
+                # Structural race, not a per-guest one: a DIFFERENT guest_id
+                # (so the lock above didn't cover it) whose mapped email/
+                # apollo_contact_id/linkedin_url collides with this one won
+                # the create first -- CrmContactStore's UNIQUE constraint
+                # caught it. Per the explicit requirement, this backstop is
+                # NOT the primary safety mechanism (the per-guest lock is) --
+                # it only exists to resolve this rarer cross-guest overlap
+                # gracefully instead of crashing the request. Re-resolve
+                # against the now-current state rather than raising.
+                status, matched_contact, _matched_on = await self.crm_service.classify_match(mapped_fields)
+                if status == CrmImportRowStatus.EXISTING:
+                    updated = self.crm_service.apply_import_mapping(matched_contact, mapped_fields, is_new=False)
+                    changed_field_keys = _diff_contact_field_keys(matched_contact, updated)
+                    if changed_field_keys:
+                        await self.crm_service.contact_store.save(updated)
+                        contact_outcome = "enriched"
+                    contact = updated
+                else:
+                    # Extremely unlikely (the conflicting record would have
+                    # to vanish between the failed create and this
+                    # re-classify) -- never crash the webhook over it.
+                    match_status = LumaMatchStatus.NEEDS_REVIEW
+                    contact_outcome = "needs_review"
         elif status == CrmImportRowStatus.EXISTING:
             updated = self.crm_service.apply_import_mapping(matched_contact, mapped_fields, is_new=False)
             changed_field_keys = _diff_contact_field_keys(matched_contact, updated)
@@ -333,6 +411,12 @@ class LumaSyncService:
                     extracted = value.get(mapping.extract_key)
                 if extracted is None or extracted == "":
                     continue
+                if mapping.normalizer is not None:
+                    extracted = apply_normalizer(mapping.normalizer, extracted)
+                    if extracted is None or extracted == "":
+                        # Normalization failed (blank/unrelated/invalid input) --
+                        # never populate the target field from a bad transform.
+                        continue
                 mapped_fields[mapping.target_field_key] = extracted
         return mapped_fields
 
@@ -516,7 +600,14 @@ class LumaSyncService:
 
             resume_event_id = checkpoint.in_progress_event_id
             for entry in entries:
-                event_payload = entry.get("event") or {}
+                # CONFIRMED against the real production API (2026-08-27):
+                # GET /v1/calendars/events/list's entries are the event
+                # object DIRECTLY (id/name/start_at/... alongside sibling
+                # tags/submitted_by keys) -- NOT nested under an "event"
+                # key as originally assumed from documentation alone.
+                # _parse_event() only reads specific known keys via
+                # .get(...), so the extra sibling keys are harmless.
+                event_payload = entry
                 event_id = event_payload.get("id")
                 if not event_id:
                     continue
@@ -549,7 +640,11 @@ class LumaSyncService:
         while True:
             guests_page = await self.luma_client.list_event_guests(event_id, cursor=guest_cursor)
             for guest_entry in guests_page.get("entries") or []:
-                guest_payload = guest_entry.get("guest") or {}
+                # CONFIRMED against the real production API (2026-08-27):
+                # GET /v1/events/guests/list's entries are the guest object
+                # DIRECTLY -- same flat shape as the events-list endpoint,
+                # not nested under a "guest" key.
+                guest_payload = guest_entry
                 try:
                     result = await self.process_guest_event(event_payload, guest_payload, webhook_delivery_id=None)
                     _accumulate_counts(checkpoint.counts, result)
