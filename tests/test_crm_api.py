@@ -3,6 +3,7 @@ Route-level tests for /crm -- exercises just the CRM router against a
 fresh FastAPI app, isolated from app.main's real SQLite file.
 """
 
+import asyncio
 import io
 
 import pytest
@@ -367,3 +368,177 @@ def test_adding_to_list_does_not_change_contact_updated_at(test_client):
 
     after = test_client.get(f"/crm/contacts/{contact_id}").json()
     assert after == before
+
+
+# --- GET /crm/contacts/{id}/luma-registrations (contact detail Event History) --
+
+from datetime import datetime, timezone  # noqa: E402
+
+from app.dependencies import get_luma_sync_service  # noqa: E402
+from app.models.luma import LumaApprovalStatus, LumaEvent, LumaMatchStatus, LumaRegistration  # noqa: E402
+from app.repositories.luma_event_store import MemoryLumaEventStore  # noqa: E402
+from app.repositories.luma_question_mapping_store import MemoryLumaQuestionMappingStore  # noqa: E402
+from app.repositories.luma_registration_store import MemoryLumaRegistrationStore  # noqa: E402
+from app.services.luma_sync_service import LumaSyncService  # noqa: E402
+
+
+def _now():
+    return datetime(2026, 8, 20, tzinfo=timezone.utc)
+
+
+def _make_event(event_id: str, name: str) -> LumaEvent:
+    return LumaEvent(luma_event_id=event_id, name=name, synced_at=_now(), updated_at=_now())
+
+
+def _make_registration(**overrides) -> LumaRegistration:
+    defaults = dict(
+        luma_guest_id="gst-1", luma_event_id="evt-1", crm_contact_id="contact-1",
+        match_status=LumaMatchStatus.MATCHED, approval_status=LumaApprovalStatus.APPROVED,
+        synced_at=_now(), updated_at=_now(),
+    )
+    defaults.update(overrides)
+    return LumaRegistration(**defaults)
+
+
+@pytest.fixture
+def luma_test_setup():
+    crm_service = CrmService(contact_store=MemoryCrmContactStore())
+    event_store = MemoryLumaEventStore()
+    registration_store = MemoryLumaRegistrationStore()
+    luma_service = LumaSyncService(
+        crm_service=crm_service, event_store=event_store, registration_store=registration_store,
+        mapping_store=MemoryLumaQuestionMappingStore(), activity_log=crm_service.activity_log,
+    )
+
+    app = FastAPI()
+    app.include_router(crm_router)
+    app.dependency_overrides[get_crm_service] = lambda: crm_service
+    app.dependency_overrides[get_luma_sync_service] = lambda: luma_service
+
+    with TestClient(app) as client:
+        yield client, crm_service, event_store, registration_store
+
+
+async def _create_contact(crm_service, **overrides) -> str:
+    contact = await crm_service.create_contact_from_import({"first_name": "Ada", **overrides})
+    return contact.crm_contact_id
+
+
+def test_luma_registrations_route_returns_404_for_unknown_contact(luma_test_setup):
+    client, _, _, _ = luma_test_setup
+    resp = client.get("/crm/contacts/does-not-exist/luma-registrations")
+    assert resp.status_code == 404
+
+
+def test_luma_registrations_route_returns_empty_list_for_contact_with_none(luma_test_setup):
+    client, crm_service, _, _ = luma_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+
+    resp = client.get(f"/crm/contacts/{contact_id}/luma-registrations")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_luma_registrations_route_joins_event_name_and_omits_raw_answers(luma_test_setup):
+    client, crm_service, event_store, registration_store = luma_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    asyncio.run(event_store.save(_make_event("evt-1", "Hot Shot Investor Dinner ATX")))
+    asyncio.run(
+        registration_store.save(
+            _make_registration(
+                crm_contact_id=contact_id, registered_at=_now(),
+                registration_answers=[{"label": "Investor Type", "question_type": "multi-select", "value": ["Angel Investor"]}],
+            )
+        )
+    )
+
+    resp = client.get(f"/crm/contacts/{contact_id}/luma-registrations")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["event_name"] == "Hot Shot Investor Dinner ATX"
+    assert body[0]["luma_event_id"] == "evt-1"
+    assert body[0]["approval_status"] == "approved"
+    assert "registration_answers" not in body[0]
+    assert "luma_guest_id" not in body[0]
+
+
+def test_luma_registrations_route_reflects_checked_in_at_when_present(luma_test_setup):
+    client, crm_service, event_store, registration_store = luma_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    asyncio.run(event_store.save(_make_event("evt-1", "Hot Shot Investor Dinner ATX")))
+    asyncio.run(
+        registration_store.save(
+            _make_registration(crm_contact_id=contact_id, registered_at=_now(), checked_in_at=_now())
+        )
+    )
+
+    body = client.get(f"/crm/contacts/{contact_id}/luma-registrations").json()
+    assert body[0]["checked_in_at"] is not None
+
+
+def test_luma_registrations_route_never_reports_checked_in_for_approved_only(luma_test_setup):
+    client, crm_service, event_store, registration_store = luma_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    asyncio.run(event_store.save(_make_event("evt-1", "Hot Shot Investor Dinner ATX")))
+    asyncio.run(
+        registration_store.save(
+            _make_registration(crm_contact_id=contact_id, approval_status=LumaApprovalStatus.APPROVED, registered_at=_now())
+        )
+    )
+
+    body = client.get(f"/crm/contacts/{contact_id}/luma-registrations").json()
+    assert body[0]["approval_status"] == "approved"
+    assert body[0]["checked_in_at"] is None
+
+
+def test_luma_registrations_route_orders_multiple_events_newest_first(luma_test_setup):
+    client, crm_service, event_store, registration_store = luma_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    asyncio.run(event_store.save(_make_event("evt-old", "Older Dinner")))
+    asyncio.run(event_store.save(_make_event("evt-new", "Newer Dinner")))
+    asyncio.run(
+        registration_store.save(
+            _make_registration(
+                luma_guest_id="gst-old", luma_event_id="evt-old", crm_contact_id=contact_id,
+                registered_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            )
+        )
+    )
+    asyncio.run(
+        registration_store.save(
+            _make_registration(
+                luma_guest_id="gst-new", luma_event_id="evt-new", crm_contact_id=contact_id,
+                registered_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            )
+        )
+    )
+
+    body = client.get(f"/crm/contacts/{contact_id}/luma-registrations").json()
+    assert [e["event_name"] for e in body] == ["Newer Dinner", "Older Dinner"]
+
+
+def test_luma_registrations_route_reflects_declined_status(luma_test_setup):
+    client, crm_service, event_store, registration_store = luma_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    asyncio.run(event_store.save(_make_event("evt-1", "Hot Shot Investor Dinner ATX")))
+    asyncio.run(
+        registration_store.save(
+            _make_registration(crm_contact_id=contact_id, approval_status=LumaApprovalStatus.DECLINED, registered_at=_now())
+        )
+    )
+
+    body = client.get(f"/crm/contacts/{contact_id}/luma-registrations").json()
+    assert body[0]["approval_status"] == "declined"
+
+
+def test_get_contact_route_itself_is_unaffected_by_luma_route_addition(luma_test_setup):
+    """Opening a contact (GET /crm/contacts/{id}) must never write anything --
+    confirms the new route lives entirely alongside the existing one without
+    changing its behavior."""
+    client, crm_service, _, _ = luma_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    before = client.get(f"/crm/contacts/{contact_id}").json()
+    client.get(f"/crm/contacts/{contact_id}/luma-registrations")
+    after = client.get(f"/crm/contacts/{contact_id}").json()
+    assert before == after

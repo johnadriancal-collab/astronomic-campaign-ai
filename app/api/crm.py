@@ -11,7 +11,7 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from loguru import logger
 from pydantic import BaseModel
 
-from app.dependencies import get_crm_import_service, get_crm_service
+from app.dependencies import get_crm_import_service, get_crm_service, get_luma_sync_service
 from app.models.crm import (
     CrmContact,
     CrmContactExportField,
@@ -27,6 +27,7 @@ from app.models.crm import (
     FilterQuery,
     get_contact_export_fields,
 )
+from app.models.luma import CrmContactLumaRegistration
 from app.services.crm_filter_service import FilterValidationError
 from app.services.crm_import_service import CrmImportBatchNotFound, CrmImportService
 from app.services.crm_migration import (
@@ -41,6 +42,7 @@ from app.services.crm_service import (
     CrmDuplicateFieldKeyError,
     CrmService,
 )
+from app.services.luma_sync_service import LumaSyncService
 
 router = APIRouter(prefix="/crm", tags=["crm"])
 
@@ -165,6 +167,24 @@ async def get_contact(crm_contact_id: str, service: CrmService = Depends(get_crm
         return await service.get_contact(crm_contact_id)
     except CrmContactNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/contacts/{crm_contact_id}/luma-registrations", response_model=list[CrmContactLumaRegistration])
+async def get_contact_luma_registrations(
+    crm_contact_id: str,
+    crm_service: CrmService = Depends(get_crm_service),
+    luma_service: LumaSyncService = Depends(get_luma_sync_service),
+):
+    """Read-only Event History for the contact detail page -- reuses
+    LumaRegistrationStore.list_for_contact() (already built, joined
+    server-side with each registration's event name) so the frontend never
+    sees raw registration_answers. Purely a read: no enrichment, no
+    Activity Log event, no Luma API call happens here."""
+    try:
+        await crm_service.get_contact(crm_contact_id)
+    except CrmContactNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return await luma_service.list_contact_event_history(crm_contact_id)
 
 
 @router.patch("/contacts/{crm_contact_id}", response_model=CrmContact)

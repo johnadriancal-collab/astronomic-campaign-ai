@@ -15,15 +15,19 @@ import {
   ApiError,
   archiveCrmContact,
   getCrmContact,
+  getCrmContactLumaRegistrations,
   getMailSuppressionStatus,
   listCrmCustomFields,
   suppressMailEmail,
   unsuppressMailEmail,
   updateCrmContact,
   type CrmContact,
+  type CrmContactLumaRegistration,
   type CrmCustomFieldDefinition,
   type MailContactSuppressionStatus,
 } from "@/lib/api";
+import { buildEventHistory } from "@/lib/contact-event-history";
+import { buildContactSummary } from "@/lib/contact-summary";
 import { DIETARY_PREFERENCE_OPTIONS, INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
 import { mailSuppressionReasonLabel } from "@/lib/mail";
 import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
@@ -247,6 +251,11 @@ export default function CrmContactDetailPage() {
   const [suppressionBusy, setSuppressionBusy] = useState(false);
   const [suppressionError, setSuppressionError] = useState<string | null>(null);
 
+  // Event History -- read-only, best-effort, loaded independently of the
+  // main contact fetch (same pattern as Mail suppression above) so a
+  // failure here never blocks the rest of the page.
+  const [lumaRegistrations, setLumaRegistrations] = useState<CrmContactLumaRegistration[] | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -268,6 +277,13 @@ export default function CrmContactDetailPage() {
       .then(setSuppression)
       .catch(() => setSuppression(null));
   }, [contact?.email]);
+
+  useEffect(() => {
+    if (!contact?.crm_contact_id) return;
+    getCrmContactLumaRegistrations(contact.crm_contact_id)
+      .then(setLumaRegistrations)
+      .catch(() => setLumaRegistrations([]));
+  }, [contact?.crm_contact_id]);
 
   async function handleSuppress() {
     if (!contact?.email) return;
@@ -363,6 +379,12 @@ export default function CrmContactDetailPage() {
   const visibleCustomFields = customFields.filter(
     (f) => f.field_key !== "check_size_personal" && f.field_key !== "check_size_institutional"
   );
+
+  // Overview + Event History: both computed deterministically from data
+  // already on this page -- no LLM call, no extra network round trip for
+  // the summary itself (see lib/contact-summary.ts's module docstring).
+  const contactSummary = buildContactSummary(contact);
+  const eventHistory = lumaRegistrations ? buildEventHistory(lumaRegistrations) : null;
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
@@ -667,13 +689,48 @@ export default function CrmContactDetailPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-sm">Activity</CardTitle>
+            <CardTitle className="text-sm">Overview</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {contactSummary.sentence ? (
+              <p className="text-sm text-foreground">{contactSummary.sentence}</p>
+            ) : (
+              <p className="text-sm text-muted-foreground">Not enough structured data yet to summarize this contact.</p>
+            )}
+            {contactSummary.highlights.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {contactSummary.highlights.map((h) => (
+                  <Badge key={h.label} variant="secondary" className="font-normal">
+                    <span className="font-medium">{h.label}:</span>&nbsp;{h.value}
+                  </Badge>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Event History</CardTitle>
           </CardHeader>
           <CardContent>
-            <p className="text-sm text-muted-foreground">
-              Campaign and outreach history will show up here in a future phase. This contact isn&apos;t linked to any
-              Campaign Manager data yet.
-            </p>
+            {eventHistory === null ? (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            ) : eventHistory.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No event history yet.</p>
+            ) : (
+              <ul className="space-y-3">
+                {eventHistory.map((entry) => (
+                  <li key={entry.lumaEventId} className="border-b border-border pb-3 last:border-0 last:pb-0">
+                    <p className="text-sm font-medium text-foreground">{entry.eventName}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {entry.statusLabel}
+                      {entry.dateLabel ? ` · ${entry.dateLabel}` : ""}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
           </CardContent>
         </Card>
       </div>

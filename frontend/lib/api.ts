@@ -584,6 +584,25 @@ export function getCrmContact(crmContactId: string): Promise<CrmContact> {
   return request<CrmContact>(`/crm/contacts/${crmContactId}`);
 }
 
+// One entry per Luma event this contact has a registration for -- the
+// contact detail page's Event History section. Deliberately does NOT
+// include raw registration_answers or the Luma guest id; the backend joins
+// event_name server-side. Read-only: fetching this never enrolls, enriches,
+// or contacts Luma.
+export type LumaApprovalStatus = "approved" | "pending_approval" | "invited" | "waitlist" | "declined" | "session";
+
+export interface CrmContactLumaRegistration {
+  luma_event_id: string;
+  event_name: string;
+  approval_status: LumaApprovalStatus;
+  registered_at: string | null;
+  checked_in_at: string | null;
+}
+
+export function getCrmContactLumaRegistrations(crmContactId: string): Promise<CrmContactLumaRegistration[]> {
+  return request<CrmContactLumaRegistration[]>(`/crm/contacts/${crmContactId}/luma-registrations`);
+}
+
 export type CrmContactExportFieldKind = "scalar" | "list" | "boolean";
 
 export interface CrmContactExportField {

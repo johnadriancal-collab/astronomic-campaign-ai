@@ -101,6 +101,22 @@ class LumaRegistration(BaseModel):
     updated_at: datetime
 
 
+class CrmContactLumaRegistration(BaseModel):
+    """Read-only summary of one LumaRegistration for a CRM contact's Event
+    History section (contact detail page). Deliberately excludes
+    `registration_answers` -- the raw Luma answers are never needed to
+    render this UI and shouldn't ride along just because they're on the
+    underlying record -- and `luma_guest_id`, an internal identifier the
+    frontend has no use for. `event_name` is joined server-side from the
+    matching LumaEvent so the frontend never needs a second lookup."""
+
+    luma_event_id: str
+    event_name: str
+    approval_status: LumaApprovalStatus
+    registered_at: datetime | None = None
+    checked_in_at: datetime | None = None
+
+
 class LumaAnswerNormalizer(str, Enum):
     """A small, closed set of SAFE, narrowly-typed value transforms a
     mapping can request -- deliberately NOT a generic transformation/

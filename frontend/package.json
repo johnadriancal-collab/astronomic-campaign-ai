@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test": "node --test lib/tag-multi-select.test.ts lib/sort-contacts.test.ts lib/csv-export.test.ts lib/contact-selection.test.ts lib/filter-query-url.test.ts lib/filter-conditions.test.ts lib/astro-conversation.test.ts lib/contact-results-view.test.ts lib/crm-bulk-selection.test.ts lib/add-to-list.test.ts lib/activity.test.ts lib/email-intake.test.ts lib/mail.test.ts lib/timezones.test.ts lib/manager-nav.test.ts lib/mailboxes.test.ts lib/auth.test.ts lib/astro-ai-chat.test.ts lib/top-level-nav.test.ts lib/astro-campaign-isolation.test.ts lib/sidebar-nav-source.test.ts lib/next-config.test.ts"
+    "test": "node --test lib/tag-multi-select.test.ts lib/sort-contacts.test.ts lib/csv-export.test.ts lib/contact-selection.test.ts lib/filter-query-url.test.ts lib/filter-conditions.test.ts lib/astro-conversation.test.ts lib/contact-results-view.test.ts lib/crm-bulk-selection.test.ts lib/add-to-list.test.ts lib/activity.test.ts lib/email-intake.test.ts lib/mail.test.ts lib/timezones.test.ts lib/manager-nav.test.ts lib/mailboxes.test.ts lib/auth.test.ts lib/astro-ai-chat.test.ts lib/top-level-nav.test.ts lib/astro-campaign-isolation.test.ts lib/sidebar-nav-source.test.ts lib/next-config.test.ts lib/contact-summary.test.ts lib/contact-event-history.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

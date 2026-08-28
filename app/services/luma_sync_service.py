@@ -48,6 +48,7 @@ from app.models.crm import (
     normalize_linkedin_url,
 )
 from app.models.luma import (
+    CrmContactLumaRegistration,
     LumaApprovalStatus,
     LumaBackfillCheckpoint,
     LumaBackfillStatus,
@@ -985,3 +986,30 @@ class LumaSyncService:
             guests_matching_filter=guests_matched,
             counts=counts,
         )
+
+    # --- contact detail page: read-only Luma event history ------------------
+
+    async def list_contact_event_history(self, crm_contact_id: str) -> list[CrmContactLumaRegistration]:
+        """Read-only join of a CRM contact's LumaRegistrations with their
+        event names, newest registration first. Reuses
+        LumaRegistrationStore.list_for_contact() (already built for this
+        purpose, previously never called from any route). Never writes
+        anything -- no enrichment, no Activity Log event, no Luma API call
+        -- this is a pure read for the contact detail page's Event History
+        section."""
+        registrations = await self.registration_store.list_for_contact(crm_contact_id)
+        summaries = []
+        for registration in registrations:
+            event = await self.event_store.get(registration.luma_event_id)
+            summaries.append(
+                CrmContactLumaRegistration(
+                    luma_event_id=registration.luma_event_id,
+                    event_name=event.name if event else "(unknown event)",
+                    approval_status=registration.approval_status,
+                    registered_at=registration.registered_at,
+                    checked_in_at=registration.checked_in_at,
+                )
+            )
+        never_registered = datetime.min.replace(tzinfo=timezone.utc)
+        summaries.sort(key=lambda s: s.registered_at or never_registered, reverse=True)
+        return summaries
