@@ -700,9 +700,16 @@ export default function CrmContactDetailPage() {
             {contactSummary.highlights.length > 0 && (
               <div className="flex flex-wrap gap-2">
                 {contactSummary.highlights.map((h) => (
-                  <Badge key={h.label} variant="secondary" className="font-normal">
-                    <span className="font-medium">{h.label}:</span>&nbsp;{h.value}
-                  </Badge>
+                  // A plain div, not <Badge>, on purpose: Badge forces
+                  // whitespace-nowrap (fine for short status labels, but a
+                  // long Investor Type/Investment Focus value would then
+                  // overflow the card horizontally instead of wrapping).
+                  <div
+                    key={h.label}
+                    className="max-w-full rounded-md bg-secondary/60 px-2 py-1 text-xs break-words text-secondary-foreground"
+                  >
+                    <span className="font-medium">{h.label}:</span> {h.value}
+                  </div>
                 ))}
               </div>
             )}
