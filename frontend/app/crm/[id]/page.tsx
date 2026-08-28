@@ -427,6 +427,62 @@ export default function CrmContactDetailPage() {
       )}
       {saved && <p className="mb-4 text-sm text-muted-foreground">Saved.</p>}
 
+      <div className="mb-6 space-y-6">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Overview</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {contactSummary.sentence ? (
+              <p className="text-sm text-foreground">{contactSummary.sentence}</p>
+            ) : (
+              <p className="text-sm text-muted-foreground">Not enough structured data yet to summarize this contact.</p>
+            )}
+            {contactSummary.highlights.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {contactSummary.highlights.map((h) => (
+                  // A plain div, not <Badge>, on purpose: Badge forces
+                  // whitespace-nowrap (fine for short status labels, but a
+                  // long Investor Type/Investment Focus value would then
+                  // overflow the card horizontally instead of wrapping).
+                  <div
+                    key={h.label}
+                    className="max-w-full rounded-md bg-secondary/60 px-2 py-1 text-xs break-words text-secondary-foreground"
+                  >
+                    <span className="font-medium">{h.label}:</span> {h.value}
+                  </div>
+                ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Event History</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {eventHistory === null ? (
+              <p className="text-sm text-muted-foreground">Loading…</p>
+            ) : eventHistory.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No event history yet.</p>
+            ) : (
+              <ul className="space-y-3">
+                {eventHistory.map((entry) => (
+                  <li key={entry.lumaEventId} className="border-b border-border pb-3 last:border-0 last:pb-0">
+                    <p className="text-sm font-medium text-foreground">{entry.eventName}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {entry.statusLabel}
+                      {entry.dateLabel ? ` · ${entry.dateLabel}` : ""}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
+      </div>
+
       {contact.email && suppression && (
         <Card className={cn("mb-6", suppression.suppressed && "border-destructive/40 bg-destructive/5")}>
           <CardContent className="flex items-center justify-between gap-3 py-4">
@@ -686,60 +742,6 @@ export default function CrmContactDetailPage() {
             </CardContent>
           </Card>
         )}
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Overview</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {contactSummary.sentence ? (
-              <p className="text-sm text-foreground">{contactSummary.sentence}</p>
-            ) : (
-              <p className="text-sm text-muted-foreground">Not enough structured data yet to summarize this contact.</p>
-            )}
-            {contactSummary.highlights.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {contactSummary.highlights.map((h) => (
-                  // A plain div, not <Badge>, on purpose: Badge forces
-                  // whitespace-nowrap (fine for short status labels, but a
-                  // long Investor Type/Investment Focus value would then
-                  // overflow the card horizontally instead of wrapping).
-                  <div
-                    key={h.label}
-                    className="max-w-full rounded-md bg-secondary/60 px-2 py-1 text-xs break-words text-secondary-foreground"
-                  >
-                    <span className="font-medium">{h.label}:</span> {h.value}
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Event History</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {eventHistory === null ? (
-              <p className="text-sm text-muted-foreground">Loading…</p>
-            ) : eventHistory.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No event history yet.</p>
-            ) : (
-              <ul className="space-y-3">
-                {eventHistory.map((entry) => (
-                  <li key={entry.lumaEventId} className="border-b border-border pb-3 last:border-0 last:pb-0">
-                    <p className="text-sm font-medium text-foreground">{entry.eventName}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {entry.statusLabel}
-                      {entry.dateLabel ? ` · ${entry.dateLabel}` : ""}
-                    </p>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
       </div>
     </div>
   );
