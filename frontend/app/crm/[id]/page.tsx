@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { AlertTriangle, ArrowLeft, Archive, Ban, CheckCircle2, Save } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Archive, Ban, Save } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -29,9 +29,8 @@ import {
 import { buildEventHistory } from "@/lib/contact-event-history";
 import { buildContactSummary } from "@/lib/contact-summary";
 import { DIETARY_PREFERENCE_OPTIONS, INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
-import { mailSuppressionReasonLabel } from "@/lib/mail";
+import { nextSuppressionAction, suppressionToggleLabel } from "@/lib/mail";
 import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
-import { cn } from "@/lib/utils";
 
 const CORE_TEXT_FIELDS: [keyof CrmContact, string][] = [
   ["first_name", "First name"],
@@ -313,6 +312,18 @@ export default function CrmContactDetailPage() {
     }
   }
 
+  // One toggle button in the header calls whichever of the two existing,
+  // unchanged actions applies to the CURRENT state -- never both, never a
+  // new suppression code path. Entirely separate from handleSave(); never
+  // triggers the CRM PATCH.
+  function handleToggleSuppression() {
+    if (nextSuppressionAction(suppression?.suppressed ?? false) === "unsuppress") {
+      handleUnsuppress();
+    } else {
+      handleSuppress();
+    }
+  }
+
   function set<K extends keyof CrmContact>(key: K, value: CrmContact[K]) {
     setContact((prev) => (prev ? { ...prev, [key]: value } : prev));
     setSaved(false);
@@ -406,7 +417,19 @@ export default function CrmContactDetailPage() {
             {[contact.title, contact.company].filter(Boolean).join(" @ ")}
           </p>
         </div>
-        <div className="flex shrink-0 gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
+          {contact.email && suppression && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleToggleSuppression}
+              disabled={suppressionBusy}
+              className="gap-1.5"
+            >
+              <Ban className="h-3.5 w-3.5" />
+              {suppressionToggleLabel(suppression.suppressed)}
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={handleArchive} className="gap-1.5" disabled={contact.archived}>
             <Archive className="h-3.5 w-3.5" />
             Archive
@@ -426,6 +449,7 @@ export default function CrmContactDetailPage() {
         </Alert>
       )}
       {saved && <p className="mb-4 text-sm text-muted-foreground">Saved.</p>}
+      {suppressionError && <p className="mb-4 text-xs text-destructive">{suppressionError}</p>}
 
       <div className="mb-6 space-y-6">
         <Card>
@@ -482,42 +506,6 @@ export default function CrmContactDetailPage() {
           </CardContent>
         </Card>
       </div>
-
-      {contact.email && suppression && (
-        <Card className={cn("mb-6", suppression.suppressed && "border-destructive/40 bg-destructive/5")}>
-          <CardContent className="flex items-center justify-between gap-3 py-4">
-            <div className="flex items-center gap-2">
-              {suppression.suppressed ? (
-                <Ban className="h-4 w-4 text-destructive" />
-              ) : (
-                <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
-              )}
-              <div>
-                <p className={cn("text-sm font-medium", suppression.suppressed && "text-destructive")}>
-                  {suppression.suppressed ? "Email suppressed -- will not be mailed" : "Not suppressed for Mail"}
-                </p>
-                {suppression.suppressed && suppression.reason && (
-                  <p className="text-xs text-muted-foreground">
-                    Reason: {mailSuppressionReasonLabel(suppression.reason)}
-                    {suppression.notes ? ` -- ${suppression.notes}` : ""}
-                  </p>
-                )}
-              </div>
-            </div>
-            {suppressionError && <p className="text-xs text-destructive">{suppressionError}</p>}
-            {suppression.suppressed ? (
-              <Button variant="outline" size="sm" onClick={handleUnsuppress} disabled={suppressionBusy}>
-                Unsuppress
-              </Button>
-            ) : (
-              <Button variant="outline" size="sm" onClick={handleSuppress} disabled={suppressionBusy} className="gap-1.5">
-                <Ban className="h-3.5 w-3.5" />
-                Suppress from Mail
-              </Button>
-            )}
-          </CardContent>
-        </Card>
-      )}
 
       <div className="space-y-6">
         <Card>

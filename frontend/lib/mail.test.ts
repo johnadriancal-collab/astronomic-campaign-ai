@@ -10,6 +10,8 @@ import {
   mailCampaignStatusLabel,
   mailEnrollmentStatusLabel,
   mailSuppressionReasonLabel,
+  nextSuppressionAction,
+  suppressionToggleLabel,
   toggleAllSendingDays,
   toggleSendingDay,
 } from "./mail.ts";
@@ -36,6 +38,21 @@ test("mailSuppressionReasonLabel maps every reason", () => {
   assert.equal(mailSuppressionReasonLabel("unsubscribed"), "Unsubscribed");
   assert.equal(mailSuppressionReasonLabel("hard_bounce"), "Hard Bounce");
   assert.equal(mailSuppressionReasonLabel("complaint"), "Complaint");
+});
+
+// --- CRM contact header suppression toggle ------------------------------
+
+test("suppressionToggleLabel reflects current state clearly, both directions", () => {
+  assert.equal(suppressionToggleLabel(false), "Not suppressed from Mail");
+  assert.equal(suppressionToggleLabel(true), "Suppressed from Mail");
+});
+
+test("nextSuppressionAction: not-suppressed -> clicking suppresses", () => {
+  assert.equal(nextSuppressionAction(false), "suppress");
+});
+
+test("nextSuppressionAction: suppressed -> clicking unsuppresses", () => {
+  assert.equal(nextSuppressionAction(true), "unsuppress");
 });
 
 test("formatSendingDays handles empty, every-day, and a specific subset", () => {

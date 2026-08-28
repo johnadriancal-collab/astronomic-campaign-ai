@@ -48,6 +48,20 @@ export function mailSuppressionReasonLabel(reason: MailSuppressionReason): strin
   return MAIL_SUPPRESSION_REASON_OPTIONS.find((r) => r.value === reason)?.label ?? reason;
 }
 
+// The CRM contact header's one suppression toggle button -- label text and
+// which of the two existing, unchanged actions (suppress/unsuppress) a
+// click should invoke, both driven purely by the currently-loaded status.
+// `suppressed` is `null` while the status hasn't loaded yet (or the contact
+// has no usable email) -- callers must not render an actionable toggle in
+// that case at all, per the "no email -> no suppression toggle" rule.
+export function suppressionToggleLabel(suppressed: boolean): string {
+  return suppressed ? "Suppressed from Mail" : "Not suppressed from Mail";
+}
+
+export function nextSuppressionAction(suppressed: boolean): "suppress" | "unsuppress" {
+  return suppressed ? "unsuppress" : "suppress";
+}
+
 // 0=Monday .. 6=Sunday -- matches app/models/mail.py's convention exactly
 // (Python's date.weekday()), NOT JavaScript's Date.getDay() (0=Sunday) --
 // callers must never pass a raw getDay() value here.
