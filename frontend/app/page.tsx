@@ -5,8 +5,15 @@ import { ArrowRight, Download, Loader2, Sparkles } from "lucide-react";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { ApiError, sendAstroChatMessage, type AstroChatMessage } from "@/lib/api";
-import { appendUserMessage, canSubmit, shouldSubmitOnKeyDown } from "@/lib/astro-ai-chat";
+import { ApiError, sendAstroChatMessage, type AstroChatAttachment, type AstroChatMessage } from "@/lib/api";
+import {
+  appendUserMessage,
+  buildDownloadHref,
+  canSubmit,
+  fetchAttachmentBlob,
+  isRenderableAttachment,
+  shouldSubmitOnKeyDown,
+} from "@/lib/astro-ai-chat";
 import { cn } from "@/lib/utils";
 
 // This is the Hub's one Astro AI surface -- the original hero design,
@@ -23,6 +30,34 @@ export default function Home() {
   const [value, setValue] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Keyed by message index -- a download failure (expired export, network
+  // error) is specific to that one attachment, never the whole chat.
+  const [downloadErrors, setDownloadErrors] = useState<Record<number, string>>({});
+
+  async function handleDownloadClick(
+    e: React.MouseEvent<HTMLAnchorElement>,
+    index: number,
+    attachment: AstroChatAttachment
+  ) {
+    e.preventDefault();
+    setDownloadErrors((prev) => {
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
+
+    const result = await fetchAttachmentBlob(buildDownloadHref(attachment));
+    if (!result.ok) {
+      setDownloadErrors((prev) => ({ ...prev, [index]: result.message }));
+      return;
+    }
+    const blobUrl = URL.createObjectURL(result.blob);
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = attachment.filename;
+    link.click();
+    URL.revokeObjectURL(blobUrl);
+  }
 
   async function handleSend() {
     if (!canSubmit(value, loading)) return;
@@ -87,15 +122,21 @@ export default function Home() {
                     >
                       {m.content}
                     </div>
-                    {m.attachment && (
-                      <a
-                        href={`/backend${m.attachment.url}`}
-                        download={m.attachment.filename}
-                        className={cn(buttonVariants({ size: "sm", variant: "outline" }), "gap-1.5")}
-                      >
-                        <Download className="h-4 w-4" />
-                        Download CSV ({m.attachment.contact_count})
-                      </a>
+                    {isRenderableAttachment(m.attachment) && (
+                      <div className="flex w-full max-w-[85%] flex-col gap-1.5 rounded-lg border border-border bg-secondary/40 px-3 py-2">
+                        <span className="truncate text-sm font-medium text-foreground">{m.attachment.filename}</span>
+                        <span className="text-xs text-muted-foreground">{m.attachment.contact_count} contacts &middot; CSV</span>
+                        <a
+                          href={buildDownloadHref(m.attachment)}
+                          download={m.attachment.filename}
+                          onClick={(e) => handleDownloadClick(e, i, m.attachment!)}
+                          className={cn(buttonVariants({ size: "sm", variant: "outline" }), "w-fit gap-1.5")}
+                        >
+                          <Download className="h-4 w-4" />
+                          Download CSV
+                        </a>
+                        {downloadErrors[i] && <p className="text-xs text-destructive">{downloadErrors[i]}</p>}
+                      </div>
                     )}
                   </div>
                 ))}
