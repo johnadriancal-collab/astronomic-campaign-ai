@@ -12,6 +12,7 @@ import aiosqlite
 
 from app.models.crm import CrmContactListMembership
 from app.repositories.crm_contact_list_member_store import CrmContactListMemberStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS crm_contact_list_members (
@@ -54,26 +55,26 @@ class SQLiteCrmContactListMemberStore(CrmContactListMemberStore):
         return self._conn
 
     async def add(self, membership: CrmContactListMembership) -> bool:
-        cursor = await self._connection.execute(
-            "INSERT OR IGNORE INTO crm_contact_list_members (list_id, crm_contact_id, added_at) VALUES (?, ?, ?)",
-            (membership.list_id, membership.crm_contact_id, membership.added_at.isoformat()),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "INSERT OR IGNORE INTO crm_contact_list_members (list_id, crm_contact_id, added_at) VALUES (?, ?, ?)",
+                (membership.list_id, membership.crm_contact_id, membership.added_at.isoformat()),
+            )
         return cursor.rowcount > 0
 
     async def remove(self, list_id: str, crm_contact_id: str) -> bool:
-        cursor = await self._connection.execute(
-            "DELETE FROM crm_contact_list_members WHERE list_id = ? AND crm_contact_id = ?",
-            (list_id, crm_contact_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "DELETE FROM crm_contact_list_members WHERE list_id = ? AND crm_contact_id = ?",
+                (list_id, crm_contact_id),
+            )
         return cursor.rowcount > 0
 
     async def remove_all_for_list(self, list_id: str) -> None:
-        await self._connection.execute(
-            "DELETE FROM crm_contact_list_members WHERE list_id = ?", (list_id,)
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "DELETE FROM crm_contact_list_members WHERE list_id = ?", (list_id,)
+            )
 
     async def list_contact_ids_for_list(self, list_id: str) -> list[str]:
         cursor = await self._connection.execute(

@@ -20,6 +20,7 @@ import aiosqlite
 
 from app.models.crm import CrmContact, normalize_email, normalize_linkedin_url, normalize_name_company
 from app.repositories.crm_contact_store import CrmContactNotFoundError, CrmContactStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS crm_contacts (
@@ -67,25 +68,25 @@ class SQLiteCrmContactStore(CrmContactStore):
     async def create(self, contact: CrmContact) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
-            await self._connection.execute(
-                """
-                INSERT INTO crm_contacts
-                    (crm_contact_id, email_normalized, apollo_contact_id, linkedin_normalized,
-                     name_company_normalized, created_at, updated_at, data)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    contact.crm_contact_id,
-                    normalize_email(contact.email),
-                    contact.apollo_contact_id,
-                    normalize_linkedin_url(contact.linkedin_url),
-                    normalize_name_company(contact.first_name, contact.last_name, contact.company),
-                    now,
-                    now,
-                    contact.model_dump_json(),
-                ),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    """
+                    INSERT INTO crm_contacts
+                        (crm_contact_id, email_normalized, apollo_contact_id, linkedin_normalized,
+                         name_company_normalized, created_at, updated_at, data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        contact.crm_contact_id,
+                        normalize_email(contact.email),
+                        contact.apollo_contact_id,
+                        normalize_linkedin_url(contact.linkedin_url),
+                        normalize_name_company(contact.first_name, contact.last_name, contact.company),
+                        now,
+                        now,
+                        contact.model_dump_json(),
+                    ),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"CrmContact already exists (duplicate email/apollo_contact_id/linkedin_url): {e}") from e
 
@@ -100,24 +101,24 @@ class SQLiteCrmContactStore(CrmContactStore):
     async def save(self, contact: CrmContact) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
-            cursor = await self._connection.execute(
-                """
-                UPDATE crm_contacts
-                SET email_normalized = ?, apollo_contact_id = ?, linkedin_normalized = ?,
-                    name_company_normalized = ?, updated_at = ?, data = ?
-                WHERE crm_contact_id = ?
-                """,
-                (
-                    normalize_email(contact.email),
-                    contact.apollo_contact_id,
-                    normalize_linkedin_url(contact.linkedin_url),
-                    normalize_name_company(contact.first_name, contact.last_name, contact.company),
-                    now,
-                    contact.model_dump_json(),
-                    contact.crm_contact_id,
-                ),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                cursor = await self._connection.execute(
+                    """
+                    UPDATE crm_contacts
+                    SET email_normalized = ?, apollo_contact_id = ?, linkedin_normalized = ?,
+                        name_company_normalized = ?, updated_at = ?, data = ?
+                    WHERE crm_contact_id = ?
+                    """,
+                    (
+                        normalize_email(contact.email),
+                        contact.apollo_contact_id,
+                        normalize_linkedin_url(contact.linkedin_url),
+                        normalize_name_company(contact.first_name, contact.last_name, contact.company),
+                        now,
+                        contact.model_dump_json(),
+                        contact.crm_contact_id,
+                    ),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"Update would duplicate an existing email/apollo_contact_id/linkedin_url: {e}") from e
         if cursor.rowcount == 0:

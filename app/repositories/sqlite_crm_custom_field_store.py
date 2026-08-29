@@ -7,6 +7,7 @@ import aiosqlite
 
 from app.models.crm import CrmCustomFieldDefinition
 from app.repositories.crm_custom_field_store import CrmCustomFieldNotFoundError, CrmCustomFieldStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS crm_custom_fields (
@@ -46,12 +47,12 @@ class SQLiteCrmCustomFieldStore(CrmCustomFieldStore):
     async def create(self, definition: CrmCustomFieldDefinition) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
-            await self._connection.execute(
-                "INSERT INTO crm_custom_fields (crm_custom_field_id, field_key, created_at, updated_at, data) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (definition.crm_custom_field_id, definition.field_key, now, now, definition.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO crm_custom_fields (crm_custom_field_id, field_key, created_at, updated_at, data) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (definition.crm_custom_field_id, definition.field_key, now, now, definition.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"CrmCustomFieldDefinition already exists (id or field_key): {e}") from e
 
@@ -73,11 +74,11 @@ class SQLiteCrmCustomFieldStore(CrmCustomFieldStore):
 
     async def save(self, definition: CrmCustomFieldDefinition) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        cursor = await self._connection.execute(
-            "UPDATE crm_custom_fields SET updated_at = ?, data = ? WHERE crm_custom_field_id = ?",
-            (now, definition.model_dump_json(), definition.crm_custom_field_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE crm_custom_fields SET updated_at = ?, data = ? WHERE crm_custom_field_id = ?",
+                (now, definition.model_dump_json(), definition.crm_custom_field_id),
+            )
         if cursor.rowcount == 0:
             raise CrmCustomFieldNotFoundError(definition.crm_custom_field_id)
 

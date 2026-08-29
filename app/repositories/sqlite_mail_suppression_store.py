@@ -8,6 +8,7 @@ import aiosqlite
 
 from app.models.mail import MailSuppression
 from app.repositories.mail_suppression_store import MailSuppressionStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS mail_suppressions (
@@ -50,12 +51,12 @@ class SQLiteMailSuppressionStore(MailSuppressionStore):
         return MailSuppression.model_validate_json(row["data"]) if row else None
 
     async def upsert(self, suppression: MailSuppression) -> None:
-        await self._connection.execute(
-            "INSERT INTO mail_suppressions (email_normalized, data) VALUES (?, ?) "
-            "ON CONFLICT (email_normalized) DO UPDATE SET data = excluded.data",
-            (suppression.email_normalized, suppression.model_dump_json()),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "INSERT INTO mail_suppressions (email_normalized, data) VALUES (?, ?) "
+                "ON CONFLICT (email_normalized) DO UPDATE SET data = excluded.data",
+                (suppression.email_normalized, suppression.model_dump_json()),
+            )
 
     async def list(self) -> list[MailSuppression]:
         cursor = await self._connection.execute("SELECT data FROM mail_suppressions")

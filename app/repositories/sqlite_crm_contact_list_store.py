@@ -6,6 +6,7 @@ import aiosqlite
 
 from app.models.crm import CrmContactList
 from app.repositories.crm_contact_list_store import CrmContactListNotFoundError, CrmContactListStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS crm_contact_lists (
@@ -43,16 +44,16 @@ class SQLiteCrmContactListStore(CrmContactListStore):
 
     async def create(self, contact_list: CrmContactList) -> None:
         try:
-            await self._connection.execute(
-                "INSERT INTO crm_contact_lists (list_id, created_at, updated_at, data) VALUES (?, ?, ?, ?)",
-                (
-                    contact_list.list_id,
-                    contact_list.created_at.isoformat(),
-                    contact_list.updated_at.isoformat(),
-                    contact_list.model_dump_json(),
-                ),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO crm_contact_lists (list_id, created_at, updated_at, data) VALUES (?, ?, ?, ?)",
+                    (
+                        contact_list.list_id,
+                        contact_list.created_at.isoformat(),
+                        contact_list.updated_at.isoformat(),
+                        contact_list.model_dump_json(),
+                    ),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"CrmContactList already exists: {e}") from e
 
@@ -65,17 +66,17 @@ class SQLiteCrmContactListStore(CrmContactListStore):
         return CrmContactList.model_validate_json(row["data"]) if row else None
 
     async def save(self, contact_list: CrmContactList) -> None:
-        cursor = await self._connection.execute(
-            "UPDATE crm_contact_lists SET updated_at = ?, data = ? WHERE list_id = ?",
-            (contact_list.updated_at.isoformat(), contact_list.model_dump_json(), contact_list.list_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE crm_contact_lists SET updated_at = ?, data = ? WHERE list_id = ?",
+                (contact_list.updated_at.isoformat(), contact_list.model_dump_json(), contact_list.list_id),
+            )
         if cursor.rowcount == 0:
             raise CrmContactListNotFoundError(contact_list.list_id)
 
     async def delete(self, list_id: str) -> None:
-        await self._connection.execute("DELETE FROM crm_contact_lists WHERE list_id = ?", (list_id,))
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute("DELETE FROM crm_contact_lists WHERE list_id = ?", (list_id,))
 
     async def list(self) -> list[CrmContactList]:
         # Declared LAST -- see crm_contact_store.py's module docstring for why.

@@ -12,6 +12,7 @@ import aiosqlite
 
 from app.models.itf import ItfIngestionLogEntry, ItfRowStatus
 from app.repositories.itf_ingestion_log_store import ItfIngestionLogStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS itf_ingestion_log (
@@ -64,32 +65,32 @@ class SQLiteItfIngestionLogStore(ItfIngestionLogStore):
         return self._conn
 
     async def save(self, entry: ItfIngestionLogEntry) -> None:
-        await self._connection.execute(
-            """
-            INSERT INTO itf_ingestion_log
-                (row_number, content_hash, status, response_id, crm_contact_id, email, error_message, processed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(row_number) DO UPDATE SET
-                content_hash = excluded.content_hash,
-                status = excluded.status,
-                response_id = excluded.response_id,
-                crm_contact_id = excluded.crm_contact_id,
-                email = excluded.email,
-                error_message = excluded.error_message,
-                processed_at = excluded.processed_at
-            """,
-            (
-                entry.row_number,
-                entry.content_hash,
-                entry.status.value,
-                entry.response_id,
-                entry.crm_contact_id,
-                entry.email,
-                entry.error_message,
-                entry.processed_at.isoformat(),
-            ),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                """
+                INSERT INTO itf_ingestion_log
+                    (row_number, content_hash, status, response_id, crm_contact_id, email, error_message, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(row_number) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    status = excluded.status,
+                    response_id = excluded.response_id,
+                    crm_contact_id = excluded.crm_contact_id,
+                    email = excluded.email,
+                    error_message = excluded.error_message,
+                    processed_at = excluded.processed_at
+                """,
+                (
+                    entry.row_number,
+                    entry.content_hash,
+                    entry.status.value,
+                    entry.response_id,
+                    entry.crm_contact_id,
+                    entry.email,
+                    entry.error_message,
+                    entry.processed_at.isoformat(),
+                ),
+            )
 
     async def get(self, row_number: int) -> ItfIngestionLogEntry | None:
         cursor = await self._connection.execute(

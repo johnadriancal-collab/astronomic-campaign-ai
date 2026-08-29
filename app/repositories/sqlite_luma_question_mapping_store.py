@@ -10,6 +10,7 @@ import aiosqlite
 
 from app.models.luma import LumaQuestionMapping
 from app.repositories.luma_question_mapping_store import LumaQuestionMappingStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS luma_question_mappings (
@@ -45,18 +46,18 @@ class SQLiteLumaQuestionMappingStore(LumaQuestionMappingStore):
         return self._conn
 
     async def create(self, mapping: LumaQuestionMapping) -> None:
-        await self._connection.execute(
-            "INSERT INTO luma_question_mappings (luma_question_mapping_id, active, data) VALUES (?, ?, ?)",
-            (mapping.luma_question_mapping_id, int(mapping.active), mapping.model_dump_json()),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "INSERT INTO luma_question_mappings (luma_question_mapping_id, active, data) VALUES (?, ?, ?)",
+                (mapping.luma_question_mapping_id, int(mapping.active), mapping.model_dump_json()),
+            )
 
     async def save(self, mapping: LumaQuestionMapping) -> None:
-        await self._connection.execute(
-            "UPDATE luma_question_mappings SET active = ?, data = ? WHERE luma_question_mapping_id = ?",
-            (int(mapping.active), mapping.model_dump_json(), mapping.luma_question_mapping_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "UPDATE luma_question_mappings SET active = ?, data = ? WHERE luma_question_mapping_id = ?",
+                (int(mapping.active), mapping.model_dump_json(), mapping.luma_question_mapping_id),
+            )
 
     async def get(self, luma_question_mapping_id: str) -> LumaQuestionMapping | None:
         cursor = await self._connection.execute(

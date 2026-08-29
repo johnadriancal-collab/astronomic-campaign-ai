@@ -11,6 +11,7 @@ import aiosqlite
 
 from app.models.email_sequence import EmailSequenceStep
 from app.repositories.email_sequence_step_store import EmailSequenceStepStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS email_sequence_steps (
@@ -52,23 +53,23 @@ class SQLiteEmailSequenceStepStore(EmailSequenceStepStore):
 
     async def create(self, step: EmailSequenceStep) -> None:
         try:
-            await self._connection.execute(
-                """
-                INSERT INTO email_sequence_steps
-                    (email_sequence_step_id, email_sequence_id, apollo_step_id, position, day, subject, body)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    step.email_sequence_step_id,
-                    step.email_sequence_id,
-                    step.apollo_step_id,
-                    step.position,
-                    step.day,
-                    step.subject,
-                    step.body,
-                ),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    """
+                    INSERT INTO email_sequence_steps
+                        (email_sequence_step_id, email_sequence_id, apollo_step_id, position, day, subject, body)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        step.email_sequence_step_id,
+                        step.email_sequence_id,
+                        step.apollo_step_id,
+                        step.position,
+                        step.day,
+                        step.subject,
+                        step.body,
+                    ),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(
                 f"EmailSequenceStep already exists for sequence {step.email_sequence_id} "
@@ -76,15 +77,15 @@ class SQLiteEmailSequenceStepStore(EmailSequenceStepStore):
             ) from e
 
     async def save(self, step: EmailSequenceStep) -> None:
-        cursor = await self._connection.execute(
-            """
-            UPDATE email_sequence_steps
-            SET apollo_step_id = ?, day = ?, subject = ?, body = ?
-            WHERE email_sequence_id = ? AND position = ?
-            """,
-            (step.apollo_step_id, step.day, step.subject, step.body, step.email_sequence_id, step.position),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                """
+                UPDATE email_sequence_steps
+                SET apollo_step_id = ?, day = ?, subject = ?, body = ?
+                WHERE email_sequence_id = ? AND position = ?
+                """,
+                (step.apollo_step_id, step.day, step.subject, step.body, step.email_sequence_id, step.position),
+            )
         if cursor.rowcount == 0:
             raise ValueError(f"EmailSequenceStep not found: {step.email_sequence_step_id}")
 

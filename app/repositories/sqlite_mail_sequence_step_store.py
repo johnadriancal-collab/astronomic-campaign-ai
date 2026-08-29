@@ -17,6 +17,7 @@ from app.repositories.mail_sequence_step_store import (
     MailSequenceStepNotFoundError,
     MailSequenceStepStore,
 )
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS mail_sequence_steps (
@@ -61,11 +62,11 @@ class SQLiteMailSequenceStepStore(MailSequenceStepStore):
 
     async def create(self, step: MailSequenceStep) -> None:
         try:
-            await self._connection.execute(
-                "INSERT INTO mail_sequence_steps (step_id, mail_campaign_id, step_number, data) VALUES (?, ?, ?, ?)",
-                (step.step_id, step.mail_campaign_id, step.step_number, step.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO mail_sequence_steps (step_id, mail_campaign_id, step_number, data) VALUES (?, ?, ?, ?)",
+                    (step.step_id, step.mail_campaign_id, step.step_number, step.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise DuplicateMailSequenceStepNumberError(step.mail_campaign_id, step.step_number) from e
 
@@ -79,19 +80,19 @@ class SQLiteMailSequenceStepStore(MailSequenceStepStore):
 
     async def save(self, step: MailSequenceStep) -> None:
         try:
-            cursor = await self._connection.execute(
-                "UPDATE mail_sequence_steps SET step_number = ?, data = ? WHERE step_id = ?",
-                (step.step_number, step.model_dump_json(), step.step_id),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                cursor = await self._connection.execute(
+                    "UPDATE mail_sequence_steps SET step_number = ?, data = ? WHERE step_id = ?",
+                    (step.step_number, step.model_dump_json(), step.step_id),
+                )
         except aiosqlite.IntegrityError as e:
             raise DuplicateMailSequenceStepNumberError(step.mail_campaign_id, step.step_number) from e
         if cursor.rowcount == 0:
             raise MailSequenceStepNotFoundError(step.step_id)
 
     async def delete(self, step_id: str) -> None:
-        await self._connection.execute("DELETE FROM mail_sequence_steps WHERE step_id = ?", (step_id,))
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute("DELETE FROM mail_sequence_steps WHERE step_id = ?", (step_id,))
 
     async def list_for_campaign(self, mail_campaign_id: str) -> list[MailSequenceStep]:
         cursor = await self._connection.execute(

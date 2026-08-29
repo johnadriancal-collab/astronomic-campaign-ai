@@ -14,6 +14,7 @@ import aiosqlite
 
 from app.models.email_message import EmailMessage
 from app.repositories.email_message_store import EmailMessageNotFoundError, EmailMessageStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS email_messages (
@@ -59,23 +60,23 @@ class SQLiteEmailMessageStore(EmailMessageStore):
 
     async def create(self, message: EmailMessage) -> None:
         try:
-            await self._connection.execute(
-                """
-                INSERT INTO email_messages
-                    (email_message_id, email_sequence_id, lead_id, apollo_message_id, source, status, data)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    message.email_message_id,
-                    message.email_sequence_id,
-                    message.lead_id,
-                    message.apollo_message_id,
-                    message.source.value,
-                    message.status,
-                    message.model_dump_json(),
-                ),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    """
+                    INSERT INTO email_messages
+                        (email_message_id, email_sequence_id, lead_id, apollo_message_id, source, status, data)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        message.email_message_id,
+                        message.email_sequence_id,
+                        message.lead_id,
+                        message.apollo_message_id,
+                        message.source.value,
+                        message.status,
+                        message.model_dump_json(),
+                    ),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"EmailMessage already exists: {e}") from e
 
@@ -96,23 +97,23 @@ class SQLiteEmailMessageStore(EmailMessageStore):
         return EmailMessage.model_validate_json(row["data"]) if row else None
 
     async def save(self, message: EmailMessage) -> None:
-        cursor = await self._connection.execute(
-            """
-            UPDATE email_messages
-            SET email_sequence_id = ?, lead_id = ?, apollo_message_id = ?, source = ?, status = ?, data = ?
-            WHERE email_message_id = ?
-            """,
-            (
-                message.email_sequence_id,
-                message.lead_id,
-                message.apollo_message_id,
-                message.source.value,
-                message.status,
-                message.model_dump_json(),
-                message.email_message_id,
-            ),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                """
+                UPDATE email_messages
+                SET email_sequence_id = ?, lead_id = ?, apollo_message_id = ?, source = ?, status = ?, data = ?
+                WHERE email_message_id = ?
+                """,
+                (
+                    message.email_sequence_id,
+                    message.lead_id,
+                    message.apollo_message_id,
+                    message.source.value,
+                    message.status,
+                    message.model_dump_json(),
+                    message.email_message_id,
+                ),
+            )
         if cursor.rowcount == 0:
             raise EmailMessageNotFoundError(message.email_message_id)
 

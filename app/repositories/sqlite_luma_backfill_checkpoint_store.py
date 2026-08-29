@@ -10,6 +10,7 @@ import aiosqlite
 
 from app.models.luma import LumaBackfillCheckpoint
 from app.repositories.luma_backfill_checkpoint_store import DEFAULT_CHECKPOINT_ID, LumaBackfillCheckpointStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS luma_backfill_checkpoints (
@@ -44,14 +45,14 @@ class SQLiteLumaBackfillCheckpointStore(LumaBackfillCheckpointStore):
         return self._conn
 
     async def save(self, checkpoint: LumaBackfillCheckpoint) -> None:
-        await self._connection.execute(
-            """
-            INSERT INTO luma_backfill_checkpoints (checkpoint_id, data) VALUES (?, ?)
-            ON CONFLICT(checkpoint_id) DO UPDATE SET data = excluded.data
-            """,
-            (checkpoint.checkpoint_id, checkpoint.model_dump_json()),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                """
+                INSERT INTO luma_backfill_checkpoints (checkpoint_id, data) VALUES (?, ?)
+                ON CONFLICT(checkpoint_id) DO UPDATE SET data = excluded.data
+                """,
+                (checkpoint.checkpoint_id, checkpoint.model_dump_json()),
+            )
 
     async def get(self, checkpoint_id: str = DEFAULT_CHECKPOINT_ID) -> LumaBackfillCheckpoint | None:
         cursor = await self._connection.execute(

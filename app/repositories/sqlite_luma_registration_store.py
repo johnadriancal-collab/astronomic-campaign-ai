@@ -13,6 +13,7 @@ import aiosqlite
 
 from app.models.luma import LumaRegistration
 from app.repositories.luma_registration_store import LumaRegistrationStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS luma_registrations (
@@ -60,25 +61,25 @@ class SQLiteLumaRegistrationStore(LumaRegistrationStore):
         return self._conn
 
     async def save(self, registration: LumaRegistration) -> None:
-        await self._connection.execute(
-            """
-            INSERT INTO luma_registrations (luma_guest_id, luma_event_id, crm_contact_id, updated_at, data)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(luma_guest_id) DO UPDATE SET
-                luma_event_id = excluded.luma_event_id,
-                crm_contact_id = excluded.crm_contact_id,
-                updated_at = excluded.updated_at,
-                data = excluded.data
-            """,
-            (
-                registration.luma_guest_id,
-                registration.luma_event_id,
-                registration.crm_contact_id,
-                registration.updated_at.isoformat(),
-                registration.model_dump_json(),
-            ),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                """
+                INSERT INTO luma_registrations (luma_guest_id, luma_event_id, crm_contact_id, updated_at, data)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(luma_guest_id) DO UPDATE SET
+                    luma_event_id = excluded.luma_event_id,
+                    crm_contact_id = excluded.crm_contact_id,
+                    updated_at = excluded.updated_at,
+                    data = excluded.data
+                """,
+                (
+                    registration.luma_guest_id,
+                    registration.luma_event_id,
+                    registration.crm_contact_id,
+                    registration.updated_at.isoformat(),
+                    registration.model_dump_json(),
+                ),
+            )
 
     async def get(self, luma_guest_id: str) -> LumaRegistration | None:
         cursor = await self._connection.execute(

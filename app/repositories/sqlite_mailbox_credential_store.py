@@ -9,6 +9,7 @@ import aiosqlite
 
 from app.models.mailbox import MailboxCredential
 from app.repositories.mailbox_credential_store import MailboxCredentialStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS mailbox_credentials (
@@ -44,11 +45,11 @@ class SQLiteMailboxCredentialStore(MailboxCredentialStore):
         return self._conn
 
     async def create(self, credential: MailboxCredential) -> None:
-        await self._connection.execute(
-            "INSERT OR REPLACE INTO mailbox_credentials (mailbox_id, created_at, data) VALUES (?, ?, ?)",
-            (credential.mailbox_id, credential.created_at.isoformat(), credential.model_dump_json()),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "INSERT OR REPLACE INTO mailbox_credentials (mailbox_id, created_at, data) VALUES (?, ?, ?)",
+                (credential.mailbox_id, credential.created_at.isoformat(), credential.model_dump_json()),
+            )
 
     async def get(self, mailbox_id: str) -> MailboxCredential | None:
         cursor = await self._connection.execute(
@@ -59,14 +60,14 @@ class SQLiteMailboxCredentialStore(MailboxCredentialStore):
         return MailboxCredential.model_validate_json(row["data"]) if row else None
 
     async def save(self, credential: MailboxCredential) -> None:
-        await self._connection.execute(
-            "UPDATE mailbox_credentials SET data = ? WHERE mailbox_id = ?",
-            (credential.model_dump_json(), credential.mailbox_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "UPDATE mailbox_credentials SET data = ? WHERE mailbox_id = ?",
+                (credential.model_dump_json(), credential.mailbox_id),
+            )
 
     async def delete(self, mailbox_id: str) -> None:
-        await self._connection.execute(
-            "DELETE FROM mailbox_credentials WHERE mailbox_id = ?", (mailbox_id,)
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "DELETE FROM mailbox_credentials WHERE mailbox_id = ?", (mailbox_id,)
+            )

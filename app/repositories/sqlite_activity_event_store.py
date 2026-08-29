@@ -13,6 +13,7 @@ from loguru import logger
 
 from app.models.activity import ActivityEvent
 from app.repositories.activity_event_store import ActivityEventStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS activity_events (
@@ -55,11 +56,11 @@ class SQLiteActivityEventStore(ActivityEventStore):
 
     async def create(self, event: ActivityEvent) -> None:
         try:
-            await self._connection.execute(
-                "INSERT INTO activity_events (event_id, category, created_at, data) VALUES (?, ?, ?, ?)",
-                (event.event_id, event.category.value, event.created_at.isoformat(), event.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO activity_events (event_id, category, created_at, data) VALUES (?, ?, ?, ?)",
+                    (event.event_id, event.category.value, event.created_at.isoformat(), event.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"ActivityEvent already exists: {e}") from e
 

@@ -6,6 +6,7 @@ import aiosqlite
 
 from app.models.mail import MailCampaign
 from app.repositories.mail_campaign_store import MailCampaignNotFoundError, MailCampaignStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS mail_campaigns (
@@ -42,11 +43,11 @@ class SQLiteMailCampaignStore(MailCampaignStore):
 
     async def create(self, campaign: MailCampaign) -> None:
         try:
-            await self._connection.execute(
-                "INSERT INTO mail_campaigns (mail_campaign_id, created_at, data) VALUES (?, ?, ?)",
-                (campaign.mail_campaign_id, campaign.created_at.isoformat(), campaign.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO mail_campaigns (mail_campaign_id, created_at, data) VALUES (?, ?, ?)",
+                    (campaign.mail_campaign_id, campaign.created_at.isoformat(), campaign.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"MailCampaign already exists: {e}") from e
 
@@ -59,11 +60,11 @@ class SQLiteMailCampaignStore(MailCampaignStore):
         return MailCampaign.model_validate_json(row["data"]) if row else None
 
     async def save(self, campaign: MailCampaign) -> None:
-        cursor = await self._connection.execute(
-            "UPDATE mail_campaigns SET data = ? WHERE mail_campaign_id = ?",
-            (campaign.model_dump_json(), campaign.mail_campaign_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE mail_campaigns SET data = ? WHERE mail_campaign_id = ?",
+                (campaign.model_dump_json(), campaign.mail_campaign_id),
+            )
         if cursor.rowcount == 0:
             raise MailCampaignNotFoundError(campaign.mail_campaign_id)
 

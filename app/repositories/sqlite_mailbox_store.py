@@ -10,6 +10,7 @@ import aiosqlite
 
 from app.models.mailbox import Mailbox
 from app.repositories.mailbox_store import MailboxNotFoundError, MailboxStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS mailboxes (
@@ -46,11 +47,11 @@ class SQLiteMailboxStore(MailboxStore):
 
     async def create(self, mailbox: Mailbox) -> None:
         try:
-            await self._connection.execute(
-                "INSERT INTO mailboxes (mailbox_id, connected_at, data) VALUES (?, ?, ?)",
-                (mailbox.mailbox_id, mailbox.connected_at.isoformat(), mailbox.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO mailboxes (mailbox_id, connected_at, data) VALUES (?, ?, ?)",
+                    (mailbox.mailbox_id, mailbox.connected_at.isoformat(), mailbox.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"Mailbox already exists: {e}") from e
 
@@ -75,11 +76,11 @@ class SQLiteMailboxStore(MailboxStore):
         return None
 
     async def save(self, mailbox: Mailbox) -> None:
-        cursor = await self._connection.execute(
-            "UPDATE mailboxes SET data = ? WHERE mailbox_id = ?",
-            (mailbox.model_dump_json(), mailbox.mailbox_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE mailboxes SET data = ? WHERE mailbox_id = ?",
+                (mailbox.model_dump_json(), mailbox.mailbox_id),
+            )
         if cursor.rowcount == 0:
             raise MailboxNotFoundError(mailbox.mailbox_id)
 

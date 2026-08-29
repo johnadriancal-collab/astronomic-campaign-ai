@@ -19,6 +19,7 @@ import aiosqlite
 
 from app.models.campaign import Campaign
 from app.repositories.campaign_store import CampaignNotFoundError, CampaignStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS campaigns (
@@ -60,14 +61,14 @@ class SQLiteCampaignStore(CampaignStore):
     async def create(self, campaign: Campaign) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
-            await self._connection.execute(
-                """
-                INSERT INTO campaigns (campaign_id, workspace_id, status, created_at, updated_at, data)
-                VALUES (?, NULL, ?, ?, ?, ?)
-                """,
-                (campaign.campaign_id, campaign.status.value, now, now, campaign.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    """
+                    INSERT INTO campaigns (campaign_id, workspace_id, status, created_at, updated_at, data)
+                    VALUES (?, NULL, ?, ?, ?, ?)
+                    """,
+                    (campaign.campaign_id, campaign.status.value, now, now, campaign.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"Campaign already exists: {campaign.campaign_id}") from e
 
@@ -83,11 +84,11 @@ class SQLiteCampaignStore(CampaignStore):
 
     async def save(self, campaign: Campaign) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        cursor = await self._connection.execute(
-            "UPDATE campaigns SET status = ?, updated_at = ?, data = ? WHERE campaign_id = ?",
-            (campaign.status.value, now, campaign.model_dump_json(), campaign.campaign_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE campaigns SET status = ?, updated_at = ?, data = ? WHERE campaign_id = ?",
+                (campaign.status.value, now, campaign.model_dump_json(), campaign.campaign_id),
+            )
         if cursor.rowcount == 0:
             raise CampaignNotFoundError(campaign.campaign_id)
 

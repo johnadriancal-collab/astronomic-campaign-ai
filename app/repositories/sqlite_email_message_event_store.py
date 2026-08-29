@@ -11,6 +11,7 @@ import aiosqlite
 
 from app.models.email_message import EmailMessageEvent, EmailMessageSource
 from app.repositories.email_message_event_store import EmailMessageEventStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS email_message_events (
@@ -59,27 +60,27 @@ class SQLiteEmailMessageEventStore(EmailMessageEventStore):
 
     async def create(self, event: EmailMessageEvent) -> None:
         try:
-            await self._connection.execute(
-                """
-                INSERT INTO email_message_events
-                    (email_message_event_id, email_message_id, apollo_event_id, event_type, occurred_at,
-                     apollo_contact_id, readable_user_agent, region, country, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    event.email_message_event_id,
-                    event.email_message_id,
-                    event.apollo_event_id,
-                    event.event_type,
-                    event.occurred_at.isoformat(),
-                    event.apollo_contact_id,
-                    event.readable_user_agent,
-                    event.region,
-                    event.country,
-                    event.source.value,
-                ),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    """
+                    INSERT INTO email_message_events
+                        (email_message_event_id, email_message_id, apollo_event_id, event_type, occurred_at,
+                         apollo_contact_id, readable_user_agent, region, country, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.email_message_event_id,
+                        event.email_message_id,
+                        event.apollo_event_id,
+                        event.event_type,
+                        event.occurred_at.isoformat(),
+                        event.apollo_contact_id,
+                        event.readable_user_agent,
+                        event.region,
+                        event.country,
+                        event.source.value,
+                    ),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"EmailMessageEvent already exists: {e}") from e
 

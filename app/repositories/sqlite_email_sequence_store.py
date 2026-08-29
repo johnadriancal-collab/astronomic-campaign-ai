@@ -14,6 +14,7 @@ import aiosqlite
 
 from app.models.email_sequence import EmailSequence
 from app.repositories.email_sequence_store import EmailSequenceNotFoundError, EmailSequenceStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS email_sequences (
@@ -56,23 +57,23 @@ class SQLiteEmailSequenceStore(EmailSequenceStore):
     async def create(self, sequence: EmailSequence) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
-            await self._connection.execute(
-                """
-                INSERT INTO email_sequences
-                    (email_sequence_id, workspace_id, campaign_id, apollo_sequence_id, status, created_at, updated_at, data)
-                VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sequence.email_sequence_id,
-                    sequence.campaign_id,
-                    sequence.apollo_sequence_id,
-                    sequence.status.value,
-                    now,
-                    now,
-                    sequence.model_dump_json(),
-                ),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    """
+                    INSERT INTO email_sequences
+                        (email_sequence_id, workspace_id, campaign_id, apollo_sequence_id, status, created_at, updated_at, data)
+                    VALUES (?, NULL, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sequence.email_sequence_id,
+                        sequence.campaign_id,
+                        sequence.apollo_sequence_id,
+                        sequence.status.value,
+                        now,
+                        now,
+                        sequence.model_dump_json(),
+                    ),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(
                 f"EmailSequence already exists (id or campaign_id collision): {e}"
@@ -116,10 +117,10 @@ class SQLiteEmailSequenceStore(EmailSequenceStore):
 
     async def save(self, sequence: EmailSequence) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        cursor = await self._connection.execute(
-            "UPDATE email_sequences SET status = ?, updated_at = ?, data = ? WHERE email_sequence_id = ?",
-            (sequence.status.value, now, sequence.model_dump_json(), sequence.email_sequence_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE email_sequences SET status = ?, updated_at = ?, data = ? WHERE email_sequence_id = ?",
+                (sequence.status.value, now, sequence.model_dump_json(), sequence.email_sequence_id),
+            )
         if cursor.rowcount == 0:
             raise EmailSequenceNotFoundError(sequence.email_sequence_id)

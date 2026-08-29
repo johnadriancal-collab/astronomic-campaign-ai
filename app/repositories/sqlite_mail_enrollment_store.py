@@ -12,6 +12,7 @@ import aiosqlite
 
 from app.models.mail import MailEnrollment
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS mail_enrollments (
@@ -55,17 +56,17 @@ class SQLiteMailEnrollmentStore(MailEnrollmentStore):
         return self._conn
 
     async def create(self, enrollment: MailEnrollment) -> bool:
-        cursor = await self._connection.execute(
-            "INSERT OR IGNORE INTO mail_enrollments (enrollment_id, mail_campaign_id, crm_contact_id, data) "
-            "VALUES (?, ?, ?, ?)",
-            (
-                enrollment.enrollment_id,
-                enrollment.mail_campaign_id,
-                enrollment.crm_contact_id,
-                enrollment.model_dump_json(),
-            ),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "INSERT OR IGNORE INTO mail_enrollments (enrollment_id, mail_campaign_id, crm_contact_id, data) "
+                "VALUES (?, ?, ?, ?)",
+                (
+                    enrollment.enrollment_id,
+                    enrollment.mail_campaign_id,
+                    enrollment.crm_contact_id,
+                    enrollment.model_dump_json(),
+                ),
+            )
         return cursor.rowcount > 0
 
     async def list_for_campaign(self, mail_campaign_id: str) -> list[MailEnrollment]:
@@ -77,10 +78,10 @@ class SQLiteMailEnrollmentStore(MailEnrollmentStore):
         return [MailEnrollment.model_validate_json(row["data"]) for row in rows]
 
     async def delete_for_campaign(self, mail_campaign_id: str) -> None:
-        await self._connection.execute(
-            "DELETE FROM mail_enrollments WHERE mail_campaign_id = ?", (mail_campaign_id,)
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "DELETE FROM mail_enrollments WHERE mail_campaign_id = ?", (mail_campaign_id,)
+            )
 
     async def count_for_campaign(self, mail_campaign_id: str) -> int:
         cursor = await self._connection.execute(

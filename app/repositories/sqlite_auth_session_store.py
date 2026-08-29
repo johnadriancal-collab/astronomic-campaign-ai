@@ -11,6 +11,7 @@ import aiosqlite
 
 from app.models.auth import AuthSession
 from app.repositories.auth_session_store import AuthSessionStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -46,11 +47,11 @@ class SQLiteAuthSessionStore(AuthSessionStore):
         return self._conn
 
     async def create(self, session: AuthSession) -> None:
-        await self._connection.execute(
-            "INSERT OR REPLACE INTO auth_sessions (session_token_hash, expires_at, data) VALUES (?, ?, ?)",
-            (session.session_token_hash, session.expires_at.isoformat(), session.model_dump_json()),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "INSERT OR REPLACE INTO auth_sessions (session_token_hash, expires_at, data) VALUES (?, ?, ?)",
+                (session.session_token_hash, session.expires_at.isoformat(), session.model_dump_json()),
+            )
 
     async def get(self, session_token_hash: str) -> AuthSession | None:
         cursor = await self._connection.execute(
@@ -61,11 +62,11 @@ class SQLiteAuthSessionStore(AuthSessionStore):
         return AuthSession.model_validate_json(row["data"]) if row else None
 
     async def delete(self, session_token_hash: str) -> None:
-        await self._connection.execute(
-            "DELETE FROM auth_sessions WHERE session_token_hash = ?", (session_token_hash,)
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "DELETE FROM auth_sessions WHERE session_token_hash = ?", (session_token_hash,)
+            )
 
     async def delete_expired(self, now: datetime) -> None:
-        await self._connection.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now.isoformat(),))
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute("DELETE FROM auth_sessions WHERE expires_at <= ?", (now.isoformat(),))

@@ -18,6 +18,7 @@ import aiosqlite
 
 from app.models.lead import CampaignLead, CampaignLeadStatus
 from app.repositories.campaign_lead_store import CampaignLeadStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS campaign_leads (
@@ -75,22 +76,22 @@ class SQLiteCampaignLeadStore(CampaignLeadStore):
         return self._conn
 
     async def add(self, campaign_lead: CampaignLead) -> None:
-        await self._connection.execute(
-            """
-            INSERT OR IGNORE INTO campaign_leads
-                (campaign_id, lead_id, status, added_at, claude_score, claude_reason)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                campaign_lead.campaign_id,
-                campaign_lead.lead_id,
-                campaign_lead.status.value,
-                campaign_lead.added_at.isoformat(),
-                campaign_lead.claude_score,
-                campaign_lead.claude_reason,
-            ),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                """
+                INSERT OR IGNORE INTO campaign_leads
+                    (campaign_id, lead_id, status, added_at, claude_score, claude_reason)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    campaign_lead.campaign_id,
+                    campaign_lead.lead_id,
+                    campaign_lead.status.value,
+                    campaign_lead.added_at.isoformat(),
+                    campaign_lead.claude_score,
+                    campaign_lead.claude_reason,
+                ),
+            )
 
     async def list_for_campaign(self, campaign_id: str) -> list[CampaignLead]:
         cursor = await self._connection.execute(

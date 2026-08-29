@@ -12,6 +12,7 @@ import aiosqlite
 
 from app.models.luma import LumaEvent
 from app.repositories.luma_event_store import LumaEventStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS luma_events (
@@ -53,18 +54,18 @@ class SQLiteLumaEventStore(LumaEventStore):
         return self._conn
 
     async def save(self, event: LumaEvent) -> None:
-        await self._connection.execute(
-            """
-            INSERT INTO luma_events (luma_event_id, calendar_id, updated_at, data)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(luma_event_id) DO UPDATE SET
-                calendar_id = excluded.calendar_id,
-                updated_at = excluded.updated_at,
-                data = excluded.data
-            """,
-            (event.luma_event_id, event.calendar_id, event.updated_at.isoformat(), event.model_dump_json()),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                """
+                INSERT INTO luma_events (luma_event_id, calendar_id, updated_at, data)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(luma_event_id) DO UPDATE SET
+                    calendar_id = excluded.calendar_id,
+                    updated_at = excluded.updated_at,
+                    data = excluded.data
+                """,
+                (event.luma_event_id, event.calendar_id, event.updated_at.isoformat(), event.model_dump_json()),
+            )
 
     async def get(self, luma_event_id: str) -> LumaEvent | None:
         cursor = await self._connection.execute(

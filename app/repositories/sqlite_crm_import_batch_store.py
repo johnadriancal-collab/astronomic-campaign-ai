@@ -7,6 +7,7 @@ import aiosqlite
 
 from app.models.crm import CrmImportBatch
 from app.repositories.crm_import_batch_store import CrmImportBatchNotFoundError, CrmImportBatchStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS crm_import_batches (
@@ -46,12 +47,12 @@ class SQLiteCrmImportBatchStore(CrmImportBatchStore):
     async def create(self, batch: CrmImportBatch) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
-            await self._connection.execute(
-                "INSERT INTO crm_import_batches (import_batch_id, status, created_at, updated_at, data) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (batch.import_batch_id, batch.status.value, now, now, batch.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO crm_import_batches (import_batch_id, status, created_at, updated_at, data) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (batch.import_batch_id, batch.status.value, now, now, batch.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(f"CrmImportBatch already exists: {batch.import_batch_id}") from e
 
@@ -65,10 +66,10 @@ class SQLiteCrmImportBatchStore(CrmImportBatchStore):
 
     async def save(self, batch: CrmImportBatch) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        cursor = await self._connection.execute(
-            "UPDATE crm_import_batches SET status = ?, updated_at = ?, data = ? WHERE import_batch_id = ?",
-            (batch.status.value, now, batch.model_dump_json(), batch.import_batch_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE crm_import_batches SET status = ?, updated_at = ?, data = ? WHERE import_batch_id = ?",
+                (batch.status.value, now, batch.model_dump_json(), batch.import_batch_id),
+            )
         if cursor.rowcount == 0:
             raise CrmImportBatchNotFoundError(batch.import_batch_id)

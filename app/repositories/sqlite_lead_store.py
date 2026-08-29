@@ -15,6 +15,7 @@ import aiosqlite
 
 from app.models.lead import Lead
 from app.repositories.lead_store import LeadNotFoundError, LeadStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS leads (
@@ -55,14 +56,14 @@ class SQLiteLeadStore(LeadStore):
     async def create(self, lead: Lead) -> None:
         now = datetime.now(timezone.utc).isoformat()
         try:
-            await self._connection.execute(
-                """
-                INSERT INTO leads (lead_id, workspace_id, apollo_contact_id, created_at, updated_at, data)
-                VALUES (?, NULL, ?, ?, ?, ?)
-                """,
-                (lead.lead_id, lead.apollo_contact_id, now, now, lead.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    """
+                    INSERT INTO leads (lead_id, workspace_id, apollo_contact_id, created_at, updated_at, data)
+                    VALUES (?, NULL, ?, ?, ?, ?)
+                    """,
+                    (lead.lead_id, lead.apollo_contact_id, now, now, lead.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             raise ValueError(
                 f"Lead already exists (lead_id or apollo_contact_id collision): {e}"
@@ -90,11 +91,11 @@ class SQLiteLeadStore(LeadStore):
 
     async def save(self, lead: Lead) -> None:
         now = datetime.now(timezone.utc).isoformat()
-        cursor = await self._connection.execute(
-            "UPDATE leads SET updated_at = ?, data = ? WHERE lead_id = ?",
-            (now, lead.model_dump_json(), lead.lead_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE leads SET updated_at = ?, data = ? WHERE lead_id = ?",
+                (now, lead.model_dump_json(), lead.lead_id),
+            )
         if cursor.rowcount == 0:
             raise LeadNotFoundError(lead.lead_id)
 

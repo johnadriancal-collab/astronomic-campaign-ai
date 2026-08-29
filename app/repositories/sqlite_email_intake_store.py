@@ -14,6 +14,7 @@ from loguru import logger
 
 from app.models.email_intake import EmailIntakeItem
 from app.repositories.email_intake_store import EmailIntakeDuplicateError, EmailIntakeStore
+from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS email_intake_items (
@@ -59,12 +60,12 @@ class SQLiteEmailIntakeStore(EmailIntakeStore):
 
     async def create(self, item: EmailIntakeItem) -> None:
         try:
-            await self._connection.execute(
-                "INSERT INTO email_intake_items (intake_id, gmail_message_id, status, created_at, data) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (item.intake_id, item.gmail_message_id, item.status.value, item.created_at.isoformat(), item.model_dump_json()),
-            )
-            await self._connection.commit()
+            async with sqlite_write(self._connection):
+                await self._connection.execute(
+                    "INSERT INTO email_intake_items (intake_id, gmail_message_id, status, created_at, data) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (item.intake_id, item.gmail_message_id, item.status.value, item.created_at.isoformat(), item.model_dump_json()),
+                )
         except aiosqlite.IntegrityError as e:
             if "gmail_message_id" in str(e):
                 raise EmailIntakeDuplicateError(
@@ -73,11 +74,11 @@ class SQLiteEmailIntakeStore(EmailIntakeStore):
             raise ValueError(f"EmailIntakeItem already exists: {e}") from e
 
     async def save(self, item: EmailIntakeItem) -> None:
-        await self._connection.execute(
-            "UPDATE email_intake_items SET status = ?, data = ? WHERE intake_id = ?",
-            (item.status.value, item.model_dump_json(), item.intake_id),
-        )
-        await self._connection.commit()
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "UPDATE email_intake_items SET status = ?, data = ? WHERE intake_id = ?",
+                (item.status.value, item.model_dump_json(), item.intake_id),
+            )
 
     async def get(self, intake_id: str) -> EmailIntakeItem | None:
         cursor = await self._connection.execute(
