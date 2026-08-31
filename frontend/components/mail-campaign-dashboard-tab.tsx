@@ -66,7 +66,7 @@ export function MailCampaignDashboardTab({
           <CardTitle className="text-sm">Audience &amp; Sequence</CardTitle>
         </CardHeader>
         <CardContent>
-          <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
+          <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3 lg:grid-cols-5">
             <Stat label="Total contacts" value={review?.total_contacts ?? 0} />
             <Stat label="Missing email" value={review?.contacts_missing_email ?? 0} />
             <Stat label="Eligible recipients" value={review?.contacts_eligible ?? 0} emphasize />
@@ -86,7 +86,7 @@ export function MailCampaignDashboardTab({
         </CardHeader>
         <CardContent>
           {hasEnrollments ? (
-            <dl className="grid grid-cols-2 gap-4 text-sm sm:grid-cols-3">
+            <dl className="grid max-w-xs grid-cols-2 gap-4 text-sm">
               <Stat label="Pending" value={pendingCount} />
               <Stat label="Suppressed" value={suppressedCount} />
             </dl>

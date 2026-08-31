@@ -6,20 +6,28 @@ CrmService() (in-memory) provides the audience (CrmContactList/CrmContact)
 this service reads from.
 """
 
+from datetime import datetime, timezone
+
 import pytest
 
 from app.models.mail import MailCampaignStatus, MailEnrollmentStatus, MailScheduleValidationError
+from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_sequence_step_store import (
     DuplicateMailSequenceStepNumberError,
     MemoryMailSequenceStepStore,
 )
+from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import (
     InvalidMailTemplateVariableError,
+    MailboxChannelNotFoundError,
+    MailboxChannelNotUsableError,
+    MailCampaignChannelsFrozenError,
     MailCampaignInvalidTransitionError,
     MailCampaignNotEditableError,
     MailCampaignNotFound,
@@ -41,19 +49,48 @@ def crm():
 
 
 @pytest.fixture
-def service(crm, activity_log):
+def mailbox_store():
+    return MemoryMailboxStore()
+
+
+@pytest.fixture
+def channel_store():
+    return MemoryMailCampaignMailboxStore()
+
+
+@pytest.fixture
+def service(crm, activity_log, mailbox_store, channel_store):
     return MailCampaignService(
         campaign_store=MemoryMailCampaignStore(),
         step_store=MemoryMailSequenceStepStore(),
         enrollment_store=MemoryMailEnrollmentStore(),
         crm_service=crm,
         activity_log=activity_log,
+        mailbox_store=mailbox_store,
+        channel_store=channel_store,
+    )
+
+
+def _make_mailbox(mailbox_id="mbx-1", status=MailboxStatus.CONNECTED, email="victoria@example.com"):
+    now = datetime.now(timezone.utc)
+    return Mailbox(
+        mailbox_id=mailbox_id,
+        provider=MailboxProvider.GOOGLE,
+        email=email,
+        display_name="Victoria Bennett",
+        status=status,
+        google_user_id="google-user-1",
+        granted_scopes=["openid", "email", "profile"],
+        connected_at=now,
+        updated_at=now,
+        disconnected_at=None if status != MailboxStatus.DISCONNECTED else now,
     )
 
 
 async def _make_valid_schedule_campaign(service, crm, name="Q1 Outreach", n_contacts=3):
-    """Helper: a DRAFT campaign with a real audience list, one step, and a
-    valid complete schedule -- everything mark_ready() requires."""
+    """Helper: a DRAFT campaign with a real audience list, one step, a valid
+    complete schedule, and one connected mailbox selected as its Channel --
+    everything mark_ready() requires."""
     contact_list = await crm.create_contact_list("Test Audience")
     contact_ids = []
     for i in range(n_contacts):
@@ -73,6 +110,11 @@ async def _make_valid_schedule_campaign(service, crm, name="Q1 Outreach", n_cont
         },
     )
     await service.add_step(campaign.mail_campaign_id, "Hello {{first_name}}", "Body text")
+
+    mailbox_id = f"mbx-{campaign.mail_campaign_id}"
+    await service.mailbox_store.create(_make_mailbox(mailbox_id=mailbox_id, email=f"{mailbox_id}@example.com"))
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, [mailbox_id])
+
     return campaign, contact_list
 
 
@@ -236,6 +278,8 @@ async def test_all_hours_satisfies_mark_ready_schedule_validation(service, crm):
         {"source_list_id": contact_list.list_id, "sending_days": [0, 1, 2], "all_hours": True, "timezone": "UTC"},
     )
     await service.add_step(campaign.mail_campaign_id, "Hi", "Body")
+    await service.mailbox_store.create(_make_mailbox(mailbox_id="mbx-all-hours-test"))
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-all-hours-test"])
     ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
     assert ready.status == MailCampaignStatus.READY
 
@@ -482,6 +526,8 @@ async def test_mark_ready_skips_contacts_with_no_email(service, crm):
         },
     )
     await service.add_step(campaign.mail_campaign_id, "Subject", "Body")
+    await service.mailbox_store.create(_make_mailbox(mailbox_id="mbx-no-email-test"))
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-no-email-test"])
     ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
 
     enrollments = await service.list_enrollments(ready.mail_campaign_id)
@@ -621,8 +667,9 @@ async def test_review_readiness_warnings_lists_every_real_problem_on_an_empty_dr
 
     assert "No audience (CRM List) has been selected." in review.readiness_warnings
     assert "At least one sequence step is required." in review.readiness_warnings
+    assert "At least one connected sending inbox must be selected." in review.readiness_warnings
     assert any("sending day" in w for w in review.readiness_warnings)
-    assert len(review.readiness_warnings) == 3
+    assert len(review.readiness_warnings) == 4
 
 
 async def test_review_readiness_warnings_is_empty_when_fully_configured(service, crm):
@@ -682,3 +729,178 @@ async def test_opening_review_never_mutates_anything(service, crm):
     for _ in range(3):
         await service.get_review(ready.mail_campaign_id, suppressed_emails=set())
     assert await service.list_enrollments(ready.mail_campaign_id) == enrollments_after_ready
+
+
+# --- Channels (selected sending mailboxes) --------------------------------
+
+
+async def test_channels_start_empty(service):
+    campaign = await service.create_campaign("Channels")
+    assert await service.list_channel_mailboxes(campaign.mail_campaign_id) == []
+
+
+async def test_set_channel_mailboxes_selects_connected_mailboxes(service):
+    campaign = await service.create_campaign("Channels")
+    await service.mailbox_store.create(_make_mailbox("mbx-a", email="a@example.com"))
+    await service.mailbox_store.create(_make_mailbox("mbx-b", email="b@example.com"))
+
+    resolved = await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-a", "mbx-b"])
+    assert {m.mailbox_id for m in resolved} == {"mbx-a", "mbx-b"}
+
+    channels = await service.list_channel_mailboxes(campaign.mail_campaign_id)
+    assert {m.mailbox_id for m in channels} == {"mbx-a", "mbx-b"}
+
+
+async def test_set_channel_mailboxes_is_a_full_replace(service):
+    campaign = await service.create_campaign("Channels")
+    await service.mailbox_store.create(_make_mailbox("mbx-a"))
+    await service.mailbox_store.create(_make_mailbox("mbx-b", email="b@example.com"))
+
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-a"])
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-b"])
+
+    channels = await service.list_channel_mailboxes(campaign.mail_campaign_id)
+    assert [m.mailbox_id for m in channels] == ["mbx-b"]
+
+
+async def test_set_channel_mailboxes_deduplicates_naturally(service):
+    campaign = await service.create_campaign("Channels")
+    await service.mailbox_store.create(_make_mailbox("mbx-a"))
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-a", "mbx-a", "mbx-a"])
+    assert len(await service.list_channel_mailboxes(campaign.mail_campaign_id)) == 1
+
+
+async def test_set_channel_mailboxes_rejects_unknown_mailbox_id(service):
+    campaign = await service.create_campaign("Channels")
+    with pytest.raises(MailboxChannelNotFoundError):
+        await service.set_channel_mailboxes(campaign.mail_campaign_id, ["does-not-exist"])
+    # Rejected atomically -- nothing partial was saved.
+    assert await service.list_channel_mailboxes(campaign.mail_campaign_id) == []
+
+
+async def test_set_channel_mailboxes_rejects_newly_selecting_a_disconnected_mailbox(service):
+    campaign = await service.create_campaign("Channels")
+    await service.mailbox_store.create(_make_mailbox("mbx-gone", status=MailboxStatus.DISCONNECTED))
+    with pytest.raises(MailboxChannelNotUsableError):
+        await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-gone"])
+
+
+async def test_set_channel_mailboxes_rejects_newly_selecting_a_needs_reauth_mailbox(service):
+    campaign = await service.create_campaign("Channels")
+    await service.mailbox_store.create(_make_mailbox("mbx-stale", status=MailboxStatus.NEEDS_REAUTH))
+    with pytest.raises(MailboxChannelNotUsableError):
+        await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-stale"])
+
+
+async def test_already_selected_mailbox_may_remain_after_becoming_disconnected(service):
+    """The core 'don't silently remove historical selections' guarantee."""
+    campaign = await service.create_campaign("Channels")
+    mailbox = _make_mailbox("mbx-a")
+    await service.mailbox_store.create(mailbox)
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-a"])
+
+    disconnected = mailbox.model_copy(update={"status": MailboxStatus.DISCONNECTED})
+    await service.mailbox_store.save(disconnected)
+
+    # Re-saving the SAME already-selected id must succeed even though it's
+    # now disconnected -- only a genuinely NEW selection is blocked.
+    resolved = await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-a"])
+    assert resolved[0].status == MailboxStatus.DISCONNECTED
+
+    channels = await service.list_channel_mailboxes(campaign.mail_campaign_id)
+    assert len(channels) == 1
+    assert channels[0].status == MailboxStatus.DISCONNECTED
+
+
+async def test_channels_editable_on_draft_campaign(service):
+    campaign = await service.create_campaign("Draft Channels")
+    await service.mailbox_store.create(_make_mailbox("mbx-draft"))
+    resolved = await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-draft"])
+    assert resolved[0].mailbox_id == "mbx-draft"
+
+
+async def test_channels_editable_on_ready_campaign(service, crm):
+    """Mailbox assignment is orthogonal to the audience/sequence/schedule
+    lock -- unlike update_campaign()/add_step(), set_channel_mailboxes() is
+    never blocked by MailCampaignNotEditableError on a READY campaign. This
+    is deliberate: it's how a disconnected sender gets replaced without an
+    unlock/re-snapshot round trip."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.mailbox_store.create(_make_mailbox("mbx-post-ready", email="post-ready@example.com"))
+    resolved = await service.set_channel_mailboxes(ready.mail_campaign_id, ["mbx-post-ready"])
+    assert resolved[0].mailbox_id == "mbx-post-ready"
+
+
+async def test_channels_frozen_on_archived_campaign(service, crm):
+    """ARCHIVED is terminal (no un-archive) -- its Channels selection is
+    permanently frozen at whatever it was when archived."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    archived = await service.archive_campaign(campaign.mail_campaign_id)
+    await service.mailbox_store.create(_make_mailbox("mbx-too-late", email="too-late@example.com"))
+    with pytest.raises(MailCampaignChannelsFrozenError):
+        await service.set_channel_mailboxes(archived.mail_campaign_id, ["mbx-too-late"])
+
+
+async def test_channels_still_readable_on_archived_campaign(service, crm):
+    """GET (list_channel_mailboxes) is never affected by the archive freeze
+    -- an archived campaign's historical selection must remain visible."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    before_archive = await service.list_channel_mailboxes(campaign.mail_campaign_id)
+    archived = await service.archive_campaign(campaign.mail_campaign_id)
+    after_archive = await service.list_channel_mailboxes(archived.mail_campaign_id)
+    assert [m.mailbox_id for m in after_archive] == [m.mailbox_id for m in before_archive]
+    assert len(after_archive) == 1
+
+
+# --- Readiness: connected sending inbox requirement -----------------------
+
+
+async def test_readiness_requires_a_connected_mailbox(service, crm):
+    contact_list = await crm.create_contact_list("Audience")
+    c1 = await crm.create_contact({"email": "person@example.com"})
+    await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+
+    campaign = await service.create_campaign("No Mailbox")
+    campaign = await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"source_list_id": contact_list.list_id, "sending_days": [0], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    await service.add_step(campaign.mail_campaign_id, "Subject", "Body")
+
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+    assert "At least one connected sending inbox must be selected." in review.readiness_warnings
+
+    with pytest.raises(MailCampaignNotReadyError) as exc_info:
+        await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    assert any("connected sending inbox" in r for r in exc_info.value.reasons)
+
+
+async def test_readiness_fails_when_every_selected_mailbox_is_unusable(service, crm):
+    contact_list = await crm.create_contact_list("Audience")
+    c1 = await crm.create_contact({"email": "person@example.com"})
+    await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+
+    campaign = await service.create_campaign("Stale Mailbox")
+    campaign = await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"source_list_id": contact_list.list_id, "sending_days": [0], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    await service.add_step(campaign.mail_campaign_id, "Subject", "Body")
+    mailbox = _make_mailbox("mbx-a")
+    await service.mailbox_store.create(mailbox)
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-a"])
+    await service.mailbox_store.save(mailbox.model_copy(update={"status": MailboxStatus.NEEDS_REAUTH}))
+
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+    assert "At least one connected sending inbox must be selected." in review.readiness_warnings
+    with pytest.raises(MailCampaignNotReadyError):
+        await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+
+async def test_readiness_succeeds_with_one_connected_selected_mailbox(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+    assert review.readiness_warnings == []
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    assert ready.status == MailCampaignStatus.READY

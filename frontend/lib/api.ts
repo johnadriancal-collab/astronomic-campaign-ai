@@ -1345,6 +1345,30 @@ export function disconnectMailbox(mailboxId: string): Promise<Mailbox> {
   return post<Mailbox>(`/mailboxes/${mailboxId}/disconnect`, {});
 }
 
+// --- Mail Campaign Channels (selected sending mailboxes) -------------------
+//
+// Which already-connected mailboxes (see listMailboxes() above) may send a
+// given campaign. This is the ONLY place a campaign<->mailbox relationship
+// is stored -- see app/services/mail_campaign_service.py's
+// set_channel_mailboxes() docstring for exactly what is/isn't allowed (a
+// disconnected/needs_reauth mailbox may remain selected if it already was,
+// but may not be newly added).
+
+/** Currently-selected mailbox ids only -- pair with listMailboxes() for full details. */
+export function getMailCampaignChannels(mailCampaignId: string): Promise<string[]> {
+  return request<string[]>(`/mail/campaigns/${mailCampaignId}/channels`);
+}
+
+/** Atomically replaces the campaign's ENTIRE selected mailbox set and returns
+ * the resolved full Mailbox objects for the new selection. */
+export function setMailCampaignChannels(mailCampaignId: string, mailboxIds: string[]): Promise<Mailbox[]> {
+  return request<Mailbox[]>(`/mail/campaigns/${mailCampaignId}/channels`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mailbox_ids: mailboxIds }),
+  });
+}
+
 // --- Internal Hub login ------------------------------------------------
 //
 // A single shared email+password account guards the whole application --

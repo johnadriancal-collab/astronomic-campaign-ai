@@ -22,10 +22,12 @@ from app.repositories.crm_contact_list_member_store import MemoryCrmContactListM
 from app.repositories.crm_contact_list_store import MemoryCrmContactListStore
 from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
+from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
 from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
+from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_campaign_tools import ASTRO_CAMPAIGN_TOOL_DEFINITIONS, CAMPAIGN_LIST_LIMIT, AstroCampaignTools
 from app.services.campaign_service import CampaignService
@@ -85,6 +87,8 @@ async def tools():
         enrollment_store=enrollment_store,
         crm_service=crm_service,
         activity_log=activity_log,
+        mailbox_store=MemoryMailboxStore(),
+        channel_store=MemoryMailCampaignMailboxStore(),
     )
     mail_suppression_service = MailSuppressionService(store=suppression_store, activity_log=activity_log)
 

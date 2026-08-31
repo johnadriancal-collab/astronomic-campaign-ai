@@ -3,19 +3,28 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 // Regression coverage for the native Mail campaign detail page's dashboard
-// redesign (tabs: Dashboard | Leads | Steps | Schedule | Settings). These
-// are source-level assertions (no DOM render harness exists in this
-// project -- see package.json's test script), same pattern as
-// astro-campaign-isolation.test.ts and campaign-manager-apollo-disabled.test.ts.
+// redesign (tabs: Dashboard | Leads | Steps | Channels | Schedule |
+// Settings). These are source-level assertions (no DOM render harness
+// exists in this project -- see package.json's test script), same pattern
+// as astro-campaign-isolation.test.ts and campaign-manager-apollo-disabled.test.ts.
 
 const PAGE_SOURCE = readFileSync(new URL("../app/manager/campaigns/mail/[id]/page.tsx", import.meta.url), "utf-8");
 const DASHBOARD_TAB_SOURCE = readFileSync(new URL("../components/mail-campaign-dashboard-tab.tsx", import.meta.url), "utf-8");
 const LEADS_TAB_SOURCE = readFileSync(new URL("../components/mail-campaign-leads-tab.tsx", import.meta.url), "utf-8");
+const CHANNELS_TAB_SOURCE = readFileSync(new URL("../components/mail-campaign-channels-tab.tsx", import.meta.url), "utf-8");
 
-test("the campaign detail page renders all five required tabs", () => {
-  for (const tab of ["Dashboard", "Leads", "Steps", "Schedule", "Settings"]) {
+test("the campaign detail page renders all six required tabs", () => {
+  for (const tab of ["Dashboard", "Leads", "Steps", "Channels", "Schedule", "Settings"]) {
     assert.match(PAGE_SOURCE, new RegExp(`>${tab}<`));
   }
+});
+
+test("the Channels tab sits between Steps and Schedule", () => {
+  const stepsIndex = PAGE_SOURCE.indexOf('value="steps">Steps<');
+  const channelsIndex = PAGE_SOURCE.indexOf('value="channels">Channels<');
+  const scheduleIndex = PAGE_SOURCE.indexOf('value="schedule">Schedule<');
+  assert.ok(stepsIndex !== -1 && channelsIndex !== -1 && scheduleIndex !== -1);
+  assert.ok(stepsIndex < channelsIndex && channelsIndex < scheduleIndex);
 });
 
 test("the campaign detail page preserves every native handler (nothing dropped in the split)", () => {
@@ -95,7 +104,7 @@ test("the Leads tab never invents a send/open/reply enrollment state", () => {
 });
 
 test("Apollo remains completely absent from the redesigned campaign detail page and its tabs", () => {
-  for (const source of [PAGE_SOURCE, DASHBOARD_TAB_SOURCE, LEADS_TAB_SOURCE]) {
+  for (const source of [PAGE_SOURCE, DASHBOARD_TAB_SOURCE, LEADS_TAB_SOURCE, CHANNELS_TAB_SOURCE]) {
     assert.doesNotMatch(source, /Apollo/);
     assert.doesNotMatch(source, /\/sync\/campaigns/);
     assert.doesNotMatch(source, /campaign-builder/);

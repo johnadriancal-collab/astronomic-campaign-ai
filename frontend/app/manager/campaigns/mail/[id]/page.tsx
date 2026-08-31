@@ -10,23 +10,30 @@ import { MailCampaignHeader } from "@/components/mail-campaign-header";
 import { MailCampaignDashboardTab } from "@/components/mail-campaign-dashboard-tab";
 import { MailCampaignLeadsTab } from "@/components/mail-campaign-leads-tab";
 import { MailCampaignStepsTab } from "@/components/mail-campaign-steps-tab";
+import { MailCampaignChannelsTab } from "@/components/mail-campaign-channels-tab";
 import { MailCampaignScheduleTab } from "@/components/mail-campaign-schedule-tab";
 import { MailCampaignSettingsTab } from "@/components/mail-campaign-settings-tab";
+import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
+import { cn } from "@/lib/utils";
 import {
   addMailSequenceStep,
   archiveMailCampaign,
   ApiError,
   deleteMailSequenceStep,
   getMailCampaign,
+  getMailCampaignChannels,
   getMailCampaignReview,
   listCrmLists,
+  listMailboxes,
   listMailEnrollments,
   listMailSequenceSteps,
   markMailCampaignReady,
   reorderMailSequenceSteps,
+  setMailCampaignChannels,
   unlockMailCampaign,
   updateMailCampaign,
   type CrmContactListSummary,
+  type Mailbox,
   type MailCampaign,
   type MailCampaignReview,
   type MailCampaignSharing,
@@ -68,22 +75,31 @@ export default function MailCampaignDetailPage() {
   const [addingStep, setAddingStep] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
 
+  const [mailboxes, setMailboxes] = useState<Mailbox[] | null>(null);
+  const [selectedMailboxIds, setSelectedMailboxIds] = useState<string[]>([]);
+  const [savingChannels, setSavingChannels] = useState(false);
+  const [channelsError, setChannelsError] = useState<string | null>(null);
+
   const editable = campaign?.status === "draft";
 
   async function load() {
     try {
-      const [c, s, r, e, l] = await Promise.all([
+      const [c, s, r, e, l, mb, ch] = await Promise.all([
         getMailCampaign(campaignId),
         listMailSequenceSteps(campaignId),
         getMailCampaignReview(campaignId),
         listMailEnrollments(campaignId),
         listCrmLists(),
+        listMailboxes(),
+        getMailCampaignChannels(campaignId),
       ]);
       setCampaign(c);
       setSteps(s);
       setReview(r);
       setEnrollments(e);
       setLists(l);
+      setMailboxes(mb);
+      setSelectedMailboxIds(ch);
       setName(c.name);
       setSourceListId(c.source_list_id ?? "");
       setSendingDays(c.sending_days);
@@ -225,6 +241,30 @@ export default function MailCampaignDetailPage() {
     }
   }
 
+  function handleToggleChannel(mailboxId: string, selected: boolean) {
+    if (campaign?.status === "archived") return;
+    setSelectedMailboxIds((prev) =>
+      selected ? [...prev, mailboxId] : prev.filter((id) => id !== mailboxId)
+    );
+  }
+
+  async function handleSaveChannels() {
+    if (campaign?.status === "archived") return;
+    setSavingChannels(true);
+    setChannelsError(null);
+    try {
+      const updated = await setMailCampaignChannels(campaignId, selectedMailboxIds);
+      setSelectedMailboxIds(updated.map((m) => m.mailbox_id));
+      await refreshReview();
+    } catch (err) {
+      setChannelsError(
+        err instanceof ApiError ? `Couldn't save Channels (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    } finally {
+      setSavingChannels(false);
+    }
+  }
+
   async function handleMarkReady() {
     setBusy(true);
     setActionError(null);
@@ -266,7 +306,7 @@ export default function MailCampaignDetailPage() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
+      <div className={MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS}>
         <Alert variant="destructive">
           <AlertTriangle />
           <AlertTitle>Couldn&apos;t load this campaign</AlertTitle>
@@ -277,11 +317,11 @@ export default function MailCampaignDetailPage() {
   }
 
   if (!campaign) {
-    return <div className="mx-auto max-w-3xl px-6 py-10 text-sm text-muted-foreground">Loading…</div>;
+    return <div className={cn(MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS, "text-sm text-muted-foreground")}>Loading…</div>;
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
+    <div className={MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS}>
       <Link href="/manager/campaigns" className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="h-4 w-4" />
         All Campaigns
@@ -313,6 +353,7 @@ export default function MailCampaignDetailPage() {
           <TabsTab value="dashboard">Dashboard</TabsTab>
           <TabsTab value="leads">Leads</TabsTab>
           <TabsTab value="steps">Steps</TabsTab>
+          <TabsTab value="channels">Channels</TabsTab>
           <TabsTab value="schedule">Schedule</TabsTab>
           <TabsTab value="settings">Settings</TabsTab>
         </TabsList>
@@ -341,6 +382,19 @@ export default function MailCampaignDetailPage() {
             setStepDelay={setStepDelay}
             addingStep={addingStep}
             stepError={stepError}
+          />
+        </TabsPanel>
+
+        <TabsPanel value="channels">
+          <MailCampaignChannelsTab
+            mailboxes={mailboxes}
+            selectedMailboxIds={selectedMailboxIds}
+            onToggle={handleToggleChannel}
+            busy={busy}
+            saving={savingChannels}
+            error={channelsError}
+            onSave={handleSaveChannels}
+            readOnly={campaign.status === "archived"}
           />
         </TabsPanel>
 

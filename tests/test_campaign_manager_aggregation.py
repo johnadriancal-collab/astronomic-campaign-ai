@@ -11,6 +11,7 @@ prove it remains fully functional on its own; it's just never called from
 this aggregation endpoint anymore.
 """
 
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -22,13 +23,16 @@ from app.api.campaign_manager import router as campaign_manager_router
 from app.api.mail import router as mail_router
 from app.dependencies import get_campaign_service, get_email_sequence_sync_service, get_mail_campaign_service
 from app.models.campaign import Campaign, CampaignPlan, Filters
+from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.campaign_store import MemoryCampaignStore
 from app.repositories.email_sequence_step_store import MemoryEmailSequenceStepStore
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
+from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
+from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.campaign_service import CampaignService
 from app.services.crm_service import CrmService
@@ -72,6 +76,8 @@ def test_client():
         enrollment_store=MemoryMailEnrollmentStore(),
         crm_service=CrmService(),
         activity_log=ActivityLogService(MemoryActivityEventStore()),
+        mailbox_store=MemoryMailboxStore(),
+        channel_store=MemoryMailCampaignMailboxStore(),
     )
 
     app = FastAPI()
@@ -165,6 +171,20 @@ async def test_mail_campaign_ready_status_shows_eligible_count_not_fake_zero(tes
             "timezone": "America/Chicago",
         },
     )
+    now = datetime.now(timezone.utc)
+    await mail_service.mailbox_store.create(
+        Mailbox(
+            mailbox_id="mbx-aggregation-test",
+            provider=MailboxProvider.GOOGLE,
+            email="aggregation-test@example.com",
+            display_name="Victoria Bennett",
+            status=MailboxStatus.CONNECTED,
+            google_user_id="google-user-1",
+            connected_at=now,
+            updated_at=now,
+        )
+    )
+    await mail_service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-aggregation-test"])
     await mail_service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
 
     resp = client.get("/campaign-manager/campaigns")

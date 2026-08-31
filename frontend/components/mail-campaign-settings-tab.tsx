@@ -51,7 +51,7 @@ export function MailCampaignSettingsTab({
         <CardHeader>
           <CardTitle className="text-sm">Audience</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="max-w-md space-y-3">
           <div className="space-y-1">
             <label className="text-xs font-medium text-muted-foreground">Campaign name</label>
             <Input value={name} onChange={(e) => setName(e.target.value)} disabled={!editable} />
@@ -88,7 +88,7 @@ export function MailCampaignSettingsTab({
         <CardHeader>
           <CardTitle className="text-sm">Campaign Settings</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="max-w-md space-y-4">
           {settingsError && (
             <Alert variant="destructive">
               <AlertDescription>{settingsError}</AlertDescription>

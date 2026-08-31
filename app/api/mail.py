@@ -28,9 +28,13 @@ from app.models.mail import (
     MailSuppression,
     MailSuppressionReason,
 )
+from app.models.mailbox import Mailbox
 from app.services.crm_service import CrmContactListNotFound
 from app.services.mail_campaign_service import (
     InvalidMailTemplateVariableError,
+    MailboxChannelNotFoundError,
+    MailboxChannelNotUsableError,
+    MailCampaignChannelsFrozenError,
     MailCampaignInvalidTransitionError,
     MailCampaignNotEditableError,
     MailCampaignNotFound,
@@ -192,6 +196,48 @@ async def list_enrollments(mail_campaign_id: str, service: MailCampaignService =
         return await service.list_enrollments(mail_campaign_id)
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Channels (selected sending mailboxes) --------------------------------
+
+
+class MailCampaignChannelsUpdateRequest(BaseModel):
+    mailbox_ids: list[str]
+
+
+@router.get("/campaigns/{mail_campaign_id}/channels", response_model=list[str])
+async def list_campaign_channels(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+    """The campaign's currently-selected mailbox ids -- the frontend already
+    has full mailbox details from GET /mailboxes, so this deliberately
+    returns just ids rather than duplicating that data."""
+    try:
+        mailboxes = await service.list_channel_mailboxes(mail_campaign_id)
+        return [m.mailbox_id for m in mailboxes]
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.put("/campaigns/{mail_campaign_id}/channels", response_model=list[Mailbox])
+async def set_campaign_channels(
+    mail_campaign_id: str,
+    payload: MailCampaignChannelsUpdateRequest,
+    service: MailCampaignService = Depends(get_mail_campaign_service),
+):
+    """Atomically replaces the campaign's full selected-mailbox set -- see
+    MailCampaignService.set_channel_mailboxes()'s docstring for exactly what
+    is/isn't allowed (a disconnected/needs_reauth mailbox may remain
+    selected if it already was, but may not be newly added; an ARCHIVED
+    campaign rejects this call entirely -- its Channels are read-only)."""
+    try:
+        return await service.set_channel_mailboxes(mail_campaign_id, payload.mailbox_ids)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignChannelsFrozenError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MailboxChannelNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except MailboxChannelNotUsableError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Sequence steps --------------------------------------------------------

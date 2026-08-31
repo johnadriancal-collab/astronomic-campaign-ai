@@ -40,7 +40,7 @@ export function MailCampaignScheduleTab({
       <CardHeader>
         <CardTitle className="text-sm">Schedule</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="max-w-md space-y-3">
         <div>
           <p className="mb-1.5 text-xs font-medium text-muted-foreground">Sending days</p>
           <SendDaysPicker days={sendingDays} onChange={setSendingDays} disabled={!editable} />

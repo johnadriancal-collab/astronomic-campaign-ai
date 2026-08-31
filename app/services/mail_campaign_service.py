@@ -48,6 +48,8 @@ from app.models.mail import (
     validate_mail_schedule,
     validate_mail_timezone,
 )
+from app.models.mailbox import Mailbox, MailboxStatus
+from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignNotFoundError, MailCampaignStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
 from app.repositories.mail_sequence_step_store import (
@@ -55,6 +57,7 @@ from app.repositories.mail_sequence_step_store import (
     MailSequenceStepNotFoundError,
     MailSequenceStepStore,
 )
+from app.repositories.mailbox_store import MailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmContactListNotFound, CrmService
 
@@ -118,6 +121,48 @@ class InvalidMailTemplateVariableError(ValueError):
         )
 
 
+class MailboxChannelNotFoundError(Exception):
+    """Raised by set_channel_mailboxes() when a requested mailbox_id doesn't
+    resolve to any real Mailbox at all (never for a merely disconnected one --
+    see MailboxChannelNotUsableError for that case)."""
+
+    def __init__(self, mailbox_id: str):
+        self.mailbox_id = mailbox_id
+        super().__init__(f"Mailbox not found: {mailbox_id}")
+
+
+class MailCampaignChannelsFrozenError(Exception):
+    """Raised by set_channel_mailboxes() for an ARCHIVED campaign. Channels
+    are read-only once archived (unlike DRAFT/READY, both of which remain
+    editable -- see that method's docstring) -- there is no un-archive
+    transition in this phase, so an archived campaign's sender selection is
+    permanently frozen at whatever it was when archived. GET (
+    list_channel_mailboxes) is never affected by this -- it always remains
+    available so the UI can keep displaying an archived campaign's
+    historical selection."""
+
+    def __init__(self, mail_campaign_id: str):
+        self.mail_campaign_id = mail_campaign_id
+        super().__init__(f"MailCampaign {mail_campaign_id} is archived -- Channels are read-only.")
+
+
+class MailboxChannelNotUsableError(Exception):
+    """Raised by set_channel_mailboxes() when the request tries to NEWLY
+    select a mailbox that isn't currently MailboxStatus.CONNECTED. Never
+    raised for a mailbox that was already part of this campaign's selection
+    before the call -- an already-selected mailbox may remain selected
+    (unchanged) even if it has since become disconnected/needs_reauth; see
+    that method's docstring for the full reasoning."""
+
+    def __init__(self, mailbox_id: str, status: MailboxStatus):
+        self.mailbox_id = mailbox_id
+        self.status = status
+        super().__init__(
+            f"Mailbox {mailbox_id} cannot be newly selected while its status is '{status.value}' -- "
+            "only a currently connected mailbox may be newly added to a campaign's Channels."
+        )
+
+
 _CAMPAIGN_PATCH_FIELDS = {
     "name",
     "source_list_id",
@@ -146,15 +191,23 @@ def _parse_time_of_day(value: str) -> time:
         raise MailScheduleValidationError(f"'{value}' is not a valid time of day (expected HH:MM).") from e
 
 
-def _compute_readiness_warnings(campaign: MailCampaign, source_list_exists: bool, step_count: int) -> list[str]:
+def _compute_readiness_warnings(
+    campaign: MailCampaign, source_list_exists: bool, step_count: int, has_connected_mailbox: bool
+) -> list[str]:
     """The single source of truth for 'why can't this campaign be marked
     ready' -- called identically by mark_ready() (which raises
     MailCampaignNotReadyError if this is non-empty) and get_review() (which
     surfaces the same list as MailCampaignReview.readiness_warnings, so the
     UI can show real problems proactively before the user even attempts
     Mark Ready). Never duplicated -- both callers pass in whatever they've
-    already computed about the campaign's list/step state, so this never
-    re-fetches anything itself."""
+    already computed about the campaign's list/step/channel state, so this
+    never re-fetches anything itself.
+
+    `has_connected_mailbox` must be True only if at least one of the
+    campaign's SELECTED mailboxes is CURRENTLY MailboxStatus.CONNECTED --
+    a selection that exists only historically (every selected mailbox now
+    disconnected/needs_reauth, or none selected at all) is not enough, since
+    there would be no real sender to eventually deliver from."""
     reasons: list[str] = []
 
     if not campaign.source_list_id:
@@ -164,6 +217,9 @@ def _compute_readiness_warnings(campaign: MailCampaign, source_list_exists: bool
 
     if step_count == 0:
         reasons.append("At least one sequence step is required.")
+
+    if not has_connected_mailbox:
+        reasons.append("At least one connected sending inbox must be selected.")
 
     try:
         validate_mail_schedule(campaign.sending_days, campaign.start_time, campaign.end_time, campaign.timezone)
@@ -181,12 +237,16 @@ class MailCampaignService:
         enrollment_store: MailEnrollmentStore,
         crm_service: CrmService,
         activity_log: ActivityLogService,
+        mailbox_store: MailboxStore,
+        channel_store: MailCampaignMailboxStore,
     ):
         self.campaign_store = campaign_store
         self.step_store = step_store
         self.enrollment_store = enrollment_store
         self.crm_service = crm_service
         self.activity_log = activity_log
+        self.mailbox_store = mailbox_store
+        self.channel_store = channel_store
 
     async def _require_campaign(self, mail_campaign_id: str) -> MailCampaign:
         campaign = await self.campaign_store.get(mail_campaign_id)
@@ -423,6 +483,78 @@ class MailCampaignService:
         if unknown:
             raise InvalidMailTemplateVariableError(unknown)
 
+    # --- Channels (selected sending mailboxes) ----------------------------
+
+    async def list_channel_mailboxes(self, mail_campaign_id: str) -> list[Mailbox]:
+        """Every mailbox currently selected for this campaign, resolved to
+        full Mailbox objects. A linked mailbox_id can never fail to resolve
+        (disconnecting a mailbox only flips its status -- see
+        MailboxService.disconnect_mailbox() -- it never deletes the row), so
+        this never silently drops a row; callers render whatever status
+        comes back (including disconnected/needs_reauth) rather than hiding it."""
+        await self._require_campaign(mail_campaign_id)
+        mailbox_ids = await self.channel_store.list_mailbox_ids_for_campaign(mail_campaign_id)
+        mailboxes = [await self.mailbox_store.get(mailbox_id) for mailbox_id in mailbox_ids]
+        return [m for m in mailboxes if m is not None]
+
+    async def set_channel_mailboxes(self, mail_campaign_id: str, mailbox_ids: list[str]) -> list[Mailbox]:
+        """Replaces this campaign's ENTIRE selected mailbox set atomically
+        (see MailCampaignMailboxStore.replace_for_campaign()) -- not an
+        incremental add/remove, matching the Channels tab's single "Save"
+        action.
+
+        Every requested id must resolve to a real Mailbox
+        (MailboxChannelNotFoundError otherwise). A request may freely KEEP a
+        mailbox that was already selected before this call regardless of its
+        current status -- disconnected/needs_reauth mailboxes are never
+        silently dropped from a campaign's history just because their
+        status changed (see this phase's investigation report). But a
+        mailbox that was NOT already selected may only be NEWLY added while
+        it is MailboxStatus.CONNECTED (MailboxChannelNotUsableError
+        otherwise) -- there's no reason to let someone knowingly assign a
+        campaign to a sender that can't currently send.
+
+        Callable on DRAFT and READY (MailCampaignChannelsFrozenError on
+        ARCHIVED) -- unlike audience/sequence/schedule, mailbox assignment
+        isn't part of the mark_ready() snapshot, so there's nothing here for
+        a READY campaign's lock to protect; this is deliberate, so a READY
+        campaign whose only usable mailbox becomes disconnected can be fixed
+        by selecting a new one without an unlock/re-snapshot round trip.
+        ARCHIVED is different: it's a terminal, no-un-archive status (see
+        MailCampaignStatus's docstring), so its sender selection is frozen
+        at whatever it was when archived, same as every other archived
+        field."""
+        campaign = await self._require_campaign(mail_campaign_id)
+        if campaign.status == MailCampaignStatus.ARCHIVED:
+            raise MailCampaignChannelsFrozenError(mail_campaign_id)
+
+        deduped = list(dict.fromkeys(mailbox_ids))
+        currently_selected = set(await self.channel_store.list_mailbox_ids_for_campaign(mail_campaign_id))
+
+        resolved: list[Mailbox] = []
+        for mailbox_id in deduped:
+            mailbox = await self.mailbox_store.get(mailbox_id)
+            if mailbox is None:
+                raise MailboxChannelNotFoundError(mailbox_id)
+            if mailbox_id not in currently_selected and mailbox.status != MailboxStatus.CONNECTED:
+                raise MailboxChannelNotUsableError(mailbox_id, mailbox.status)
+            resolved.append(mailbox)
+
+        await self.channel_store.replace_for_campaign(mail_campaign_id, deduped)
+        return resolved
+
+    async def _has_connected_selected_mailbox(self, mail_campaign_id: str) -> bool:
+        """True only if at least one of this campaign's SELECTED mailboxes
+        is CURRENTLY MailboxStatus.CONNECTED -- see
+        _compute_readiness_warnings()'s docstring for why a merely
+        historical selection isn't enough."""
+        mailbox_ids = await self.channel_store.list_mailbox_ids_for_campaign(mail_campaign_id)
+        for mailbox_id in mailbox_ids:
+            mailbox = await self.mailbox_store.get(mailbox_id)
+            if mailbox is not None and mailbox.status == MailboxStatus.CONNECTED:
+                return True
+        return False
+
     # --- State transitions -------------------------------------------------
 
     async def mark_ready(self, mail_campaign_id: str, suppressed_emails: set[str]) -> MailCampaign:
@@ -487,8 +619,9 @@ class MailCampaignService:
                 source_list_exists = False
 
         steps = await self.step_store.list_for_campaign(mail_campaign_id)
+        has_connected_mailbox = await self._has_connected_selected_mailbox(mail_campaign_id)
 
-        reasons = _compute_readiness_warnings(campaign, source_list_exists, len(steps))
+        reasons = _compute_readiness_warnings(campaign, source_list_exists, len(steps), has_connected_mailbox)
         if reasons:
             raise MailCampaignNotReadyError(mail_campaign_id, reasons)
 
@@ -636,6 +769,7 @@ class MailCampaignService:
 
         eligible = total_contacts - missing_email - suppressed
         step_count = len(steps)
+        has_connected_mailbox = await self._has_connected_selected_mailbox(mail_campaign_id)
 
         return MailCampaignReview(
             mail_campaign_id=mail_campaign_id,
@@ -653,5 +787,7 @@ class MailCampaignService:
                 "Add mailbox daily-send limits (Phase 2) to estimate real daily capacity -- "
                 "no mailbox is configured yet."
             ),
-            readiness_warnings=_compute_readiness_warnings(campaign, source_list_exists, step_count),
+            readiness_warnings=_compute_readiness_warnings(
+                campaign, source_list_exists, step_count, has_connected_mailbox
+            ),
         )

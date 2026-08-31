@@ -7,21 +7,42 @@ safety) and NO route capable of touching Apollo/ITF/Email Intake/CSV
 import (J. Isolation).
 """
 
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.mail import router as mail_router
 from app.dependencies import get_mail_campaign_service, get_mail_suppression_service
+from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
 from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
+from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_suppression_service import MailSuppressionService
+
+
+def make_mailbox(mailbox_id="mbx-1", status=MailboxStatus.CONNECTED, email="victoria@example.com") -> Mailbox:
+    now = datetime.now(timezone.utc)
+    return Mailbox(
+        mailbox_id=mailbox_id,
+        provider=MailboxProvider.GOOGLE,
+        email=email,
+        display_name="Victoria Bennett",
+        status=status,
+        google_user_id="google-user-1",
+        granted_scopes=["openid", "email", "profile"],
+        connected_at=now,
+        updated_at=now,
+        disconnected_at=now if status == MailboxStatus.DISCONNECTED else None,
+    )
 
 
 @pytest.fixture
@@ -30,13 +51,25 @@ def crm():
 
 
 @pytest.fixture
-def campaign_service(crm):
+def mailbox_store():
+    return MemoryMailboxStore()
+
+
+@pytest.fixture
+def channel_store():
+    return MemoryMailCampaignMailboxStore()
+
+
+@pytest.fixture
+def campaign_service(crm, mailbox_store, channel_store):
     return MailCampaignService(
         campaign_store=MemoryMailCampaignStore(),
         step_store=MemoryMailSequenceStepStore(),
         enrollment_store=MemoryMailEnrollmentStore(),
         crm_service=crm,
         activity_log=ActivityLogService(MemoryActivityEventStore()),
+        mailbox_store=mailbox_store,
+        channel_store=channel_store,
     )
 
 
@@ -188,7 +221,7 @@ def test_start_immediately_never_appears_alongside_an_active_status(client):
     assert "active" not in status_enum
 
 
-def test_full_wizard_flow_through_ready_and_review(client, crm):
+def test_full_wizard_flow_through_ready_and_review(client, crm, mailbox_store, campaign_service):
     import asyncio
 
     async def seed():
@@ -196,12 +229,16 @@ def test_full_wizard_flow_through_ready_and_review(client, crm):
         c1 = await crm.create_contact({"email": "a@example.com"})
         c2 = await crm.create_contact({"email": "b@example.com"})
         await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id, c2.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-wizard"))
         return contact_list.list_id
 
     list_id = asyncio.run(seed())
 
     created = client.post("/mail/campaigns", json={"name": "Wizard Flow"}).json()
     cid = created["mail_campaign_id"]
+
+    channels_resp = client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-wizard"]})
+    assert channels_resp.status_code == 200
 
     patched = client.patch(
         f"/mail/campaigns/{cid}",
@@ -250,19 +287,21 @@ def test_unknown_variable_returns_400(client):
     assert resp.status_code == 400
 
 
-def test_editing_a_ready_campaign_returns_409(client, crm):
+def test_editing_a_ready_campaign_returns_409(client, crm, mailbox_store):
     import asyncio
 
     async def seed():
         contact_list = await crm.create_contact_list("Lock Test Audience")
         c1 = await crm.create_contact({"email": "locked@example.com"})
         await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-locked"))
         return contact_list.list_id
 
     list_id = asyncio.run(seed())
 
     created = client.post("/mail/campaigns", json={"name": "Locked"}).json()
     cid = created["mail_campaign_id"]
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-locked"]})
     client.patch(
         f"/mail/campaigns/{cid}",
         json={
@@ -286,6 +325,270 @@ def test_editing_a_ready_campaign_returns_409(client, crm):
 
     locked_step = client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "New", "body": "B"})
     assert locked_step.status_code == 409
+
+
+# --- Channels (selected sending mailboxes) --------------------------------
+
+
+def test_get_channels_starts_empty(client):
+    created = client.post("/mail/campaigns", json={"name": "Channels Empty"}).json()
+    resp = client.get(f"/mail/campaigns/{created['mail_campaign_id']}/channels")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_put_channels_selects_and_returns_full_mailboxes(client, mailbox_store):
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-a", email="a@example.com")))
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-b", email="b@example.com")))
+
+    created = client.post("/mail/campaigns", json={"name": "Channels Select"}).json()
+    cid = created["mail_campaign_id"]
+
+    resp = client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-a", "mbx-b"]})
+    assert resp.status_code == 200
+    emails = {m["email"] for m in resp.json()}
+    assert emails == {"a@example.com", "b@example.com"}
+
+    get_resp = client.get(f"/mail/campaigns/{cid}/channels")
+    assert set(get_resp.json()) == {"mbx-a", "mbx-b"}
+
+
+def test_put_channels_is_idempotent_and_deduplicates(client, mailbox_store):
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-a")))
+
+    created = client.post("/mail/campaigns", json={"name": "Channels Dedup"}).json()
+    cid = created["mail_campaign_id"]
+
+    resp = client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-a", "mbx-a", "mbx-a"]})
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+    resp2 = client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-a"]})
+    assert resp2.status_code == 200
+    assert len(resp2.json()) == 1
+
+
+def test_put_channels_rejects_unknown_mailbox_id(client):
+    created = client.post("/mail/campaigns", json={"name": "Channels Unknown"}).json()
+    resp = client.put(
+        f"/mail/campaigns/{created['mail_campaign_id']}/channels", json={"mailbox_ids": ["does-not-exist"]}
+    )
+    assert resp.status_code == 400
+
+
+def test_put_channels_rejects_newly_selecting_a_disconnected_mailbox(client, mailbox_store):
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-gone", status=MailboxStatus.DISCONNECTED)))
+
+    created = client.post("/mail/campaigns", json={"name": "Channels Disconnected"}).json()
+    resp = client.put(f"/mail/campaigns/{created['mail_campaign_id']}/channels", json={"mailbox_ids": ["mbx-gone"]})
+    assert resp.status_code == 400
+
+
+def test_put_channels_rejects_newly_selecting_a_needs_reauth_mailbox(client, mailbox_store):
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-stale", status=MailboxStatus.NEEDS_REAUTH)))
+
+    created = client.post("/mail/campaigns", json={"name": "Channels Needs Reauth"}).json()
+    resp = client.put(f"/mail/campaigns/{created['mail_campaign_id']}/channels", json={"mailbox_ids": ["mbx-stale"]})
+    assert resp.status_code == 400
+
+
+def test_previously_selected_mailbox_survives_later_disconnect(client, mailbox_store):
+    """The core 'do not silently remove historical selections' guarantee:
+    once a mailbox is selected while connected, it stays linked (and keeps
+    appearing from GET) even after it disconnects -- the campaign is never
+    silently mutated just because the mailbox's status changed."""
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-will-disconnect")))
+
+    created = client.post("/mail/campaigns", json={"name": "Channels Survives Disconnect"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-will-disconnect"]})
+
+    async def disconnect():
+        mailbox = await mailbox_store.get("mbx-will-disconnect")
+        await mailbox_store.save(mailbox.model_copy(update={"status": MailboxStatus.DISCONNECTED}))
+
+    asyncio.run(disconnect())
+
+    get_resp = client.get(f"/mail/campaigns/{cid}/channels")
+    assert get_resp.json() == ["mbx-will-disconnect"]
+
+    # And re-saving the SAME already-selected set (e.g. re-submitting the
+    # Channels form unchanged) must not be rejected just because it's now
+    # disconnected -- only a NEW selection is blocked.
+    resave = client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-will-disconnect"]})
+    assert resave.status_code == 200
+    assert resave.json()[0]["status"] == "disconnected"
+
+
+def test_readiness_fails_with_zero_selected_mailboxes(client, crm):
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("Readiness Audience")
+        c1 = await crm.create_contact({"email": "x@example.com"})
+        await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+    created = client.post("/mail/campaigns", json={"name": "No Mailbox"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(
+        f"/mail/campaigns/{cid}",
+        json={"source_list_id": list_id, "sending_days": [0], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S", "body": "B"})
+
+    review = client.get(f"/mail/campaigns/{cid}/review").json()
+    assert "At least one connected sending inbox must be selected." in review["readiness_warnings"]
+
+    ready = client.post(f"/mail/campaigns/{cid}/ready")
+    assert ready.status_code == 422
+    assert "connected sending inbox" in ready.json()["detail"].lower()
+
+
+def test_readiness_fails_when_all_selected_mailboxes_are_unusable(client, crm, mailbox_store):
+    """A campaign that HAD a connected mailbox selected, which has since
+    disconnected, is not ready -- a historical link is not a usable sender."""
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("Readiness Audience 2")
+        c1 = await crm.create_contact({"email": "y@example.com"})
+        await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-will-go-stale"))
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+    created = client.post("/mail/campaigns", json={"name": "Stale Mailbox"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(
+        f"/mail/campaigns/{cid}",
+        json={"source_list_id": list_id, "sending_days": [0], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S", "body": "B"})
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-will-go-stale"]})
+
+    async def go_stale():
+        mailbox = await mailbox_store.get("mbx-will-go-stale")
+        await mailbox_store.save(mailbox.model_copy(update={"status": MailboxStatus.NEEDS_REAUTH}))
+
+    asyncio.run(go_stale())
+
+    ready = client.post(f"/mail/campaigns/{cid}/ready")
+    assert ready.status_code == 422
+    assert "connected sending inbox" in ready.json()["detail"].lower()
+
+
+def test_draft_channels_update_succeeds(client, mailbox_store):
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-draft-ok")))
+    created = client.post("/mail/campaigns", json={"name": "Draft Channels"}).json()
+    resp = client.put(f"/mail/campaigns/{created['mail_campaign_id']}/channels", json={"mailbox_ids": ["mbx-draft-ok"]})
+    assert resp.status_code == 200
+
+
+def test_ready_channels_update_succeeds(client, crm, mailbox_store):
+    """Replacing a Ready campaign's sender is explicitly allowed -- this is
+    how a disconnected/needs-reauth inbox gets swapped out without
+    unlocking the campaign back to draft."""
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("Ready Channels Audience")
+        c1 = await crm.create_contact({"email": "ready-channels@example.com"})
+        await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-ready-1"))
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-ready-2", email="second@example.com"))
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+    created = client.post("/mail/campaigns", json={"name": "Ready Channels"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(
+        f"/mail/campaigns/{cid}",
+        json={"source_list_id": list_id, "sending_days": [0], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S", "body": "B"})
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-ready-1"]})
+    ready = client.post(f"/mail/campaigns/{cid}/ready")
+    assert ready.status_code == 200
+
+    swap = client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-ready-2"]})
+    assert swap.status_code == 200
+    assert [m["mailbox_id"] for m in swap.json()] == ["mbx-ready-2"]
+
+
+def test_archived_channels_get_succeeds(client, mailbox_store):
+    """GET always remains available, even once archived -- the UI must be
+    able to keep displaying an archived campaign's historical selection."""
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-archived-view")))
+    created = client.post("/mail/campaigns", json={"name": "Archived Channels View"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-archived-view"]})
+    client.post(f"/mail/campaigns/{cid}/archive")
+
+    resp = client.get(f"/mail/campaigns/{cid}/channels")
+    assert resp.status_code == 200
+    assert resp.json() == ["mbx-archived-view"]
+
+
+def test_archived_channels_put_is_rejected(client, mailbox_store):
+    import asyncio
+
+    asyncio.run(mailbox_store.create(make_mailbox(mailbox_id="mbx-archived-reject")))
+    created = client.post("/mail/campaigns", json={"name": "Archived Channels Reject"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-archived-reject"]})
+    client.post(f"/mail/campaigns/{cid}/archive")
+
+    resp = client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": []})
+    assert resp.status_code == 409
+
+    # And the previous selection must be completely unaffected by the
+    # rejected attempt.
+    unchanged = client.get(f"/mail/campaigns/{cid}/channels")
+    assert unchanged.json() == ["mbx-archived-reject"]
+
+
+def test_readiness_succeeds_with_one_connected_selected_mailbox(client, crm, mailbox_store):
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("Readiness Audience 3")
+        c1 = await crm.create_contact({"email": "z@example.com"})
+        await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-good"))
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+    created = client.post("/mail/campaigns", json={"name": "Ready Mailbox"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(
+        f"/mail/campaigns/{cid}",
+        json={"source_list_id": list_id, "sending_days": [0], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S", "body": "B"})
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-good"]})
+
+    review = client.get(f"/mail/campaigns/{cid}/review").json()
+    assert review["readiness_warnings"] == []
+
+    ready = client.post(f"/mail/campaigns/{cid}/ready")
+    assert ready.status_code == 200
+    assert ready.json()["status"] == "ready"
 
 
 # --- Suppression ----------------------------------------------------------

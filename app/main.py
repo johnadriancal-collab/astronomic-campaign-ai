@@ -80,6 +80,7 @@ from app.repositories.sqlite_luma_backfill_checkpoint_store import SQLiteLumaBac
 from app.repositories.sqlite_luma_event_store import SQLiteLumaEventStore
 from app.repositories.sqlite_luma_question_mapping_store import SQLiteLumaQuestionMappingStore
 from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrationStore
+from app.repositories.sqlite_mail_campaign_mailbox_store import SQLiteMailCampaignMailboxStore
 from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
 from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
@@ -137,6 +138,7 @@ async def lifespan(app: FastAPI):
     mail_sequence_step_store = SQLiteMailSequenceStepStore(settings.database_path)
     mail_enrollment_store = SQLiteMailEnrollmentStore(settings.database_path)
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
+    mail_campaign_mailbox_store = SQLiteMailCampaignMailboxStore(settings.database_path)
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
     auth_session_store = SQLiteAuthSessionStore(settings.database_path)
@@ -163,6 +165,7 @@ async def lifespan(app: FastAPI):
     await mail_sequence_step_store.connect()
     await mail_enrollment_store.connect()
     await mail_suppression_store.connect()
+    await mail_campaign_mailbox_store.connect()
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
     await auth_session_store.connect()
@@ -247,6 +250,8 @@ async def lifespan(app: FastAPI):
         enrollment_store=mail_enrollment_store,
         crm_service=crm_service,
         activity_log=activity_log_service,
+        mailbox_store=mailbox_store,
+        channel_store=mail_campaign_mailbox_store,
     )
 
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). CSRF
@@ -340,6 +345,7 @@ async def lifespan(app: FastAPI):
     await mail_sequence_step_store.close()
     await mail_enrollment_store.close()
     await mail_suppression_store.close()
+    await mail_campaign_mailbox_store.close()
     await mailbox_store.close()
     await mailbox_credential_store.close()
     await auth_session_store.close()
