@@ -12,6 +12,9 @@ const PAGE_SOURCE = readFileSync(new URL("../app/manager/campaigns/mail/[id]/pag
 const DASHBOARD_TAB_SOURCE = readFileSync(new URL("../components/mail-campaign-dashboard-tab.tsx", import.meta.url), "utf-8");
 const LEADS_TAB_SOURCE = readFileSync(new URL("../components/mail-campaign-leads-tab.tsx", import.meta.url), "utf-8");
 const CHANNELS_TAB_SOURCE = readFileSync(new URL("../components/mail-campaign-channels-tab.tsx", import.meta.url), "utf-8");
+const SCHEDULE_TAB_SOURCE = readFileSync(new URL("../components/mail-campaign-schedule-tab.tsx", import.meta.url), "utf-8");
+const SCHEDULE_DAY_ROW_SOURCE = readFileSync(new URL("../components/schedule-day-row.tsx", import.meta.url), "utf-8");
+const SCHEDULE_BLOCK_SOURCE = readFileSync(new URL("../components/schedule-window-block.tsx", import.meta.url), "utf-8");
 
 test("the campaign detail page renders all six required tabs", () => {
   for (const tab of ["Dashboard", "Leads", "Steps", "Channels", "Schedule", "Settings"]) {
@@ -104,7 +107,15 @@ test("the Leads tab never invents a send/open/reply enrollment state", () => {
 });
 
 test("Apollo remains completely absent from the redesigned campaign detail page and its tabs", () => {
-  for (const source of [PAGE_SOURCE, DASHBOARD_TAB_SOURCE, LEADS_TAB_SOURCE, CHANNELS_TAB_SOURCE]) {
+  for (const source of [
+    PAGE_SOURCE,
+    DASHBOARD_TAB_SOURCE,
+    LEADS_TAB_SOURCE,
+    CHANNELS_TAB_SOURCE,
+    SCHEDULE_TAB_SOURCE,
+    SCHEDULE_DAY_ROW_SOURCE,
+    SCHEDULE_BLOCK_SOURCE,
+  ]) {
     assert.doesNotMatch(source, /Apollo/);
     assert.doesNotMatch(source, /\/sync\/campaigns/);
     assert.doesNotMatch(source, /campaign-builder/);

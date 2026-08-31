@@ -83,6 +83,7 @@ from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrati
 from app.repositories.sqlite_mail_campaign_mailbox_store import SQLiteMailCampaignMailboxStore
 from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
 from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
+from app.repositories.sqlite_mail_send_window_store import SQLiteMailSendWindowStore
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
@@ -139,6 +140,7 @@ async def lifespan(app: FastAPI):
     mail_enrollment_store = SQLiteMailEnrollmentStore(settings.database_path)
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
     mail_campaign_mailbox_store = SQLiteMailCampaignMailboxStore(settings.database_path)
+    mail_send_window_store = SQLiteMailSendWindowStore(settings.database_path)
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
     auth_session_store = SQLiteAuthSessionStore(settings.database_path)
@@ -166,6 +168,7 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_store.connect()
     await mail_suppression_store.connect()
     await mail_campaign_mailbox_store.connect()
+    await mail_send_window_store.connect()
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
     await auth_session_store.connect()
@@ -252,6 +255,7 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
         mailbox_store=mailbox_store,
         channel_store=mail_campaign_mailbox_store,
+        window_store=mail_send_window_store,
     )
 
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). CSRF
@@ -346,6 +350,7 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_store.close()
     await mail_suppression_store.close()
     await mail_campaign_mailbox_store.close()
+    await mail_send_window_store.close()
     await mailbox_store.close()
     await mailbox_credential_store.close()
     await auth_session_store.close()

@@ -54,6 +54,7 @@ plain text).
 import re
 from datetime import datetime, time
 from enum import Enum
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -105,11 +106,14 @@ class MailCampaign(BaseModel):
       - `all_hours=True` means the campaign's sending window is the full
         day; mail_campaign_service.py enforces this by writing literal
         `start_time=00:00`/`end_time=23:59` whenever it's set True (see
-        MailCampaignService.update_campaign()), so validate_mail_schedule()
-        and every existing start/end-time consumer needs no changes at all
-        -- `all_hours` itself exists only so the UI can round-trip the
-        user's actual choice on re-edit, distinct from someone literally
-        picking 00:00-23:59 by hand.
+        MailCampaignService.update_campaign()) -- `all_hours` itself exists
+        only so the UI can round-trip the user's actual choice on re-edit,
+        distinct from someone literally picking 00:00-23:59 by hand. These
+        four legacy schedule fields (plus `sending_days`/`start_time`/
+        `end_time`) are superseded, but NOT removed, by the real
+        MailSendWindow rows a campaign gets once it's edited through the
+        Schedule tab -- see MailSendWindow's docstring below for the exact
+        "windows if present, else synthesized from these fields" rule.
       - `start_immediately` is a preference for a future sending engine to
         read ("should a newly-enrolled lead begin immediately, once
         sending exists") -- it never changes `status` and never enables
@@ -326,37 +330,11 @@ class MailCampaignReview(BaseModel):
 
 
 class MailScheduleValidationError(ValueError):
-    """Raised by validate_mail_schedule() below -- a plain ValueError
-    subclass (matching this codebase's existing convention of raising bare
-    ValueError for simple domain validation, e.g. CrmService.create_contact)
-    so callers can catch it specifically without changing normal
-    ValueError-catching behavior elsewhere."""
-
-
-def validate_mail_schedule(
-    sending_days: list[int],
-    start_time: time | None,
-    end_time: time | None,
-    timezone_name: str | None,
-) -> None:
-    """
-    Strict, "is this schedule complete and usable" validation -- used as one
-    of mark_ready()'s gates. NOT used to reject a merely-incomplete
-    in-progress DRAFT edit (see update_mail_schedule_fields() below for the
-    softer, per-field validation used there). Never touches the network or
-    the database; pure.
-    """
-    if not sending_days:
-        raise MailScheduleValidationError("At least one sending day is required.")
-    if any(d < 0 or d > 6 for d in sending_days):
-        raise MailScheduleValidationError("Sending days must be 0 (Monday) through 6 (Sunday).")
-    if start_time is None or end_time is None:
-        raise MailScheduleValidationError("Start and end time are both required.")
-    if start_time >= end_time:
-        raise MailScheduleValidationError("Start time must be before end time.")
-    if not timezone_name:
-        raise MailScheduleValidationError("A timezone is required.")
-    validate_mail_timezone(timezone_name)
+    """Raised by validate_mail_timezone()/validate_send_windows() below -- a
+    plain ValueError subclass (matching this codebase's existing convention
+    of raising bare ValueError for simple domain validation, e.g.
+    CrmService.create_contact) so callers can catch it specifically without
+    changing normal ValueError-catching behavior elsewhere."""
 
 
 def validate_mail_timezone(timezone_name: str) -> None:
@@ -369,6 +347,124 @@ def validate_mail_timezone(timezone_name: str) -> None:
         ZoneInfo(timezone_name)
     except (ZoneInfoNotFoundError, ValueError, KeyError) as e:
         raise MailScheduleValidationError(f"'{timezone_name}' is not a valid IANA timezone.") from e
+
+
+# --- Send windows (Schedule Phase 2 -- true multiple windows per weekday) --
+#
+# Superseded the OLD single-global-range scheme (`MailCampaign.sending_days`
+# + `start_time`/`end_time`/`all_hours`) -- those four fields are NOT removed
+# from MailCampaign (existing campaigns still have real data in them, and
+# campaign CREATION still accepts them -- see MailCampaignCreateRequest in
+# app/api/mail.py, unchanged), but they are no longer written by the new
+# Schedule tab and are no longer read once a campaign has ANY MailSendWindow
+# row. See MailCampaignService's schedule methods (_resolve_schedule(),
+# get_schedule(), set_schedule()) for the exact "windows if present, else
+# synthesized from legacy fields" resolution rule -- that resolver is the
+# ONE place a campaign's real schedule is ever read from, so nothing can
+# read a different, disagreeing representation than anything else.
+#
+# End-of-day representation: this model has no way to express "24:00"
+# (datetime.time's max is 23:59:59.999999) -- a full day window is
+# `00:00`-`23:59`, matching the EXACT sentinel this codebase's legacy
+# all_hours flag has always used (see mail_campaign_service.py's
+# _ALL_DAY_SENTINEL_START/_END), not a new convention.
+class MailSendWindow(BaseModel):
+    """One contiguous send window on one weekday for one campaign. Multiple
+    rows may share a `day_of_week` (multiple windows the same day) and/or a
+    campaign (multiple days) -- there is no uniqueness constraint on
+    `day_of_week` alone, unlike MailSequenceStep's step_number.
+
+    `window_id` is a REAL, STABLE identity across ordinary edits -- PUT
+    .../schedule is still a full replace of the campaign's window set (see
+    MailSendWindowStore.replace_for_campaign()), but the SERVICE layer
+    (MailCampaignService.set_schedule()) resolves each request window
+    against the campaign's current rows first: a request window that
+    carries an existing `window_id` keeps that same row's identity (and
+    `created_at`) even if its day/start/end changed, a request window with
+    no `window_id` mints a fresh one, and any existing row whose id isn't
+    referenced in the request is dropped. This matters once anything
+    (execution history, analytics) might reference a specific window later
+    -- a drag-to-reschedule shouldn't silently delete and recreate the
+    entity it moved."""
+
+    window_id: str
+    mail_campaign_id: str
+    day_of_week: int  # 0=Monday .. 6=Sunday, same convention as legacy sending_days
+    start_time: time
+    end_time: time
+    created_at: datetime
+    updated_at: datetime
+
+
+class MailScheduleWindowInput(BaseModel):
+    """PUT .../schedule's per-window request shape -- `start_time`/`end_time`
+    are "HH:MM" strings (matching every other time-of-day input in this API),
+    parsed server-side. `window_id` is OPTIONAL: omit it (or pass null) for
+    a genuinely new window; pass an existing window's real id to preserve
+    its identity across an edit -- see MailSendWindow's docstring. An id
+    that doesn't belong to this campaign, or that's repeated within the
+    same request, is rejected (MailScheduleValidationError) before any
+    write happens."""
+
+    window_id: str | None = None
+    day_of_week: int
+    start_time: str
+    end_time: str
+
+
+MailScheduleSource = Literal["windows", "legacy", "none"]
+
+
+class MailCampaignSchedule(BaseModel):
+    """GET/PUT .../schedule's response shape. `source` is purely informational
+    (never affects behavior) -- "windows" once any MailSendWindow row exists
+    for this campaign (the authoritative, real case), "legacy" when nothing
+    has been saved through the new Schedule tab yet and these are
+    synthesized on the fly from the campaign's old sending_days/start_time/
+    end_time/all_hours fields (never persisted just by reading them), or
+    "none" when neither exists (a brand new, unconfigured campaign)."""
+
+    mail_campaign_id: str
+    timezone: str | None
+    source: MailScheduleSource
+    windows: list[MailSendWindow]
+
+
+def validate_send_windows(windows: list[tuple[int, time, time]]) -> None:
+    """Structural validation for PUT .../schedule -- day range, start<end,
+    and no two windows on the SAME day_of_week overlapping. Deliberately
+    does NOT require at least one window (a campaign may intentionally save
+    an empty/all-days-off schedule mid-draft) -- "is this schedule complete
+    enough to be Ready" is a separate, stricter check in
+    mail_campaign_service._compute_readiness_warnings(), matching this
+    codebase's existing soft-edit-time vs strict-readiness-time split (see
+    MailCampaignService.update_campaign() vs mark_ready()).
+
+    Raises on the FIRST problem found (matching validate_mail_timezone's
+    single-raise convention) -- the caller collecting multiple readiness
+    reasons wraps this in its own try/except, same pattern already used for
+    every other readiness check.
+
+    Touching boundaries are NOT an overlap -- 08:00-12:00 followed by
+    12:00-18:00 on the same day is valid (back-to-back), only genuinely
+    overlapping time ranges are rejected.
+    """
+    by_day: dict[int, list[tuple[time, time]]] = {}
+    for day, start, end in windows:
+        if day < 0 or day > 6:
+            raise MailScheduleValidationError("day_of_week must be 0 (Monday) through 6 (Sunday).")
+        if start >= end:
+            raise MailScheduleValidationError("Each send window's start time must be before its end time.")
+        by_day.setdefault(day, []).append((start, end))
+
+    for day, day_windows in by_day.items():
+        day_windows.sort()
+        for (_prev_start, prev_end), (next_start, _next_end) in zip(day_windows, day_windows[1:]):
+            if next_start < prev_end:
+                raise MailScheduleValidationError(f"Send windows on {WEEKDAY_NAMES[day]} overlap.")
+
+
+WEEKDAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
 class MailListBulkAddResultLike(BaseModel):

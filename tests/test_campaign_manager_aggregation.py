@@ -31,6 +31,7 @@ from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
+from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
@@ -78,6 +79,7 @@ def test_client():
         activity_log=ActivityLogService(MemoryActivityEventStore()),
         mailbox_store=MemoryMailboxStore(),
         channel_store=MemoryMailCampaignMailboxStore(),
+        window_store=MemoryMailSendWindowStore(),
     )
 
     app = FastAPI()

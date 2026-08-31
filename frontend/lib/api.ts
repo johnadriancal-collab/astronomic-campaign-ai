@@ -1228,6 +1228,66 @@ export function listMailEnrollments(mailCampaignId: string): Promise<MailEnrollm
   return request<MailEnrollment[]>(`/mail/campaigns/${mailCampaignId}/enrollments`);
 }
 
+// --- Mail Campaign Schedule (real MailSendWindow rows, legacy-compatible) --
+//
+// Superseded the old single-global-range scheme (sending_days/start_time/
+// end_time/all_hours, still readable on MailCampaign itself but no longer
+// written by this Schedule tab) -- see the backend's
+// MailCampaignService._resolve_schedule() docstring for the exact
+// "explicit windows if any exist, else synthesized from those legacy
+// fields" resolution rule. `source` is purely informational.
+
+export type MailScheduleSource = "windows" | "legacy" | "none";
+
+export interface MailSendWindow {
+  window_id: string;
+  mail_campaign_id: string;
+  day_of_week: number; // 0=Monday .. 6=Sunday
+  start_time: string; // "HH:MM:SS"
+  end_time: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailCampaignSchedule {
+  mail_campaign_id: string;
+  timezone: string | null;
+  source: MailScheduleSource;
+  windows: MailSendWindow[];
+}
+
+export interface MailScheduleWindowInput {
+  // Omit (or undefined) for a genuinely new window; pass an EXISTING
+  // window's real id to preserve its identity across an edit (e.g. a
+  // drag-to-reschedule) instead of deleting and recreating it. An id that
+  // isn't one of this campaign's current windows, or that's repeated in
+  // the same request, is rejected (400) before anything is saved.
+  window_id?: string;
+  day_of_week: number;
+  start_time: string; // "HH:MM"
+  end_time: string;
+}
+
+/** Read-only at any campaign status -- see get_campaign_schedule's docstring. */
+export function getMailCampaignSchedule(mailCampaignId: string): Promise<MailCampaignSchedule> {
+  return request<MailCampaignSchedule>(`/mail/campaigns/${mailCampaignId}/schedule`);
+}
+
+/** Atomically replaces the campaign's full schedule (timezone + every send
+ * window) -- DRAFT-only, 409 on READY/ARCHIVED (unlock the campaign first,
+ * same boundary as every other schedule/audience/sequence edit). */
+export function setMailCampaignSchedule(
+  mailCampaignId: string,
+  tz: string,
+  windows: MailScheduleWindowInput[]
+): Promise<MailCampaignSchedule> {
+  return request<MailCampaignSchedule>(`/mail/campaigns/${mailCampaignId}/schedule`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ timezone: tz, windows }),
+  });
+}
+
 export function listMailSequenceSteps(mailCampaignId: string): Promise<MailSequenceStep[]> {
   return request<MailSequenceStep[]>(`/mail/campaigns/${mailCampaignId}/steps`);
 }

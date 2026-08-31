@@ -11,9 +11,10 @@ import { MailCampaignDashboardTab } from "@/components/mail-campaign-dashboard-t
 import { MailCampaignLeadsTab } from "@/components/mail-campaign-leads-tab";
 import { MailCampaignStepsTab } from "@/components/mail-campaign-steps-tab";
 import { MailCampaignChannelsTab } from "@/components/mail-campaign-channels-tab";
-import { MailCampaignScheduleTab } from "@/components/mail-campaign-schedule-tab";
+import { MailCampaignScheduleTab, type TabWindow } from "@/components/mail-campaign-schedule-tab";
 import { MailCampaignSettingsTab } from "@/components/mail-campaign-settings-tab";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
+import { findOverlappingPairs, isLocalWindowId, minutesFromTimeString, timeStringFromMinutes } from "@/lib/schedule";
 import { cn } from "@/lib/utils";
 import {
   addMailSequenceStep,
@@ -23,6 +24,7 @@ import {
   getMailCampaign,
   getMailCampaignChannels,
   getMailCampaignReview,
+  getMailCampaignSchedule,
   listCrmLists,
   listMailboxes,
   listMailEnrollments,
@@ -30,6 +32,7 @@ import {
   markMailCampaignReady,
   reorderMailSequenceSteps,
   setMailCampaignChannels,
+  setMailCampaignSchedule,
   unlockMailCampaign,
   updateMailCampaign,
   type CrmContactListSummary,
@@ -56,12 +59,10 @@ export default function MailCampaignDetailPage() {
 
   const [name, setName] = useState("");
   const [sourceListId, setSourceListId] = useState("");
-  const [sendingDays, setSendingDays] = useState<number[]>([]);
-  const [startTime, setStartTime] = useState("");
-  const [endTime, setEndTime] = useState("");
   const [timezone, setTimezone] = useState("");
-  const [allHours, setAllHours] = useState(false);
+  const [windows, setWindows] = useState<TabWindow[]>([]);
   const [savingSchedule, setSavingSchedule] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
 
   const [sharing, setSharing] = useState<MailCampaignSharing>("everyone");
   const [startImmediately, setStartImmediately] = useState(false);
@@ -84,7 +85,7 @@ export default function MailCampaignDetailPage() {
 
   async function load() {
     try {
-      const [c, s, r, e, l, mb, ch] = await Promise.all([
+      const [c, s, r, e, l, mb, ch, sched] = await Promise.all([
         getMailCampaign(campaignId),
         listMailSequenceSteps(campaignId),
         getMailCampaignReview(campaignId),
@@ -92,6 +93,7 @@ export default function MailCampaignDetailPage() {
         listCrmLists(),
         listMailboxes(),
         getMailCampaignChannels(campaignId),
+        getMailCampaignSchedule(campaignId),
       ]);
       setCampaign(c);
       setSteps(s);
@@ -102,11 +104,15 @@ export default function MailCampaignDetailPage() {
       setSelectedMailboxIds(ch);
       setName(c.name);
       setSourceListId(c.source_list_id ?? "");
-      setSendingDays(c.sending_days);
-      setStartTime(c.start_time?.slice(0, 5) ?? "");
-      setEndTime(c.end_time?.slice(0, 5) ?? "");
-      setTimezone(c.timezone ?? "");
-      setAllHours(c.all_hours);
+      setTimezone(sched.timezone ?? "");
+      setWindows(
+        sched.windows.map((w) => ({
+          id: w.window_id,
+          day: w.day_of_week,
+          start: minutesFromTimeString(w.start_time),
+          end: minutesFromTimeString(w.end_time),
+        }))
+      );
       setSharing(c.sharing);
       setStartImmediately(c.start_immediately);
       setDailyLeadStartLimit(c.daily_lead_start_limit === null ? "" : String(c.daily_lead_start_limit));
@@ -145,25 +151,48 @@ export default function MailCampaignDetailPage() {
   }
 
   async function handleSaveSchedule() {
+    // Client-side pre-check using the same overlap rule the backend
+    // enforces (see lib/schedule.ts's findOverlappingPairs) -- catches an
+    // obviously-broken schedule (possible via the manual time inputs,
+    // which don't live-clamp like dragging does) before a network round
+    // trip, but the backend's own rejection remains the real guarantee.
+    for (const day of [0, 1, 2, 3, 4, 5, 6]) {
+      const dayWindows = windows.filter((w) => w.day === day);
+      if (findOverlappingPairs(dayWindows).length > 0) {
+        setScheduleError(`Two send windows on the same day overlap -- fix that before saving.`);
+        return;
+      }
+    }
+
     setSavingSchedule(true);
-    setActionError(null);
+    setScheduleError(null);
     try {
-      const updated = await updateMailCampaign(campaignId, {
-        sending_days: sendingDays,
-        start_time: allHours ? null : startTime || null,
-        end_time: allHours ? null : endTime || null,
-        timezone: timezone || null,
-        all_hours: allHours,
-      });
-      setCampaign(updated);
-      // The backend forces literal 00:00/23:59 bounds when all_hours is true --
-      // reflect that back into the (disabled) time inputs so a reload doesn't
-      // show stale values.
-      setStartTime(updated.start_time?.slice(0, 5) ?? "");
-      setEndTime(updated.end_time?.slice(0, 5) ?? "");
+      // Preserve identity for windows the server already knows about --
+      // only a genuinely local, not-yet-saved window (see
+      // lib/schedule.ts's isLocalWindowId) omits window_id so the backend
+      // mints a real one for it. A dragged/resized EXISTING window keeps
+      // its real id here (only start/end changed, not `w.id`), so the
+      // backend correctly treats it as the same entity, not a delete+recreate.
+      const payload = windows.map((w) => ({
+        window_id: isLocalWindowId(w.id) ? undefined : w.id,
+        day_of_week: w.day,
+        start_time: timeStringFromMinutes(w.start),
+        end_time: timeStringFromMinutes(w.end),
+      }));
+      const updated = await setMailCampaignSchedule(campaignId, timezone, payload);
+      setWindows(
+        updated.windows.map((w) => ({
+          id: w.window_id,
+          day: w.day_of_week,
+          start: minutesFromTimeString(w.start_time),
+          end: minutesFromTimeString(w.end_time),
+        }))
+      );
       await refreshReview();
     } catch (err) {
-      setActionError(err instanceof ApiError ? `Couldn't save schedule (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+      setScheduleError(
+        err instanceof ApiError ? `Couldn't save schedule (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
     } finally {
       setSavingSchedule(false);
     }
@@ -400,18 +429,13 @@ export default function MailCampaignDetailPage() {
 
         <TabsPanel value="schedule">
           <MailCampaignScheduleTab
-            editable={editable}
-            sendingDays={sendingDays}
-            setSendingDays={setSendingDays}
-            allHours={allHours}
-            setAllHours={setAllHours}
-            startTime={startTime}
-            setStartTime={setStartTime}
-            endTime={endTime}
-            setEndTime={setEndTime}
             timezone={timezone}
             setTimezone={setTimezone}
-            savingSchedule={savingSchedule}
+            windows={windows}
+            setWindows={setWindows}
+            editable={editable}
+            saving={savingSchedule}
+            error={scheduleError}
             onSave={handleSaveSchedule}
           />
         </TabsPanel>

@@ -20,6 +20,7 @@ from app.dependencies import get_mail_campaign_service, get_mail_suppression_ser
 from app.models.mail import (
     MailCampaign,
     MailCampaignReview,
+    MailCampaignSchedule,
     MailCampaignSharing,
     MailContactSuppressionStatus,
     MailEnrollment,
@@ -36,6 +37,7 @@ from app.services.mail_campaign_service import (
     MailboxChannelNotUsableError,
     MailCampaignChannelsFrozenError,
     MailCampaignInvalidTransitionError,
+    MailCampaignLegacyScheduleLockedError,
     MailCampaignNotEditableError,
     MailCampaignNotFound,
     MailCampaignNotReadyError,
@@ -124,6 +126,8 @@ async def update_campaign(
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except MailCampaignNotEditableError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MailCampaignLegacyScheduleLockedError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except CrmContactListNotFound as e:
         raise HTTPException(status_code=400, detail=f"Selected CRM List not found: {e}")
@@ -237,6 +241,67 @@ async def set_campaign_channels(
     except MailboxChannelNotFoundError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except MailboxChannelNotUsableError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Schedule (real send windows, legacy-compatible) -----------------------
+
+
+class MailScheduleWindowRequest(BaseModel):
+    # Optional: omit/null for a genuinely new window; pass an EXISTING
+    # window's real id to preserve its identity across an edit (e.g. a
+    # drag-to-reschedule) rather than deleting and recreating it -- see
+    # MailSendWindow's docstring. An id that isn't one of this campaign's
+    # current windows, or that's repeated in the same request, is rejected.
+    window_id: str | None = None
+    day_of_week: int
+    start_time: str  # "HH:MM"
+    end_time: str
+
+
+class MailCampaignScheduleUpdateRequest(BaseModel):
+    timezone: str
+    windows: list[MailScheduleWindowRequest]
+
+
+@router.get("/campaigns/{mail_campaign_id}/schedule", response_model=MailCampaignSchedule)
+async def get_campaign_schedule(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+    """Read-only at any campaign status -- see
+    MailCampaignService.get_schedule()'s docstring. Returns real
+    MailSendWindow rows once any exist for this campaign, otherwise the
+    equivalent windows synthesized on the fly from the campaign's legacy
+    sending_days/start_time/end_time/all_hours fields (never persisted just
+    by reading them) -- see MailCampaignService._resolve_schedule()."""
+    try:
+        return await service.get_schedule(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.put("/campaigns/{mail_campaign_id}/schedule", response_model=MailCampaignSchedule)
+async def set_campaign_schedule(
+    mail_campaign_id: str,
+    payload: MailCampaignScheduleUpdateRequest,
+    service: MailCampaignService = Depends(get_mail_campaign_service),
+):
+    """Atomically replaces the campaign's full schedule (timezone + every
+    send window) -- DRAFT-only (409 on READY/ARCHIVED, matching every other
+    schedule/audience/sequence mutation; unlock the campaign first). See
+    MailCampaignService.set_schedule()'s docstring for the full validation
+    (day range, start<end, no same-weekday overlap, window_id ownership/
+    uniqueness) and for exactly how this is the one point a campaign's
+    schedule permanently switches from "legacy" to real "windows"."""
+    try:
+        return await service.set_schedule(
+            mail_campaign_id,
+            payload.timezone,
+            [(w.window_id, w.day_of_week, w.start_time, w.end_time) for w in payload.windows],
+        )
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignNotEditableError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MailScheduleValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 

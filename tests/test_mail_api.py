@@ -20,6 +20,7 @@ from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
+from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
 from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
 from app.repositories.mailbox_store import MemoryMailboxStore
@@ -61,7 +62,12 @@ def channel_store():
 
 
 @pytest.fixture
-def campaign_service(crm, mailbox_store, channel_store):
+def window_store():
+    return MemoryMailSendWindowStore()
+
+
+@pytest.fixture
+def campaign_service(crm, mailbox_store, channel_store, window_store):
     return MailCampaignService(
         campaign_store=MemoryMailCampaignStore(),
         step_store=MemoryMailSequenceStepStore(),
@@ -70,6 +76,7 @@ def campaign_service(crm, mailbox_store, channel_store):
         activity_log=ActivityLogService(MemoryActivityEventStore()),
         mailbox_store=mailbox_store,
         channel_store=channel_store,
+        window_store=window_store,
     )
 
 
@@ -589,6 +596,415 @@ def test_readiness_succeeds_with_one_connected_selected_mailbox(client, crm, mai
     ready = client.post(f"/mail/campaigns/{cid}/ready")
     assert ready.status_code == 200
     assert ready.json()["status"] == "ready"
+
+
+# --- Schedule (real send windows, legacy-compatible) -----------------------
+
+
+def test_get_schedule_starts_as_none_source(client):
+    created = client.post("/mail/campaigns", json={"name": "Schedule Empty"}).json()
+    resp = client.get(f"/mail/campaigns/{created['mail_campaign_id']}/schedule")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "none"
+    assert body["windows"] == []
+
+
+def test_get_schedule_synthesizes_legacy_windows(client):
+    created = client.post("/mail/campaigns", json={"name": "Legacy Schedule"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(
+        f"/mail/campaigns/{cid}",
+        json={"sending_days": [0, 1], "start_time": "09:00", "end_time": "17:00", "timezone": "America/Chicago"},
+    )
+    resp = client.get(f"/mail/campaigns/{cid}/schedule")
+    body = resp.json()
+    assert body["source"] == "legacy"
+    assert body["timezone"] == "America/Chicago"
+    assert {w["day_of_week"] for w in body["windows"]} == {0, 1}
+
+
+def test_put_schedule_creates_real_windows(client):
+    created = client.post("/mail/campaigns", json={"name": "Real Schedule"}).json()
+    cid = created["mail_campaign_id"]
+    resp = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "08:00", "end_time": "12:00"}]},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "windows"
+    assert len(body["windows"]) == 1
+
+    get_resp = client.get(f"/mail/campaigns/{cid}/schedule").json()
+    assert get_resp["source"] == "windows"
+    assert len(get_resp["windows"]) == 1
+
+
+def test_put_schedule_supports_multiple_windows_per_day_and_different_days(client):
+    created = client.post("/mail/campaigns", json={"name": "Complex Schedule"}).json()
+    cid = created["mail_campaign_id"]
+    resp = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [
+                {"day_of_week": 0, "start_time": "08:00", "end_time": "12:00"},
+                {"day_of_week": 0, "start_time": "14:00", "end_time": "18:00"},
+                {"day_of_week": 1, "start_time": "09:00", "end_time": "17:00"},
+            ],
+        },
+    )
+    assert resp.status_code == 200
+    assert len(resp.json()["windows"]) == 3
+
+
+def test_put_schedule_rejects_overlapping_windows(client):
+    created = client.post("/mail/campaigns", json={"name": "Overlap Schedule"}).json()
+    cid = created["mail_campaign_id"]
+    resp = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [
+                {"day_of_week": 0, "start_time": "08:00", "end_time": "13:00"},
+                {"day_of_week": 0, "start_time": "12:00", "end_time": "18:00"},
+            ],
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_put_schedule_rejects_invalid_timezone(client):
+    created = client.post("/mail/campaigns", json={"name": "Bad TZ Schedule"}).json()
+    resp = client.put(
+        f"/mail/campaigns/{created['mail_campaign_id']}/schedule",
+        json={"timezone": "Nowhere/Real", "windows": []},
+    )
+    assert resp.status_code == 400
+
+
+def test_put_schedule_rejects_zero_duration_window(client):
+    created = client.post("/mail/campaigns", json={"name": "Zero Duration Schedule"}).json()
+    resp = client.put(
+        f"/mail/campaigns/{created['mail_campaign_id']}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "09:00"}]},
+    )
+    assert resp.status_code == 400
+
+
+def test_draft_schedule_put_allowed(client):
+    created = client.post("/mail/campaigns", json={"name": "Draft Schedule"}).json()
+    resp = client.put(
+        f"/mail/campaigns/{created['mail_campaign_id']}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+    assert resp.status_code == 200
+
+
+def test_ready_schedule_get_allowed_put_rejected(client, crm, mailbox_store):
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("Ready Schedule Audience")
+        c1 = await crm.create_contact({"email": "ready-schedule@example.com"})
+        await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-ready-schedule"))
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+    created = client.post("/mail/campaigns", json={"name": "Ready Schedule"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(f"/mail/campaigns/{cid}", json={"source_list_id": list_id})
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S", "body": "B"})
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-ready-schedule"]})
+    client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+    ready = client.post(f"/mail/campaigns/{cid}/ready")
+    assert ready.status_code == 200
+
+    get_resp = client.get(f"/mail/campaigns/{cid}/schedule")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["source"] == "windows"
+
+    put_resp = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 1, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+    assert put_resp.status_code == 409
+
+
+def test_archived_schedule_get_allowed_put_rejected(client):
+    created = client.post("/mail/campaigns", json={"name": "Archived Schedule"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+    client.post(f"/mail/campaigns/{cid}/archive")
+
+    get_resp = client.get(f"/mail/campaigns/{cid}/schedule")
+    assert get_resp.status_code == 200
+    assert len(get_resp.json()["windows"]) == 1
+
+    put_resp = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 2, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+    assert put_resp.status_code == 409
+
+    # And the previous window set must be completely unaffected.
+    unchanged = client.get(f"/mail/campaigns/{cid}/schedule").json()
+    assert unchanged["windows"][0]["day_of_week"] == 0
+
+
+def test_readiness_fails_with_zero_windows_via_api(client, crm, mailbox_store):
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("Zero Windows Audience")
+        c1 = await crm.create_contact({"email": "zero-windows@example.com"})
+        await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-zero-windows"))
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+    created = client.post("/mail/campaigns", json={"name": "Zero Windows"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(f"/mail/campaigns/{cid}", json={"source_list_id": list_id})
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S", "body": "B"})
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-zero-windows"]})
+    client.put(f"/mail/campaigns/{cid}/schedule", json={"timezone": "UTC", "windows": []})
+
+    review = client.get(f"/mail/campaigns/{cid}/review").json()
+    assert "At least one send window is required." in review["readiness_warnings"]
+
+    ready = client.post(f"/mail/campaigns/{cid}/ready")
+    assert ready.status_code == 422
+
+
+def test_readiness_succeeds_with_new_windows_via_api(client, crm, mailbox_store):
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("New Windows Audience")
+        c1 = await crm.create_contact({"email": "new-windows@example.com"})
+        await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+        await mailbox_store.create(make_mailbox(mailbox_id="mbx-new-windows"))
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+    created = client.post("/mail/campaigns", json={"name": "New Windows"}).json()
+    cid = created["mail_campaign_id"]
+    client.patch(f"/mail/campaigns/{cid}", json={"source_list_id": list_id})
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S", "body": "B"})
+    client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": ["mbx-new-windows"]})
+    client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "08:00", "end_time": "12:00"}]},
+    )
+
+    review = client.get(f"/mail/campaigns/{cid}/review").json()
+    assert review["readiness_warnings"] == []
+
+    ready = client.post(f"/mail/campaigns/{cid}/ready")
+    assert ready.status_code == 200
+
+
+def test_daily_capacity_note_no_longer_implies_mailboxes_cant_be_configured(client):
+    """Regression for the stale wording fixed alongside this feature -- the
+    note must not claim mailboxes can't be configured (Channels exists
+    now), and must not fabricate a capacity number."""
+    created = client.post("/mail/campaigns", json={"name": "Capacity Note"}).json()
+    review = client.get(f"/mail/campaigns/{created['mail_campaign_id']}/review").json()
+    assert review["daily_capacity_estimate"] is None
+    assert "no mailbox is configured yet" not in review["daily_capacity_note"].lower()
+    assert "300" not in review["daily_capacity_note"]
+
+
+# --- Legacy schedule fields locked once in window mode ----------------------
+
+
+def test_legacy_schedule_patch_works_before_migration(client):
+    created = client.post("/mail/campaigns", json={"name": "Pre-Migration"}).json()
+    resp = client.patch(
+        f"/mail/campaigns/{created['mail_campaign_id']}",
+        json={"sending_days": [0, 1], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["sending_days"] == [0, 1]
+
+
+def test_legacy_schedule_patch_rejected_after_migration(client):
+    created = client.post("/mail/campaigns", json={"name": "Post-Migration"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+
+    resp = client.patch(f"/mail/campaigns/{cid}", json={"sending_days": [0, 1, 2]})
+    assert resp.status_code == 409
+    assert "schedule" in resp.json()["detail"].lower()
+
+
+def test_timezone_patch_rejected_after_migration(client):
+    created = client.post("/mail/campaigns", json={"name": "TZ Post-Migration"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+
+    resp = client.patch(f"/mail/campaigns/{cid}", json={"timezone": "America/Chicago"})
+    assert resp.status_code == 409
+
+
+def test_daily_lead_start_limit_patchable_after_migration(client):
+    created = client.post("/mail/campaigns", json={"name": "Limit Post-Migration"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    )
+
+    resp = client.patch(f"/mail/campaigns/{cid}", json={"daily_lead_start_limit": 10})
+    assert resp.status_code == 200
+    assert resp.json()["daily_lead_start_limit"] == 10
+
+
+# --- Stable window IDs across edits -----------------------------------------
+
+
+def test_stable_window_id_survives_an_edit(client):
+    created = client.post("/mail/campaigns", json={"name": "Stable ID API"}).json()
+    cid = created["mail_campaign_id"]
+    first = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    ).json()
+    original_id = first["windows"][0]["window_id"]
+
+    second = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [{"window_id": original_id, "day_of_week": 0, "start_time": "10:00", "end_time": "18:00"}],
+        },
+    ).json()
+    assert second["windows"][0]["window_id"] == original_id
+    assert second["windows"][0]["start_time"].startswith("10:00")
+
+
+def test_new_window_gets_a_new_id_alongside_a_preserved_one(client):
+    created = client.post("/mail/campaigns", json={"name": "New Plus Existing"}).json()
+    cid = created["mail_campaign_id"]
+    first = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "12:00"}]},
+    ).json()
+    original_id = first["windows"][0]["window_id"]
+
+    second = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [
+                {"window_id": original_id, "day_of_week": 0, "start_time": "09:00", "end_time": "12:00"},
+                {"day_of_week": 1, "start_time": "09:00", "end_time": "17:00"},
+            ],
+        },
+    ).json()
+    ids = {w["window_id"] for w in second["windows"]}
+    assert original_id in ids
+    assert len(ids) == 2
+
+
+def test_omitted_window_id_is_removed(client):
+    created = client.post("/mail/campaigns", json={"name": "Removed By Omission API"}).json()
+    cid = created["mail_campaign_id"]
+    client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [
+                {"day_of_week": 0, "start_time": "09:00", "end_time": "12:00"},
+                {"day_of_week": 1, "start_time": "09:00", "end_time": "17:00"},
+            ],
+        },
+    )
+    current = client.get(f"/mail/campaigns/{cid}/schedule").json()
+    keep = next(w for w in current["windows"] if w["day_of_week"] == 0)
+
+    shrunk = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [{"window_id": keep["window_id"], "day_of_week": 0, "start_time": "09:00", "end_time": "12:00"}],
+        },
+    ).json()
+    assert len(shrunk["windows"]) == 1
+    assert shrunk["windows"][0]["window_id"] == keep["window_id"]
+
+
+def test_foreign_window_id_rejected(client):
+    created_a = client.post("/mail/campaigns", json={"name": "Campaign A API"}).json()
+    created_b = client.post("/mail/campaigns", json={"name": "Campaign B API"}).json()
+    schedule_a = client.put(
+        f"/mail/campaigns/{created_a['mail_campaign_id']}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    ).json()
+    foreign_id = schedule_a["windows"][0]["window_id"]
+
+    resp = client.put(
+        f"/mail/campaigns/{created_b['mail_campaign_id']}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [{"window_id": foreign_id, "day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}],
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_made_up_window_id_rejected(client):
+    created = client.post("/mail/campaigns", json={"name": "Made Up ID API"}).json()
+    resp = client.put(
+        f"/mail/campaigns/{created['mail_campaign_id']}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [{"window_id": "not-a-real-id", "day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}],
+        },
+    )
+    assert resp.status_code == 400
+
+
+def test_duplicate_window_id_in_one_request_rejected(client):
+    created = client.post("/mail/campaigns", json={"name": "Duplicate ID API"}).json()
+    cid = created["mail_campaign_id"]
+    saved = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={"timezone": "UTC", "windows": [{"day_of_week": 0, "start_time": "09:00", "end_time": "17:00"}]},
+    ).json()
+    real_id = saved["windows"][0]["window_id"]
+
+    resp = client.put(
+        f"/mail/campaigns/{cid}/schedule",
+        json={
+            "timezone": "UTC",
+            "windows": [
+                {"window_id": real_id, "day_of_week": 0, "start_time": "09:00", "end_time": "12:00"},
+                {"window_id": real_id, "day_of_week": 1, "start_time": "13:00", "end_time": "17:00"},
+            ],
+        },
+    )
+    assert resp.status_code == 400
+
+    # Rejected atomically -- the previous schedule is untouched.
+    unchanged = client.get(f"/mail/campaigns/{cid}/schedule").json()
+    assert len(unchanged["windows"]) == 1
+    assert unchanged["windows"][0]["window_id"] == real_id
 
 
 # --- Suppression ----------------------------------------------------------

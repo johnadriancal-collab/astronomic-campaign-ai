@@ -38,20 +38,24 @@ from app.models.mail import (
     ALLOWED_MAIL_TEMPLATE_VARIABLES,
     MailCampaign,
     MailCampaignReview,
+    MailCampaignSchedule,
     MailCampaignSharing,
     MailCampaignStatus,
     MailEnrollment,
     MailEnrollmentStatus,
+    MailScheduleSource,
     MailScheduleValidationError,
+    MailSendWindow,
     MailSequenceStep,
     find_unknown_mail_template_variables,
-    validate_mail_schedule,
     validate_mail_timezone,
+    validate_send_windows,
 )
 from app.models.mailbox import Mailbox, MailboxStatus
 from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignNotFoundError, MailCampaignStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
+from app.repositories.mail_send_window_store import MailSendWindowStore
 from app.repositories.mail_sequence_step_store import (
     DuplicateMailSequenceStepNumberError,
     MailSequenceStepNotFoundError,
@@ -163,6 +167,28 @@ class MailboxChannelNotUsableError(Exception):
         )
 
 
+class MailCampaignLegacyScheduleLockedError(Exception):
+    """Raised by update_campaign() when a PATCH tries to touch a legacy
+    schedule field (see _LEGACY_SCHEDULE_PATCH_FIELDS) on a campaign that
+    already has explicit MailSendWindow rows. Once in that "window mode",
+    those legacy fields are permanently ignored for actual scheduling
+    purposes (see MailSendWindow's docstring in app/models/mail.py) -- so
+    silently accepting a PATCH that reads as "changing the schedule" while
+    doing nothing to the campaign's real, authoritative schedule would be
+    actively misleading. This rejects the WHOLE patch (nothing partially
+    applied) whenever any legacy schedule key is present, even if other,
+    unrelated keys (name, daily_lead_start_limit, ...) were also included --
+    callers should split such a request into two calls."""
+
+    def __init__(self, mail_campaign_id: str):
+        self.mail_campaign_id = mail_campaign_id
+        super().__init__(
+            f"MailCampaign {mail_campaign_id} already has an explicit schedule -- legacy schedule fields "
+            "(sending_days/start_time/end_time/all_hours/timezone) can no longer be changed via PATCH. "
+            "Use PUT /mail/campaigns/{id}/schedule instead."
+        )
+
+
 _CAMPAIGN_PATCH_FIELDS = {
     "name",
     "source_list_id",
@@ -175,6 +201,14 @@ _CAMPAIGN_PATCH_FIELDS = {
     "start_immediately",
     "daily_lead_start_limit",
 }
+
+# Once a campaign has ANY explicit MailSendWindow row, these fields are
+# frozen/inert (see MailSendWindow's docstring) -- update_campaign() refuses
+# to accept a PATCH touching any of them rather than silently no-op'ing.
+# `timezone` is included deliberately (not just the four schedule-shape
+# fields) so the entire schedule configuration has exactly one authoritative
+# write path once migrated -- see PUT .../schedule.
+_LEGACY_SCHEDULE_PATCH_FIELDS = {"sending_days", "start_time", "end_time", "all_hours", "timezone"}
 
 _ALL_DAY_SENTINEL_START = time(0, 0)
 _ALL_DAY_SENTINEL_END = time(23, 59)
@@ -191,8 +225,42 @@ def _parse_time_of_day(value: str) -> time:
         raise MailScheduleValidationError(f"'{value}' is not a valid time of day (expected HH:MM).") from e
 
 
+def _synthesize_legacy_windows(campaign: MailCampaign) -> list[MailSendWindow]:
+    """Turns a legacy campaign's `sending_days` + `start_time`/`end_time`
+    (already forced to the 00:00/23:59 all_hours sentinel by
+    update_campaign() when `all_hours=True` -- nothing special-cased here)
+    into the equivalent MailSendWindow-shaped objects, purely computed and
+    NEVER persisted -- see MailCampaignService._resolve_schedule()'s
+    docstring for the one place this is called from. `window_id` is a
+    clearly-synthetic, stable-within-one-resolution string (never a real
+    stored id -- these rows can't be individually targeted for edit/delete,
+    only ever read as a whole via GET .../schedule or readiness checks).
+
+    Empty (`[]`) whenever the legacy fields don't actually describe a usable
+    schedule (no days selected, or no start/end time set) -- callers treat
+    that the same as "no schedule configured at all"."""
+    if not campaign.sending_days or campaign.start_time is None or campaign.end_time is None:
+        return []
+    return [
+        MailSendWindow(
+            window_id=f"legacy-{campaign.mail_campaign_id}-{day}",
+            mail_campaign_id=campaign.mail_campaign_id,
+            day_of_week=day,
+            start_time=campaign.start_time,
+            end_time=campaign.end_time,
+            created_at=campaign.created_at,
+            updated_at=campaign.updated_at,
+        )
+        for day in sorted(set(campaign.sending_days))
+    ]
+
+
 def _compute_readiness_warnings(
-    campaign: MailCampaign, source_list_exists: bool, step_count: int, has_connected_mailbox: bool
+    campaign: MailCampaign,
+    source_list_exists: bool,
+    step_count: int,
+    has_connected_mailbox: bool,
+    resolved_windows: list[MailSendWindow],
 ) -> list[str]:
     """The single source of truth for 'why can't this campaign be marked
     ready' -- called identically by mark_ready() (which raises
@@ -200,14 +268,20 @@ def _compute_readiness_warnings(
     surfaces the same list as MailCampaignReview.readiness_warnings, so the
     UI can show real problems proactively before the user even attempts
     Mark Ready). Never duplicated -- both callers pass in whatever they've
-    already computed about the campaign's list/step/channel state, so this
-    never re-fetches anything itself.
+    already computed about the campaign's list/step/channel/schedule state,
+    so this never re-fetches anything itself.
 
     `has_connected_mailbox` must be True only if at least one of the
     campaign's SELECTED mailboxes is CURRENTLY MailboxStatus.CONNECTED --
     a selection that exists only historically (every selected mailbox now
     disconnected/needs_reauth, or none selected at all) is not enough, since
-    there would be no real sender to eventually deliver from."""
+    there would be no real sender to eventually deliver from.
+
+    `resolved_windows` is whatever MailCampaignService._resolve_schedule()
+    already returned for this campaign (real MailSendWindow rows if any
+    exist, else synthesized from legacy fields) -- this function never
+    cares which; a legacy campaign with a valid old-style schedule reads as
+    fully ready, identically to an equivalent explicit-windows campaign."""
     reasons: list[str] = []
 
     if not campaign.source_list_id:
@@ -221,10 +295,21 @@ def _compute_readiness_warnings(
     if not has_connected_mailbox:
         reasons.append("At least one connected sending inbox must be selected.")
 
-    try:
-        validate_mail_schedule(campaign.sending_days, campaign.start_time, campaign.end_time, campaign.timezone)
-    except MailScheduleValidationError as e:
-        reasons.append(str(e))
+    if not campaign.timezone:
+        reasons.append("A timezone is required.")
+    else:
+        try:
+            validate_mail_timezone(campaign.timezone)
+        except MailScheduleValidationError as e:
+            reasons.append(str(e))
+
+    if not resolved_windows:
+        reasons.append("At least one send window is required.")
+    else:
+        try:
+            validate_send_windows([(w.day_of_week, w.start_time, w.end_time) for w in resolved_windows])
+        except MailScheduleValidationError as e:
+            reasons.append(str(e))
 
     return reasons
 
@@ -239,10 +324,12 @@ class MailCampaignService:
         activity_log: ActivityLogService,
         mailbox_store: MailboxStore,
         channel_store: MailCampaignMailboxStore,
+        window_store: MailSendWindowStore,
     ):
         self.campaign_store = campaign_store
         self.step_store = step_store
         self.enrollment_store = enrollment_store
+        self.window_store = window_store
         self.crm_service = crm_service
         self.activity_log = activity_log
         self.mailbox_store = mailbox_store
@@ -310,12 +397,24 @@ class MailCampaignService:
         `all_hours=True` forces `start_time`/`end_time` to the literal
         full-day bounds regardless of whatever this same patch also
         requested for those two keys -- see MailCampaign's docstring for
-        why this needs no change to validate_mail_schedule() or mark_ready().
+        why this needs no change to mark_ready()'s readiness check.
+
+        Rejects the ENTIRE patch (MailCampaignLegacyScheduleLockedError,
+        nothing applied) if it touches any legacy schedule field
+        (_LEGACY_SCHEDULE_PATCH_FIELDS) on a campaign that already has
+        explicit MailSendWindow rows -- see that exception's docstring.
+        A brand-new campaign can never hit this (it cannot have window rows
+        before it exists), so campaign creation's own legacy-shaped payload
+        is never affected.
         """
         campaign = await self._require_campaign(mail_campaign_id)
         self._require_draft(campaign)
 
         allowed = {k: v for k, v in patch.items() if k in _CAMPAIGN_PATCH_FIELDS}
+
+        if _LEGACY_SCHEDULE_PATCH_FIELDS & allowed.keys():
+            if await self.window_store.list_for_campaign(mail_campaign_id):
+                raise MailCampaignLegacyScheduleLockedError(mail_campaign_id)
 
         # `patch` is a plain, untyped dict (matching CrmService.update_contact's
         # exact convention) -- model_copy(update=...) below does NOT re-validate
@@ -555,6 +654,158 @@ class MailCampaignService:
                 return True
         return False
 
+    # --- Schedule (real MailSendWindow rows, legacy-compatible) -----------
+
+    async def _resolve_schedule(
+        self, mail_campaign_id: str, campaign: MailCampaign
+    ) -> tuple[list[MailSendWindow], MailScheduleSource]:
+        """THE one place a campaign's real schedule is ever read from --
+        every other schedule-reading code path (get_schedule(),
+        _compute_readiness_warnings()'s callers) goes through this, so
+        nothing in this service can ever read a different, disagreeing
+        representation than anything else.
+
+        Real MailSendWindow rows are authoritative the instant even one
+        exists for this campaign -- at that point the legacy
+        sending_days/start_time/end_time/all_hours fields on the campaign
+        itself are permanently ignored for scheduling purposes (they are
+        NOT deleted or synced -- see MailSendWindow's module-level
+        docstring in app/models/mail.py). Only when NO window row exists at
+        all does this fall back to synthesizing the equivalent windows from
+        those legacy fields, purely computed, never persisted by the mere
+        act of reading them."""
+        windows = await self.window_store.list_for_campaign(mail_campaign_id)
+        if windows:
+            return windows, "windows"
+        synthesized = _synthesize_legacy_windows(campaign)
+        if synthesized:
+            return synthesized, "legacy"
+        return [], "none"
+
+    async def get_schedule(self, mail_campaign_id: str) -> MailCampaignSchedule:
+        """Read-only, callable at ANY campaign status (draft/ready/archived)
+        -- the Schedule tab must be able to keep displaying a READY or
+        ARCHIVED campaign's schedule, just without letting it be edited
+        (see set_schedule() for the DRAFT-only write gate)."""
+        campaign = await self._require_campaign(mail_campaign_id)
+        windows, source = await self._resolve_schedule(mail_campaign_id, campaign)
+        return MailCampaignSchedule(
+            mail_campaign_id=mail_campaign_id, timezone=campaign.timezone, source=source, windows=windows
+        )
+
+    async def set_schedule(
+        self, mail_campaign_id: str, timezone_name: str, windows: list[tuple[str | None, int, str, str]]
+    ) -> MailCampaignSchedule:
+        """Atomically replaces the campaign's ENTIRE schedule (timezone +
+        every send window) -- not an incremental add/remove, matching the
+        Schedule tab's single "Save" action. `windows` is
+        (window_id | None, day_of_week, "HH:MM" start, "HH:MM" end) tuples,
+        parsed and structurally validated (day range, start<end, no
+        same-day overlap; see validate_send_windows()) BEFORE any write
+        happens, so a rejected save leaves the previous schedule completely
+        untouched.
+
+        Window identity is STABLE across an ordinary edit, not
+        regenerated on every save: passing an existing window's real
+        `window_id` back (with a changed day/start/end, or unchanged)
+        keeps that same row's identity -- only entries with `window_id is
+        None` mint a fresh id, and any existing window whose id is simply
+        NOT present in this call's `windows` is removed (this is still a
+        full replace, just one that preserves identity for whatever
+        carries over). Rejects the request entirely, before any write, if:
+          - a `window_id` doesn't belong to this campaign at all (could be
+            another campaign's id, or simply made up) -- prevents ever
+            "adopting" or overwriting a window from elsewhere
+          - the same non-null `window_id` appears twice in one request
+        Both raise MailScheduleValidationError, same as every other
+        structural problem here -- there's no meaningful difference
+        between "this row doesn't exist" and "this row's shape is
+        invalid" from the caller's perspective, both are a bad request.
+
+        DRAFT-only -- unlike Channels, a Ready campaign's schedule stays
+        locked behind the existing Unlock boundary (see
+        MailCampaignNotEditableError): schedule changes affect actual
+        campaign execution semantics once a sending engine exists, whereas
+        replacing a disconnected Channel sender does not. ARCHIVED is
+        rejected by the same _require_draft() call -- there is no separate
+        "frozen" exception type here (unlike Channels' dedicated
+        MailCampaignChannelsFrozenError) since DRAFT-only already covers
+        both READY and ARCHIVED identically, matching how every other
+        DRAFT-only mutation (update_campaign, add_step, ...) already
+        behaves.
+
+        This is the ONE place a campaign's schedule transitions from
+        "legacy" to "windows" -- the instant this succeeds, the campaign
+        has real MailSendWindow rows and _resolve_schedule() will return
+        them (source="windows") for every future read, permanently, even
+        though the old sending_days/start_time/end_time/all_hours fields
+        are left exactly as they were (never zeroed out, never synced) --
+        see MailSendWindow's module docstring in app/models/mail.py. From
+        that point on, update_campaign() refuses any patch touching those
+        legacy fields (MailCampaignLegacyScheduleLockedError) -- this
+        method is the campaign's one remaining authoritative schedule
+        write path."""
+        campaign = await self._require_campaign(mail_campaign_id)
+        self._require_draft(campaign)
+
+        validate_mail_timezone(timezone_name)
+
+        existing_by_id = {w.window_id: w for w in await self.window_store.list_for_campaign(mail_campaign_id)}
+
+        parsed: list[tuple[str | None, int, time, time]] = []
+        seen_ids: set[str] = set()
+        for window_id, day, start_str, end_str in windows:
+            if window_id is not None:
+                if window_id not in existing_by_id:
+                    raise MailScheduleValidationError(
+                        f"'{window_id}' is not an existing send window on this campaign."
+                    )
+                if window_id in seen_ids:
+                    raise MailScheduleValidationError(f"Duplicate window_id '{window_id}' in request.")
+                seen_ids.add(window_id)
+            parsed.append((window_id, day, _parse_time_of_day(start_str), _parse_time_of_day(end_str)))
+
+        validate_send_windows([(day, start, end) for _window_id, day, start, end in parsed])
+
+        now = datetime.now(timezone.utc)
+        new_windows: list[MailSendWindow] = []
+        for window_id, day, start, end in parsed:
+            if window_id is not None:
+                existing = existing_by_id[window_id]
+                new_windows.append(
+                    existing.model_copy(update={"day_of_week": day, "start_time": start, "end_time": end, "updated_at": now})
+                )
+            else:
+                new_windows.append(
+                    MailSendWindow(
+                        window_id=str(uuid.uuid4()),
+                        mail_campaign_id=mail_campaign_id,
+                        day_of_week=day,
+                        start_time=start,
+                        end_time=end,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+        await self.window_store.replace_for_campaign(mail_campaign_id, new_windows)
+
+        updated_campaign = campaign.model_copy(update={"timezone": timezone_name, "updated_at": now})
+        await self.campaign_store.save(updated_campaign)
+
+        await self.activity_log.record(
+            event_type="mail_campaign.schedule_updated",
+            category=ActivityCategory.MAIL,
+            source=ActivitySource.MAIL_SYSTEM,
+            summary=f'Mail Campaign "{updated_campaign.name}" schedule was updated ({len(new_windows)} send window{"s" if len(new_windows) != 1 else ""}).',
+            entity_type="mail_campaign",
+            entity_id=mail_campaign_id,
+            entity_name=updated_campaign.name,
+        )
+
+        return MailCampaignSchedule(
+            mail_campaign_id=mail_campaign_id, timezone=timezone_name, source="windows", windows=new_windows
+        )
+
     # --- State transitions -------------------------------------------------
 
     async def mark_ready(self, mail_campaign_id: str, suppressed_emails: set[str]) -> MailCampaign:
@@ -620,8 +871,11 @@ class MailCampaignService:
 
         steps = await self.step_store.list_for_campaign(mail_campaign_id)
         has_connected_mailbox = await self._has_connected_selected_mailbox(mail_campaign_id)
+        resolved_windows, _schedule_source = await self._resolve_schedule(mail_campaign_id, campaign)
 
-        reasons = _compute_readiness_warnings(campaign, source_list_exists, len(steps), has_connected_mailbox)
+        reasons = _compute_readiness_warnings(
+            campaign, source_list_exists, len(steps), has_connected_mailbox, resolved_windows
+        )
         if reasons:
             raise MailCampaignNotReadyError(mail_campaign_id, reasons)
 
@@ -770,6 +1024,7 @@ class MailCampaignService:
         eligible = total_contacts - missing_email - suppressed
         step_count = len(steps)
         has_connected_mailbox = await self._has_connected_selected_mailbox(mail_campaign_id)
+        resolved_windows, _schedule_source = await self._resolve_schedule(mail_campaign_id, campaign)
 
         return MailCampaignReview(
             mail_campaign_id=mail_campaign_id,
@@ -784,10 +1039,10 @@ class MailCampaignService:
             theoretical_total_sends=eligible * step_count,
             daily_capacity_estimate=None,
             daily_capacity_note=(
-                "Add mailbox daily-send limits (Phase 2) to estimate real daily capacity -- "
-                "no mailbox is configured yet."
+                "Daily sending capacity isn't available yet -- Astronomic Mail has no per-mailbox "
+                "send-volume limits or a sending engine yet, regardless of how many inboxes are connected."
             ),
             readiness_warnings=_compute_readiness_warnings(
-                campaign, source_list_exists, step_count, has_connected_mailbox
+                campaign, source_list_exists, step_count, has_connected_mailbox, resolved_windows
             ),
         )

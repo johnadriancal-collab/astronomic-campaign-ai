@@ -16,6 +16,7 @@ from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
+from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
 from app.repositories.mail_sequence_step_store import (
     DuplicateMailSequenceStepNumberError,
     MemoryMailSequenceStepStore,
@@ -29,6 +30,7 @@ from app.services.mail_campaign_service import (
     MailboxChannelNotUsableError,
     MailCampaignChannelsFrozenError,
     MailCampaignInvalidTransitionError,
+    MailCampaignLegacyScheduleLockedError,
     MailCampaignNotEditableError,
     MailCampaignNotFound,
     MailCampaignNotReadyError,
@@ -59,7 +61,12 @@ def channel_store():
 
 
 @pytest.fixture
-def service(crm, activity_log, mailbox_store, channel_store):
+def window_store():
+    return MemoryMailSendWindowStore()
+
+
+@pytest.fixture
+def service(crm, activity_log, mailbox_store, channel_store, window_store):
     return MailCampaignService(
         campaign_store=MemoryMailCampaignStore(),
         step_store=MemoryMailSequenceStepStore(),
@@ -68,6 +75,7 @@ def service(crm, activity_log, mailbox_store, channel_store):
         activity_log=activity_log,
         mailbox_store=mailbox_store,
         channel_store=channel_store,
+        window_store=window_store,
     )
 
 
@@ -668,8 +676,9 @@ async def test_review_readiness_warnings_lists_every_real_problem_on_an_empty_dr
     assert "No audience (CRM List) has been selected." in review.readiness_warnings
     assert "At least one sequence step is required." in review.readiness_warnings
     assert "At least one connected sending inbox must be selected." in review.readiness_warnings
-    assert any("sending day" in w for w in review.readiness_warnings)
-    assert len(review.readiness_warnings) == 4
+    assert "A timezone is required." in review.readiness_warnings
+    assert "At least one send window is required." in review.readiness_warnings
+    assert len(review.readiness_warnings) == 5
 
 
 async def test_review_readiness_warnings_is_empty_when_fully_configured(service, crm):
@@ -904,3 +913,526 @@ async def test_readiness_succeeds_with_one_connected_selected_mailbox(service, c
     assert review.readiness_warnings == []
     ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
     assert ready.status == MailCampaignStatus.READY
+
+
+# --- Schedule (real send windows, legacy-compatible) -----------------------
+
+
+async def test_schedule_starts_as_none_source_with_no_windows(service):
+    campaign = await service.create_campaign("Fresh")
+    schedule = await service.get_schedule(campaign.mail_campaign_id)
+    assert schedule.source == "none"
+    assert schedule.windows == []
+    assert schedule.timezone is None
+
+
+async def test_legacy_schedule_synthesizes_correct_windows(service):
+    """A campaign edited only through the OLD generic PATCH (sending_days/
+    start_time/end_time/timezone) must read back as the equivalent windows,
+    computed on the fly, without ever saving through the new Schedule API."""
+    campaign = await service.create_campaign("Legacy")
+    await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"sending_days": [0, 2, 4], "start_time": "09:00", "end_time": "17:00", "timezone": "America/Chicago"},
+    )
+    schedule = await service.get_schedule(campaign.mail_campaign_id)
+    assert schedule.source == "legacy"
+    assert schedule.timezone == "America/Chicago"
+    assert {w.day_of_week for w in schedule.windows} == {0, 2, 4}
+    assert all(w.start_time.isoformat() == "09:00:00" for w in schedule.windows)
+    assert all(w.end_time.isoformat() == "17:00:00" for w in schedule.windows)
+
+
+async def test_legacy_all_hours_synthesizes_the_00_00_2359_sentinel(service):
+    campaign = await service.create_campaign("Legacy All Hours")
+    await service.update_campaign(
+        campaign.mail_campaign_id, {"sending_days": [0, 1], "all_hours": True, "timezone": "UTC"}
+    )
+    schedule = await service.get_schedule(campaign.mail_campaign_id)
+    assert schedule.source == "legacy"
+    for w in schedule.windows:
+        assert w.start_time.isoformat() == "00:00:00"
+        assert w.end_time.isoformat() == "23:59:00"
+
+
+async def test_no_legacy_fields_and_no_windows_resolves_to_none_source(service, crm):
+    """A campaign with SOME legacy fields set but not a usable schedule
+    (e.g. only a source_list_id, no schedule fields at all) must not
+    fabricate a schedule -- source stays "none", not "legacy"."""
+    contact_list = await crm.create_contact_list("Audience")
+    campaign = await service.create_campaign("Partial")
+    await service.update_campaign(campaign.mail_campaign_id, {"source_list_id": contact_list.list_id})
+    schedule = await service.get_schedule(campaign.mail_campaign_id)
+    assert schedule.source == "none"
+    assert schedule.windows == []
+
+
+async def test_new_explicit_windows_are_authoritative_over_legacy_fields(service):
+    """The core compatibility guarantee: once real MailSendWindow rows
+    exist, the legacy sending_days/start_time/end_time (still present and
+    UNCHANGED on the campaign row) are permanently ignored."""
+    campaign = await service.create_campaign("Migrating")
+    await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"sending_days": [0, 1, 2], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    legacy_schedule = await service.get_schedule(campaign.mail_campaign_id)
+    assert legacy_schedule.source == "legacy"
+
+    await service.set_schedule(
+        campaign.mail_campaign_id, "America/New_York", [(None, 3, "10:00", "14:00")]
+    )
+
+    resolved = await service.get_schedule(campaign.mail_campaign_id)
+    assert resolved.source == "windows"
+    assert resolved.timezone == "America/New_York"
+    assert [w.day_of_week for w in resolved.windows] == [3]
+
+    # And the legacy campaign fields are untouched, not zeroed/synced.
+    reloaded_campaign = await service.get_campaign(campaign.mail_campaign_id)
+    assert reloaded_campaign.sending_days == [0, 1, 2]
+    assert reloaded_campaign.start_time.isoformat() == "09:00:00"
+
+
+async def test_first_new_format_save_transitions_cleanly_from_legacy(service):
+    campaign = await service.create_campaign("Transition")
+    await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"sending_days": [0], "start_time": "08:00", "end_time": "12:00", "timezone": "UTC"},
+    )
+    before = await service.get_schedule(campaign.mail_campaign_id)
+    assert before.source == "legacy"
+
+    saved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00")])
+    assert saved.source == "windows"
+
+    after = await service.get_schedule(campaign.mail_campaign_id)
+    assert after.source == "windows"
+    assert len(after.windows) == 1
+
+
+async def test_different_times_on_different_weekdays(service):
+    campaign = await service.create_campaign("Varying Hours")
+    await service.set_schedule(
+        campaign.mail_campaign_id,
+        "UTC",
+        [(None, 0, "08:00", "12:00"), (None, 1, "09:00", "17:00"), (None, 4, "06:00", "10:00")],
+    )
+    schedule = await service.get_schedule(campaign.mail_campaign_id)
+    by_day = {w.day_of_week: (w.start_time.isoformat(), w.end_time.isoformat()) for w in schedule.windows}
+    assert by_day[0] == ("08:00:00", "12:00:00")
+    assert by_day[1] == ("09:00:00", "17:00:00")
+    assert by_day[4] == ("06:00:00", "10:00:00")
+
+
+async def test_multiple_windows_on_one_weekday(service):
+    campaign = await service.create_campaign("Split Monday")
+    await service.set_schedule(
+        campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00"), (None, 0, "14:00", "18:00")]
+    )
+    schedule = await service.get_schedule(campaign.mail_campaign_id)
+    assert len(schedule.windows) == 2
+    assert all(w.day_of_week == 0 for w in schedule.windows)
+
+
+async def test_adding_and_removing_windows_via_resave(service):
+    campaign = await service.create_campaign("Add Remove")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00")])
+    await service.set_schedule(
+        campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00"), (None, 0, "14:00", "18:00"), (None, 2, "09:00", "10:00")]
+    )
+    grown = await service.get_schedule(campaign.mail_campaign_id)
+    assert len(grown.windows) == 3
+
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00")])
+    shrunk = await service.get_schedule(campaign.mail_campaign_id)
+    assert len(shrunk.windows) == 1
+
+
+async def test_set_schedule_empty_windows_is_a_valid_intentional_save(service):
+    """Saving zero windows is allowed mid-draft (an intentional all-days-off
+    schedule) -- only readiness requires at least one."""
+    campaign = await service.create_campaign("All Off")
+    result = await service.set_schedule(campaign.mail_campaign_id, "UTC", [])
+    assert result.windows == []
+    assert result.source == "windows"
+
+
+async def test_set_schedule_rejects_overlapping_windows_same_day(service):
+    campaign = await service.create_campaign("Overlap")
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(
+            campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "13:00"), (None, 0, "12:00", "18:00")]
+        )
+
+
+async def test_set_schedule_allows_back_to_back_touching_windows(service):
+    campaign = await service.create_campaign("Back To Back")
+    result = await service.set_schedule(
+        campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00"), (None, 0, "12:00", "18:00")]
+    )
+    assert len(result.windows) == 2
+
+
+async def test_set_schedule_rejects_overlap_across_more_than_two_windows(service):
+    campaign = await service.create_campaign("Triple Overlap")
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(
+            campaign.mail_campaign_id,
+            "UTC",
+            [(None, 1, "08:00", "10:00"), (None, 1, "09:30", "11:00"), (None, 1, "12:00", "13:00")],
+        )
+
+
+async def test_set_schedule_overlap_on_one_day_does_not_block_other_days(service):
+    """Overlap validation is per-weekday -- windows on DIFFERENT days must
+    never be compared against each other for overlap."""
+    result_campaign = await service.create_campaign("Independent Days")
+    result = await service.set_schedule(
+        result_campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "20:00"), (None, 1, "08:00", "20:00")]
+    )
+    assert len(result.windows) == 2
+
+
+async def test_set_schedule_rejects_zero_duration_window(service):
+    campaign = await service.create_campaign("Zero Duration")
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "09:00")])
+
+
+async def test_set_schedule_rejects_negative_duration_window(service):
+    campaign = await service.create_campaign("Negative Duration")
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "17:00", "09:00")])
+
+
+async def test_set_schedule_rejects_invalid_day_of_week(service):
+    campaign = await service.create_campaign("Bad Day")
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 7, "09:00", "10:00")])
+
+
+async def test_set_schedule_accepts_full_day_boundary_00_00_to_23_59(service):
+    campaign = await service.create_campaign("Full Day")
+    result = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "00:00", "23:59")])
+    assert result.windows[0].start_time.isoformat() == "00:00:00"
+    assert result.windows[0].end_time.isoformat() == "23:59:00"
+
+
+async def test_set_schedule_rejects_invalid_timezone(service):
+    campaign = await service.create_campaign("Bad TZ")
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign.mail_campaign_id, "Nowhere/Real", [(None, 0, "09:00", "10:00")])
+
+
+async def test_set_schedule_a_rejected_save_leaves_the_previous_schedule_untouched(service):
+    campaign = await service.create_campaign("Rejected Save")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00")])
+
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "13:00", "10:00")])  # invalid
+
+    unchanged = await service.get_schedule(campaign.mail_campaign_id)
+    assert len(unchanged.windows) == 1
+    assert unchanged.windows[0].start_time.isoformat() == "08:00:00"
+
+
+async def test_set_schedule_rejected_on_ready_campaign(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    with pytest.raises(MailCampaignNotEditableError):
+        await service.set_schedule(ready.mail_campaign_id, "UTC", [(None, 0, "09:00", "10:00")])
+
+
+async def test_get_schedule_still_works_on_ready_campaign(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    schedule = await service.get_schedule(ready.mail_campaign_id)
+    assert schedule.source == "legacy"  # _make_valid_schedule_campaign never saved through set_schedule()
+
+
+async def test_set_schedule_rejected_on_archived_campaign(service):
+    campaign = await service.create_campaign("Archive Schedule")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "10:00")])
+    archived = await service.archive_campaign(campaign.mail_campaign_id)
+    with pytest.raises(MailCampaignNotEditableError):
+        await service.set_schedule(archived.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+
+
+async def test_get_schedule_still_works_on_archived_campaign(service):
+    campaign = await service.create_campaign("Archive Schedule View")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "10:00")])
+    archived = await service.archive_campaign(campaign.mail_campaign_id)
+    schedule = await service.get_schedule(archived.mail_campaign_id)
+    assert schedule.source == "windows"
+    assert len(schedule.windows) == 1
+
+
+# --- Readiness with the new schedule representation ------------------------
+
+
+async def test_readiness_fails_with_zero_windows(service, crm):
+    contact_list = await crm.create_contact_list("Audience")
+    c1 = await crm.create_contact({"email": "a@example.com"})
+    await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+    mailbox = _make_mailbox("mbx-a")
+
+    campaign = await service.create_campaign("No Windows")
+    await service.update_campaign(campaign.mail_campaign_id, {"source_list_id": contact_list.list_id})
+    await service.add_step(campaign.mail_campaign_id, "S", "B")
+    await service.mailbox_store.create(mailbox)
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-a"])
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [])  # explicit, intentional zero windows
+
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+    assert "At least one send window is required." in review.readiness_warnings
+    with pytest.raises(MailCampaignNotReadyError):
+        await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+
+async def test_readiness_succeeds_with_legacy_schedule(service, crm):
+    """A pre-existing campaign that predates the Schedule tab rewrite (never
+    saved through set_schedule()) must still be able to reach Ready via its
+    legacy fields, synthesized into windows for readiness purposes."""
+    contact_list = await crm.create_contact_list("Audience")
+    c1 = await crm.create_contact({"email": "a@example.com"})
+    await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+    mailbox = _make_mailbox("mbx-legacy")
+
+    campaign = await service.create_campaign("Legacy Ready")
+    await service.update_campaign(
+        campaign.mail_campaign_id,
+        {
+            "source_list_id": contact_list.list_id,
+            "sending_days": [0, 1, 2, 3, 4],
+            "start_time": "09:00",
+            "end_time": "17:00",
+            "timezone": "America/Chicago",
+        },
+    )
+    await service.add_step(campaign.mail_campaign_id, "S", "B")
+    await service.mailbox_store.create(mailbox)
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-legacy"])
+
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+    assert review.readiness_warnings == []
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    assert ready.status == MailCampaignStatus.READY
+
+
+async def test_readiness_succeeds_with_new_explicit_windows(service, crm):
+    contact_list = await crm.create_contact_list("Audience")
+    c1 = await crm.create_contact({"email": "a@example.com"})
+    await crm.bulk_add_to_list(contact_list.list_id, [c1.crm_contact_id])
+    mailbox = _make_mailbox("mbx-new")
+
+    campaign = await service.create_campaign("New Windows Ready")
+    await service.update_campaign(campaign.mail_campaign_id, {"source_list_id": contact_list.list_id})
+    await service.add_step(campaign.mail_campaign_id, "S", "B")
+    await service.mailbox_store.create(mailbox)
+    await service.set_channel_mailboxes(campaign.mail_campaign_id, ["mbx-new"])
+    await service.set_schedule(
+        campaign.mail_campaign_id, "UTC", [(None, 0, "08:00", "12:00"), (None, 2, "09:00", "17:00")]
+    )
+
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+    assert review.readiness_warnings == []
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    assert ready.status == MailCampaignStatus.READY
+
+
+# --- Legacy schedule fields locked once in window mode ----------------------
+
+
+async def test_legacy_schedule_patch_works_before_any_window_exists(service):
+    """Backward compatibility: a campaign that has never been saved through
+    the new Schedule API can still be configured entirely via the old
+    generic PATCH."""
+    campaign = await service.create_campaign("Still Legacy")
+    updated = await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"sending_days": [0, 1], "start_time": "09:00", "end_time": "17:00", "timezone": "UTC"},
+    )
+    assert updated.sending_days == [0, 1]
+    assert updated.timezone == "UTC"
+
+
+async def test_legacy_schedule_patch_rejected_once_windows_exist(service):
+    campaign = await service.create_campaign("Migrated")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+
+    with pytest.raises(MailCampaignLegacyScheduleLockedError):
+        await service.update_campaign(campaign.mail_campaign_id, {"sending_days": [0, 1, 2]})
+    with pytest.raises(MailCampaignLegacyScheduleLockedError):
+        await service.update_campaign(campaign.mail_campaign_id, {"start_time": "10:00"})
+    with pytest.raises(MailCampaignLegacyScheduleLockedError):
+        await service.update_campaign(campaign.mail_campaign_id, {"end_time": "18:00"})
+    with pytest.raises(MailCampaignLegacyScheduleLockedError):
+        await service.update_campaign(campaign.mail_campaign_id, {"all_hours": True})
+
+
+async def test_timezone_patch_rejected_once_windows_exist(service):
+    """timezone is deliberately included in the lock -- the entire schedule
+    configuration has exactly one authoritative write path once migrated."""
+    campaign = await service.create_campaign("Migrated TZ")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+
+    with pytest.raises(MailCampaignLegacyScheduleLockedError):
+        await service.update_campaign(campaign.mail_campaign_id, {"timezone": "America/Chicago"})
+
+    # And the campaign's real timezone (set via set_schedule) is untouched.
+    reloaded = await service.get_campaign(campaign.mail_campaign_id)
+    assert reloaded.timezone == "UTC"
+
+
+async def test_legacy_patch_rejects_the_whole_request_not_just_the_schedule_part(service):
+    """Mixing a legacy schedule field with an unrelated field (name) in one
+    PATCH must reject the ENTIRE call -- nothing partially applied."""
+    campaign = await service.create_campaign("Mixed Patch")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+
+    with pytest.raises(MailCampaignLegacyScheduleLockedError):
+        await service.update_campaign(campaign.mail_campaign_id, {"name": "New Name", "start_time": "10:00"})
+
+    unchanged = await service.get_campaign(campaign.mail_campaign_id)
+    assert unchanged.name == "Mixed Patch"
+
+
+async def test_daily_lead_start_limit_still_patchable_after_migration(service):
+    """daily_lead_start_limit is explicitly NOT part of the schedule lock --
+    it must keep working normally on a window-mode campaign."""
+    campaign = await service.create_campaign("Independent Setting")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"daily_lead_start_limit": 25})
+    assert updated.daily_lead_start_limit == 25
+
+
+async def test_name_and_sharing_still_patchable_after_migration(service):
+    """Confirms the lock is scoped to schedule fields only, not a blanket
+    freeze of the whole campaign."""
+    campaign = await service.create_campaign("Still Editable")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"name": "Renamed", "sharing": "only_me"})
+    assert updated.name == "Renamed"
+    assert updated.sharing.value == "only_me"
+
+
+async def test_campaign_creation_with_legacy_schedule_shape_is_unaffected(service, crm):
+    """A brand-new campaign can never already have window rows, so its
+    initial legacy-shaped configuration (as sent by the Create Campaign
+    modal) must never be rejected by the new lock."""
+    campaign = await service.create_campaign("New Campaign")
+    updated = await service.update_campaign(
+        campaign.mail_campaign_id,
+        {"sending_days": [0, 1, 2, 3, 4], "start_time": "08:00", "end_time": "18:00", "timezone": "America/Chicago"},
+    )
+    assert updated.sending_days == [0, 1, 2, 3, 4]
+
+
+# --- Stable window IDs across edits -----------------------------------------
+
+
+async def test_editing_an_existing_window_preserves_its_id(service):
+    campaign = await service.create_campaign("Stable ID")
+    saved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+    original_id = saved.windows[0].window_id
+
+    moved = await service.set_schedule(
+        campaign.mail_campaign_id, "UTC", [(original_id, 0, "10:00", "18:00")]
+    )
+    assert len(moved.windows) == 1
+    assert moved.windows[0].window_id == original_id
+    assert moved.windows[0].start_time.isoformat() == "10:00:00"
+
+
+async def test_editing_an_existing_window_preserves_created_at(service):
+    campaign = await service.create_campaign("Preserve Created At")
+    saved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+    original_id = saved.windows[0].window_id
+    original_created_at = saved.windows[0].created_at
+
+    moved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(original_id, 1, "10:00", "18:00")])
+    assert moved.windows[0].created_at == original_created_at
+    assert moved.windows[0].updated_at >= original_created_at
+
+
+async def test_unchanged_window_resubmitted_with_its_id_keeps_that_id(service):
+    campaign = await service.create_campaign("Unchanged Resave")
+    saved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+    original_id = saved.windows[0].window_id
+
+    resaved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(original_id, 0, "09:00", "17:00")])
+    assert resaved.windows[0].window_id == original_id
+
+
+async def test_new_window_added_alongside_existing_one_gets_a_new_id(service):
+    campaign = await service.create_campaign("Add One More")
+    saved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "12:00")])
+    original_id = saved.windows[0].window_id
+
+    grown = await service.set_schedule(
+        campaign.mail_campaign_id, "UTC", [(original_id, 0, "09:00", "12:00"), (None, 1, "09:00", "17:00")]
+    )
+    ids = {w.window_id for w in grown.windows}
+    assert original_id in ids
+    assert len(ids) == 2  # the new window got a genuinely different id
+
+
+async def test_omitting_a_window_id_removes_that_window(service):
+    campaign = await service.create_campaign("Remove By Omission")
+    saved = await service.set_schedule(
+        campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "12:00"), (None, 1, "09:00", "17:00")]
+    )
+    keep_id = saved.windows[0].window_id if saved.windows[0].day_of_week == 0 else saved.windows[1].window_id
+
+    shrunk = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(keep_id, 0, "09:00", "12:00")])
+    assert len(shrunk.windows) == 1
+    assert shrunk.windows[0].window_id == keep_id
+
+
+async def test_set_schedule_rejects_a_window_id_belonging_to_another_campaign(service):
+    campaign_a = await service.create_campaign("Campaign A")
+    campaign_b = await service.create_campaign("Campaign B")
+    saved_a = await service.set_schedule(campaign_a.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+    foreign_id = saved_a.windows[0].window_id
+
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign_b.mail_campaign_id, "UTC", [(foreign_id, 0, "09:00", "17:00")])
+
+    # Campaign A's own window must be completely unaffected by the rejected
+    # attempt against campaign B.
+    unaffected = await service.get_schedule(campaign_a.mail_campaign_id)
+    assert unaffected.windows[0].window_id == foreign_id
+
+
+async def test_set_schedule_rejects_a_made_up_window_id(service):
+    campaign = await service.create_campaign("Made Up ID")
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign.mail_campaign_id, "UTC", [("does-not-exist", 0, "09:00", "17:00")])
+
+
+async def test_set_schedule_rejects_a_duplicate_window_id_in_one_request(service):
+    campaign = await service.create_campaign("Duplicate ID")
+    saved = await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+    real_id = saved.windows[0].window_id
+
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(
+            campaign.mail_campaign_id, "UTC", [(real_id, 0, "09:00", "12:00"), (real_id, 1, "13:00", "17:00")]
+        )
+
+
+async def test_rejected_window_id_save_leaves_the_previous_schedule_untouched(service):
+    """Atomicity still holds when the rejection is an id-ownership/
+    duplicate problem, not just a time/overlap problem."""
+    campaign = await service.create_campaign("Atomic ID Rejection")
+    await service.set_schedule(campaign.mail_campaign_id, "UTC", [(None, 0, "09:00", "17:00")])
+
+    with pytest.raises(MailScheduleValidationError):
+        await service.set_schedule(campaign.mail_campaign_id, "UTC", [("bogus-id", 1, "09:00", "17:00")])
+
+    unchanged = await service.get_schedule(campaign.mail_campaign_id)
+    assert len(unchanged.windows) == 1
+    assert unchanged.windows[0].day_of_week == 0
