@@ -146,6 +146,33 @@ def _parse_time_of_day(value: str) -> time:
         raise MailScheduleValidationError(f"'{value}' is not a valid time of day (expected HH:MM).") from e
 
 
+def _compute_readiness_warnings(campaign: MailCampaign, source_list_exists: bool, step_count: int) -> list[str]:
+    """The single source of truth for 'why can't this campaign be marked
+    ready' -- called identically by mark_ready() (which raises
+    MailCampaignNotReadyError if this is non-empty) and get_review() (which
+    surfaces the same list as MailCampaignReview.readiness_warnings, so the
+    UI can show real problems proactively before the user even attempts
+    Mark Ready). Never duplicated -- both callers pass in whatever they've
+    already computed about the campaign's list/step state, so this never
+    re-fetches anything itself."""
+    reasons: list[str] = []
+
+    if not campaign.source_list_id:
+        reasons.append("No audience (CRM List) has been selected.")
+    elif not source_list_exists:
+        reasons.append("The selected CRM List no longer exists.")
+
+    if step_count == 0:
+        reasons.append("At least one sequence step is required.")
+
+    try:
+        validate_mail_schedule(campaign.sending_days, campaign.start_time, campaign.end_time, campaign.timezone)
+    except MailScheduleValidationError as e:
+        reasons.append(str(e))
+
+    return reasons
+
+
 class MailCampaignService:
     def __init__(
         self,
@@ -447,30 +474,21 @@ class MailCampaignService:
         if campaign.status != MailCampaignStatus.DRAFT:
             raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "mark_ready")
 
-        reasons: list[str] = []
-
-        if not campaign.source_list_id:
-            reasons.append("No audience (CRM List) has been selected.")
-            contacts = []
-        else:
+        source_list_exists = False
+        contacts: list[Any] = []
+        if campaign.source_list_id:
             try:
                 await self.crm_service.get_contact_list(campaign.source_list_id)
+                source_list_exists = True
                 contacts = (
                     await self.crm_service.get_list_contacts(campaign.source_list_id, page=1, page_size=_ALL_CONTACTS_PAGE_SIZE)
                 ).items
             except CrmContactListNotFound:
-                reasons.append("The selected CRM List no longer exists.")
-                contacts = []
+                source_list_exists = False
 
         steps = await self.step_store.list_for_campaign(mail_campaign_id)
-        if not steps:
-            reasons.append("At least one sequence step is required.")
 
-        try:
-            validate_mail_schedule(campaign.sending_days, campaign.start_time, campaign.end_time, campaign.timezone)
-        except MailScheduleValidationError as e:
-            reasons.append(str(e))
-
+        reasons = _compute_readiness_warnings(campaign, source_list_exists, len(steps))
         if reasons:
             raise MailCampaignNotReadyError(mail_campaign_id, reasons)
 
@@ -635,4 +653,5 @@ class MailCampaignService:
                 "Add mailbox daily-send limits (Phase 2) to estimate real daily capacity -- "
                 "no mailbox is configured yet."
             ),
+            readiness_warnings=_compute_readiness_warnings(campaign, source_list_exists, step_count),
         )

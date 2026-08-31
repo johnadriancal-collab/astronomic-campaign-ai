@@ -1182,6 +1182,7 @@ export interface MailCampaignReview {
   theoretical_total_sends: number;
   daily_capacity_estimate: number | null;
   daily_capacity_note: string;
+  readiness_warnings: string[];
 }
 
 export function listMailCampaigns(): Promise<MailCampaign[]> {

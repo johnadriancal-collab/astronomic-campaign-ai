@@ -317,6 +317,13 @@ class MailCampaignReview(BaseModel):
     daily_capacity_estimate: int | None
     daily_capacity_note: str
 
+    # Every real reason mark_ready() would currently refuse this campaign,
+    # computed by the exact same shared check
+    # (mail_campaign_service._compute_readiness_warnings) that mark_ready()
+    # itself calls -- never a separately-maintained list. Empty means the
+    # campaign is ready to be marked Ready right now.
+    readiness_warnings: list[str] = Field(default_factory=list)
+
 
 class MailScheduleValidationError(ValueError):
     """Raised by validate_mail_schedule() below -- a plain ValueError

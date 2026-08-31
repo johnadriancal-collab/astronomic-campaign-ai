@@ -615,6 +615,47 @@ async def test_review_reports_missing_list_gracefully(service, crm):
     assert review.total_contacts == 0
 
 
+async def test_review_readiness_warnings_lists_every_real_problem_on_an_empty_draft(service):
+    campaign = await service.create_campaign("Empty Draft")
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+
+    assert "No audience (CRM List) has been selected." in review.readiness_warnings
+    assert "At least one sequence step is required." in review.readiness_warnings
+    assert any("sending day" in w for w in review.readiness_warnings)
+    assert len(review.readiness_warnings) == 3
+
+
+async def test_review_readiness_warnings_is_empty_when_fully_configured(service, crm):
+    campaign, _contact_list = await _make_valid_schedule_campaign(service, crm)
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+    assert review.readiness_warnings == []
+
+
+async def test_review_readiness_warnings_reports_deleted_list_not_missing_audience(service, crm):
+    contact_list = await crm.create_contact_list("Temp")
+    campaign = await service.create_campaign("Draft")
+    campaign = await service.update_campaign(campaign.mail_campaign_id, {"source_list_id": contact_list.list_id})
+    await crm.delete_contact_list(contact_list.list_id)
+
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+
+    assert "The selected CRM List no longer exists." in review.readiness_warnings
+    assert "No audience (CRM List) has been selected." not in review.readiness_warnings
+
+
+async def test_review_readiness_warnings_exactly_matches_mark_ready_rejection_reasons(service, crm):
+    """The core guarantee this feature exists for: get_review()'s warnings
+    and mark_ready()'s actual rejection are computed by the identical shared
+    function, never two independently-maintained checks that could drift."""
+    campaign = await service.create_campaign("Draft")
+    review = await service.get_review(campaign.mail_campaign_id, suppressed_emails=set())
+
+    with pytest.raises(MailCampaignNotReadyError) as exc_info:
+        await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    assert exc_info.value.reasons == review.readiness_warnings
+
+
 async def test_opening_review_never_mutates_anything(service, crm):
     """Zero-mutation guarantee -- call get_review() several times, at every
     campaign status reachable, and confirm no enrollment/step/campaign
