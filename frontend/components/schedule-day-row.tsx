@@ -6,7 +6,9 @@ import { Button } from "@/components/ui/button";
 import { ScheduleWindowBlock } from "@/components/schedule-window-block";
 import {
   MinuteWindow,
+  TIMELINE_HOUR_MARKS,
   defaultNewWindow,
+  formatHourMark,
   minutesFromTimeString,
   neighborBounds,
   newLocalWindowId,
@@ -16,17 +18,6 @@ import { WEEKDAY_LABELS } from "@/lib/mail";
 import { cn } from "@/lib/utils";
 
 export type EditableWindow = MinuteWindow & { id: string };
-
-// Hour gridlines/labels across the 24h track -- every 3 hours, matching
-// the QuickMail reference's density without being cluttered at this
-// track's actual on-screen width.
-const HOUR_MARKS = [0, 3, 6, 9, 12, 15, 18, 21, 24];
-
-function hourLabel(h: number): string {
-  if (h === 0 || h === 24) return "12A";
-  if (h === 12) return "12P";
-  return h > 12 ? `${h - 12}P` : `${h}A`;
-}
 
 // One weekday's full row: the day label, the desktop-only visual 24h drag
 // timeline (hidden below `md` -- see the module docstring in
@@ -82,11 +73,18 @@ export function ScheduleDayRow({
       </div>
 
       <div className="min-w-0 flex-1 space-y-2">
-        {/* Desktop visual timeline -- hidden on narrow viewports, see
-            mail-campaign-schedule-tab.tsx for the mobile-fallback rationale. */}
-        <div className="hidden md:block">
+        {/* Desktop visual timeline -- hidden below `lg` (1024px), not just
+            `md` (768px): with all 24 hours labeled, "12AM"/"12PM" (4-5
+            characters) no longer fit their ~1/24-of-track slot without
+            crowding the adjacent bare-number hour once the track drops
+            below ~600px wide (empirically confirmed clean at 1024px
+            viewport, overlapping by a few px at 800-900px) -- see
+            mail-campaign-schedule-tab.tsx for the broader mobile-fallback
+            rationale this reuses rather than inventing a second, separate
+            "medium-narrow" label density. */}
+        <div className="hidden lg:block">
           <div ref={trackRef} className="relative h-10 overflow-hidden rounded-md border border-border/60 bg-secondary/20">
-            {HOUR_MARKS.slice(1, -1).map((h) => (
+            {TIMELINE_HOUR_MARKS.slice(1, -1).map((h) => (
               <div
                 key={h}
                 className="pointer-events-none absolute inset-y-0 w-px bg-border/40"
@@ -109,9 +107,24 @@ export function ScheduleDayRow({
               );
             })}
           </div>
-          <div className="mt-0.5 flex justify-between text-[10px] text-muted-foreground/60">
-            {HOUR_MARKS.map((h) => (
-              <span key={h}>{hourLabel(h)}</span>
+          {/* Every label (including the two "12AM" endpoints) is centered
+              on its own tick via translateX(-50%) -- uniformly, no special
+              edge-anchoring. Centering the wide "12AM"/"12PM" labels the
+              SAME way as the narrow "1"-"11" ones means each grows equally
+              in both directions from its own tick instead of growing
+              entirely toward its neighbor, which is what caused "12AM" to
+              visually crowd "1" (and "11" to crowd the closing "12AM") at
+              narrower desktop widths. The two endpoint labels spill a few
+              px past the track's own left/right edge as a result -- this
+              row has no overflow-hidden (only the track above it does), so
+              nothing clips; that small overflow into the row's own
+              surrounding whitespace is the standard, expected look for a
+              ruler-style timeline's first/last tick. */}
+          <div className="relative mt-0.5 h-3 text-[10px] whitespace-nowrap text-muted-foreground/60">
+            {TIMELINE_HOUR_MARKS.map((h) => (
+              <span key={h} className="absolute -translate-x-1/2" style={{ left: `${(h / 24) * 100}%` }}>
+                {formatHourMark(h)}
+              </span>
             ))}
           </div>
         </div>

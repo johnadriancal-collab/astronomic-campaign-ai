@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   MAX_MINUTE,
+  TIMELINE_HOUR_MARKS,
   clampMinute,
   clampMoveWindow,
   clampResizeEnd,
   clampResizeStart,
   defaultNewWindow,
   findOverlappingPairs,
+  formatHourMark,
   formatMinutesOfDay,
   formatWindowRange,
   isLocalWindowId,
@@ -261,4 +263,43 @@ test("isLocalWindowId is false for a real server-issued id (a UUID)", () => {
 
 test("newLocalWindowId produces distinct ids for distinct counters", () => {
   assert.notEqual(newLocalWindowId(0, 0), newLocalWindowId(0, 1));
+});
+
+// --- timeline hour marks (hourly gridlines/labels) -----------------------
+
+test("TIMELINE_HOUR_MARKS covers every hour boundary, midnight through the closing midnight", () => {
+  assert.deepEqual(TIMELINE_HOUR_MARKS, Array.from({ length: 25 }, (_, i) => i));
+  assert.equal(TIMELINE_HOUR_MARKS.length, 25); // 24 hourly gridline segments, 25 boundary marks
+  assert.equal(TIMELINE_HOUR_MARKS[0], 0);
+  assert.equal(TIMELINE_HOUR_MARKS[TIMELINE_HOUR_MARKS.length - 1], 24);
+});
+
+test("formatHourMark labels midnight and noon as 12AM/12PM", () => {
+  assert.equal(formatHourMark(0), "12AM");
+  assert.equal(formatHourMark(12), "12PM");
+});
+
+test("formatHourMark labels the closing boundary (hour 24) as 12AM too", () => {
+  assert.equal(formatHourMark(24), "12AM");
+});
+
+test("formatHourMark renders morning hours as a bare number, no AM suffix", () => {
+  assert.equal(formatHourMark(1), "1");
+  assert.equal(formatHourMark(9), "9");
+  assert.equal(formatHourMark(11), "11");
+});
+
+test("formatHourMark renders afternoon/evening hours as a bare 1-11, no PM suffix or 24h number", () => {
+  assert.equal(formatHourMark(13), "1");
+  assert.equal(formatHourMark(17), "5");
+  assert.equal(formatHourMark(23), "11");
+});
+
+test("formatHourMark never repeats AM/PM on interior hours -- every mark from TIMELINE_HOUR_MARKS is a clean, short label", () => {
+  const labels = TIMELINE_HOUR_MARKS.map(formatHourMark);
+  assert.deepEqual(labels, [
+    "12AM", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
+    "12PM", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
+    "12AM",
+  ]);
 });

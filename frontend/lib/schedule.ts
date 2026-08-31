@@ -38,6 +38,28 @@ export function isLocalWindowId(id: string): boolean {
   return id.startsWith(LOCAL_WINDOW_ID_PREFIX);
 }
 
+// --- Timeline hour marks (gridlines + labels) -------------------------
+//
+// One mark per hour boundary, 0 through 24 inclusive (25 marks -> 24
+// hourly gridline segments) -- matches the QuickMail reference's density.
+// schedule-day-row.tsx renders a gridline at every INTERIOR mark
+// (index 1..23 -- the track's own border already delineates 0 and 24) and
+// a label at EVERY mark including both ends, positioned by exact
+// `left: (h/24)*100%` rather than flexbox space-between: with unequal-width
+// labels ("12AM"/"12PM" vs. a bare "1"-"11"), space-between would drift
+// each interior label away from true alignment with its gridline, more
+// visibly so at 25 marks than the coarser 3-hour version this replaced.
+
+export const TIMELINE_HOUR_MARKS: number[] = Array.from({ length: 25 }, (_, i) => i);
+
+/** "12AM"/"12PM" anchor the day/night halves; every other hour is a bare
+ * number, no repeated AM/PM -- e.g. 12AM 1 2 ... 11 12PM 1 2 ... 11 12AM. */
+export function formatHourMark(hour: number): string {
+  if (hour === 0 || hour === 24) return "12AM";
+  if (hour === 12) return "12PM";
+  return hour > 12 ? `${hour - 12}` : `${hour}`;
+}
+
 export interface MinuteWindow {
   start: number;
   end: number;

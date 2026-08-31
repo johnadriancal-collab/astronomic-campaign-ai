@@ -55,6 +55,41 @@ test("a day with zero windows renders visually inactive rather than being remove
   assert.doesNotMatch(DAY_ROW_SOURCE, /if\s*\(!isActive\)\s*return/);
 });
 
+// --- Hourly (not 3-hourly) timeline gridlines/labels ------------------------
+
+test("the day row sources its hour marks/labels from lib/schedule.ts, not a locally duplicated array", () => {
+  assert.match(DAY_ROW_SOURCE, /TIMELINE_HOUR_MARKS/);
+  assert.match(DAY_ROW_SOURCE, /formatHourMark/);
+  // The old coarse 3-hour mark array must be gone, not just supplemented.
+  assert.doesNotMatch(DAY_ROW_SOURCE, /\[0,\s*3,\s*6,\s*9,\s*12,\s*15,\s*18,\s*21,\s*24\]/);
+});
+
+test("lib/schedule.ts defines exactly 25 hour marks (one per hour, midnight to the closing midnight)", () => {
+  assert.match(SCHEDULE_LIB_SOURCE, /TIMELINE_HOUR_MARKS[\s\S]{0,80}length:\s*25/);
+});
+
+test("hour labels are positioned by exact left-percentage, not flexbox justify-between", () => {
+  // Regression guard: space-between drifts unequal-width labels ("12AM"/
+  // "12PM" vs a bare "1") away from true alignment with their gridlines --
+  // see this file's own comment in schedule-day-row.tsx.
+  assert.match(DAY_ROW_SOURCE, /left:\s*`\$\{\(h \/ 24\) \* 100\}%`/);
+  assert.doesNotMatch(DAY_ROW_SOURCE, /justify-between/);
+});
+
+test("hourly gridlines render at every interior hour, not just every third hour", () => {
+  assert.match(DAY_ROW_SOURCE, /TIMELINE_HOUR_MARKS\.slice\(1, -1\)/);
+});
+
+test("the visible hourly grid is purely presentational -- window positioning still uses raw minutes, unaffected by the label granularity", () => {
+  // ScheduleWindowBlock (actual window placement) computes percentages
+  // straight from minutes (value.start/1440, value.end/1440), never from
+  // TIMELINE_HOUR_MARKS -- the label change must not touch minute-accurate
+  // positioning or the 15-minute snapping constant.
+  assert.match(BLOCK_SOURCE, /value\.start\s*\/\s*1440/);
+  assert.doesNotMatch(BLOCK_SOURCE, /TIMELINE_HOUR_MARKS/);
+  assert.match(SCHEDULE_LIB_SOURCE, /SNAP_MINUTES\s*=\s*15/);
+});
+
 // --- Drag whole window / resize both edges ----------------------------------
 
 test("the window block supports dragging the whole block (move) and resizing both edges", () => {
@@ -92,15 +127,25 @@ test("the manual inputs and the visual timeline read/write the exact same window
 
 // --- Mobile fallback: manual controls, no draggable timeline ---------------
 
-test("the draggable 24h timeline is hidden below the md breakpoint", () => {
-  assert.match(DAY_ROW_SOURCE, /hidden md:block/);
+test("the draggable 24h timeline is hidden below the lg breakpoint", () => {
+  // Bumped from `md` (768px) to `lg` (1024px) once every hour got its own
+  // label -- below ~1024px wide, "12AM"/"12PM" no longer fit their slot
+  // without crowding the adjacent hour (empirically confirmed).
+  assert.match(DAY_ROW_SOURCE, /hidden lg:block/);
 });
 
-test("the manual time inputs are NOT hidden on mobile -- they're the real editing surface everywhere", () => {
-  // The manual-controls wrapper must not carry the same "hidden md:block"
-  // (or any "hidden ... md:") gate the timeline itself uses.
+test("the manual time inputs are NOT hidden on narrow/mobile screens -- they're the real editing surface everywhere", () => {
+  // The manual-controls wrapper must not carry the same "hidden lg:block"
+  // (or any "hidden ... lg:"/"hidden ... md:") gate the timeline itself uses.
   const manualControlsSection = DAY_ROW_SOURCE.split("Accessible manual controls")[1] ?? "";
-  assert.doesNotMatch(manualControlsSection.split("</div>")[0] ?? "", /hidden md:/);
+  const section = manualControlsSection.split("</div>")[0] ?? "";
+  assert.doesNotMatch(section, /hidden lg:/);
+  assert.doesNotMatch(section, /hidden md:/);
+});
+
+test("hour labels are centered uniformly on every tick, including the two 12AM endpoints -- no edge-anchoring that grows into a neighbor", () => {
+  assert.match(DAY_ROW_SOURCE, /-translate-x-1\/2/);
+  assert.doesNotMatch(DAY_ROW_SOURCE, /translateX\(-100%\)/);
 });
 
 // --- + Send time / delete window --------------------------------------------
