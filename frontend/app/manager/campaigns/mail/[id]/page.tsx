@@ -15,7 +15,7 @@ import { MailCampaignScheduleTab, type TabWindow } from "@/components/mail-campa
 import { MailCampaignSettingsTab } from "@/components/mail-campaign-settings-tab";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
 import { findOverlappingPairs, isLocalWindowId, minutesFromTimeString, timeStringFromMinutes } from "@/lib/schedule";
-import { DEFAULT_FOLLOWUP_DELAY_DAYS } from "@/lib/mail";
+import type { StepSelection } from "@/lib/mail-campaign-steps";
 import { cn } from "@/lib/utils";
 import {
   addMailSequenceStep,
@@ -72,18 +72,28 @@ export default function MailCampaignDetailPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
 
-  const [stepSubject, setStepSubject] = useState("");
-  const [stepBody, setStepBody] = useState("");
-  const [stepDelay, setStepDelay] = useState(DEFAULT_FOLLOWUP_DELAY_DAYS);
-  const [addingStep, setAddingStep] = useState(false);
-  const [stepError, setStepError] = useState<string | null>(null);
+  // The Steps tab's sequence builder: `selection` is the user's EXPLICIT
+  // choice of which ONE node (an Email step, a Wait node, or the not-yet-
+  // saved "new email" being composed) the right-hand editor shows --
+  // `null` means "no explicit choice yet," not "nothing shown." The draft
+  // text/number fields themselves (subject/body/delay) live locally inside
+  // mail-campaign-step-editor.tsx, not here -- see that file's docstring
+  // for why (a key-based remount, not an effect, is what seeds them
+  // correctly on every selection change, including the very first one).
+  const [selection, setSelection] = useState<StepSelection>(null);
+  const [savingSelection, setSavingSelection] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
 
-  const [editingStepId, setEditingStepId] = useState<string | null>(null);
-  const [editSubject, setEditSubject] = useState("");
-  const [editBody, setEditBody] = useState("");
-  const [editDelay, setEditDelay] = useState(0);
-  const [savingStepEdit, setSavingStepEdit] = useState(false);
-  const [stepEditError, setStepEditError] = useState<string | null>(null);
+  // The actual selection shown to the Steps tab: the user's explicit
+  // choice if they've made one, otherwise Step 1 (or nothing, for an
+  // empty sequence) -- computed fresh every render, purely from current
+  // `selection`/`steps`, never written back into state. This is what
+  // auto-selects Step 1 on first load (and after Step 1 itself is
+  // deleted, etc.) WITHOUT a useEffect: there is nothing to "sync," only
+  // a value to compute. An explicit `selection` (any step id, including
+  // steps[0]'s) always wins and survives untouched across a steps[]
+  // refetch/reorder, since it's compared by id, never by array position.
+  const effectiveSelection: StepSelection = selection ?? (steps.length > 0 ? { type: "email", stepId: steps[0].step_id } : null);
 
   const [mailboxes, setMailboxes] = useState<Mailbox[] | null>(null);
   const [selectedMailboxIds, setSelectedMailboxIds] = useState<string[]>([]);
@@ -231,28 +241,61 @@ export default function MailCampaignDetailPage() {
     }
   }
 
-  async function handleAddStep(e: React.FormEvent) {
-    e.preventDefault();
-    if (!stepSubject.trim() || !stepBody.trim()) return;
-    setAddingStep(true);
-    setStepError(null);
+  // --- Steps tab: sequence builder selection/save handlers ---------------
+  //
+  // Delay is edited in exactly one place per step: Step 1's is permanently
+  // 0 and never editable anywhere; a Step 2+'s is edited ONLY via its own
+  // Wait node (handleSaveWaitDelay), never duplicated as a field in the
+  // Email editor. handleSaveEmail therefore never sends delay_days at all --
+  // for a legacy Step 1 whose stored delay_days predates that invariant,
+  // the backend still self-heals it to 0 on this same save regardless (see
+  // MailCampaignService.update_step()'s docstring), patch key present or not.
+
+  function handleSelectEmail(step: MailSequenceStep) {
+    setSelection({ type: "email", stepId: step.step_id });
+    setSelectionError(null);
+  }
+
+  function handleSelectWait(step: MailSequenceStep) {
+    setSelection({ type: "wait", stepId: step.step_id });
+    setSelectionError(null);
+  }
+
+  function handleStartAddStep() {
+    setSelection({ type: "new-email" });
+    setSelectionError(null);
+  }
+
+  // The only selection-clearing Cancel left in page.tsx -- reverting an
+  // Email/Wait draft back to its persisted values is now purely local to
+  // mail-campaign-step-editor.tsx (it owns that draft state and already
+  // has the persisted step via props, so there's nothing for page.tsx to
+  // do). A "new email" has no persisted step to revert to, so cancelling
+  // it clears the selection entirely instead. No backend write either way.
+  function handleCancelNewStep() {
+    setSelection(null);
+    setSelectionError(null);
+  }
+
+  async function handleAddStep(subject: string, body: string, delayDaysInput: number) {
+    if (!subject.trim() || !body.trim() || savingSelection) return;
+    setSavingSelection(true);
+    setSelectionError(null);
     // The backend forces delay_days=0 for a first step regardless of what's
     // sent, but submitting it explicitly here too keeps the request honest
-    // about what's about to be stored -- steps.length===0's Add form never
-    // shows a Delay input, so `stepDelay` may still hold a stale value from
-    // a step added/removed earlier in this session.
-    const delayDays = steps.length === 0 ? 0 : stepDelay;
+    // about what's about to be stored -- the empty-sequence editor never
+    // shows a Delay input, so `delayDaysInput` may still hold a stale value
+    // from a step added/removed earlier in this session.
+    const delayDays = steps.length === 0 ? 0 : delayDaysInput;
     try {
-      await addMailSequenceStep(campaignId, { subject: stepSubject, body: stepBody, delay_days: delayDays });
-      setStepSubject("");
-      setStepBody("");
-      setStepDelay(DEFAULT_FOLLOWUP_DELAY_DAYS);
+      const created = await addMailSequenceStep(campaignId, { subject, body, delay_days: delayDays });
       setSteps(await listMailSequenceSteps(campaignId));
+      setSelection({ type: "email", stepId: created.step_id });
       await refreshReview();
     } catch (err) {
-      setStepError(err instanceof ApiError ? `Couldn't add step (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+      setSelectionError(err instanceof ApiError ? `Couldn't add step (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
-      setAddingStep(false);
+      setSavingSelection(false);
     }
   }
 
@@ -260,7 +303,21 @@ export default function MailCampaignDetailPage() {
     setBusy(true);
     setActionError(null);
     try {
-      setSteps(await deleteMailSequenceStep(campaignId, stepId));
+      // If the deleted step was the one showing in the editor (whether
+      // selected as an Email node or as the Wait node representing its
+      // own delay -- both keyed by this same stepId, see
+      // lib/mail-campaign-steps.ts), select a sensible survivor instead of
+      // just dropping back to null: prefer whichever step now occupies
+      // that same position (the one immediately after it, shifted down),
+      // else the one immediately before it, else there's nothing left.
+      const wasSelected = effectiveSelection !== null && effectiveSelection.type !== "new-email" && effectiveSelection.stepId === stepId;
+      const deletedIndex = steps.findIndex((s) => s.step_id === stepId);
+      const remaining = await deleteMailSequenceStep(campaignId, stepId);
+      setSteps(remaining);
+      if (wasSelected) {
+        const survivor = remaining[deletedIndex] ?? remaining[deletedIndex - 1] ?? null;
+        setSelection(survivor ? { type: "email", stepId: survivor.step_id } : null);
+      }
       await refreshReview();
     } catch (err) {
       setActionError(err instanceof ApiError ? `Couldn't delete step (${err.status}): ${err.message}` : "Couldn't reach the backend.");
@@ -269,43 +326,33 @@ export default function MailCampaignDetailPage() {
     }
   }
 
-  function handleStartEditStep(step: MailSequenceStep) {
-    setEditingStepId(step.step_id);
-    setEditSubject(step.subject);
-    setEditBody(step.body);
-    setEditDelay(step.delay_days);
-    setStepEditError(null);
-  }
-
-  function handleCancelEditStep() {
-    setEditingStepId(null);
-    setStepEditError(null);
-  }
-
-  async function handleSaveEditStep(stepId: string) {
-    if (!editSubject.trim() || !editBody.trim() || savingStepEdit) return;
-    setSavingStepEdit(true);
-    setStepEditError(null);
+  async function handleSaveEmail(stepId: string, subject: string, body: string) {
+    if (!subject.trim() || !body.trim() || savingSelection) return;
+    setSavingSelection(true);
+    setSelectionError(null);
     try {
-      // Step 1 has no editable Delay control (see mail-campaign-steps-tab.tsx),
-      // so `editDelay` was never touched for it here -- omit delay_days from
-      // the patch entirely rather than send a value the user never saw. The
-      // backend forces Step 1's delay_days to 0 unconditionally regardless
-      // of whether this key is present, which also self-heals a legacy
-      // Step 1 whose stored delay_days predates this invariant.
-      const editingStep = steps.find((s) => s.step_id === stepId);
-      const patch: Record<string, unknown> = { subject: editSubject, body: editBody };
-      if (editingStep && editingStep.step_number !== 1) {
-        patch.delay_days = editDelay;
-      }
-      const updated = await updateMailSequenceStep(campaignId, stepId, patch);
+      const updated = await updateMailSequenceStep(campaignId, stepId, { subject, body });
       setSteps((prev) => prev.map((s) => (s.step_id === stepId ? updated : s)));
-      setEditingStepId(null);
       await refreshReview();
     } catch (err) {
-      setStepEditError(err instanceof ApiError ? `Couldn't save step (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+      setSelectionError(err instanceof ApiError ? `Couldn't save step (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
-      setSavingStepEdit(false);
+      setSavingSelection(false);
+    }
+  }
+
+  async function handleSaveWaitDelay(stepId: string, delayDays: number) {
+    if (delayDays < 0 || savingSelection) return;
+    setSavingSelection(true);
+    setSelectionError(null);
+    try {
+      const updated = await updateMailSequenceStep(campaignId, stepId, { delay_days: delayDays });
+      setSteps((prev) => prev.map((s) => (s.step_id === stepId ? updated : s)));
+      await refreshReview();
+    } catch (err) {
+      setSelectionError(err instanceof ApiError ? `Couldn't save delay (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setSavingSelection(false);
     }
   }
 
@@ -455,29 +502,18 @@ export default function MailCampaignDetailPage() {
             steps={steps}
             editable={editable}
             busy={busy}
+            selection={effectiveSelection}
+            onSelectEmail={handleSelectEmail}
+            onSelectWait={handleSelectWait}
+            onStartAddStep={handleStartAddStep}
             onMoveStep={handleMoveStep}
             onDeleteStep={handleDeleteStep}
+            onSaveEmail={handleSaveEmail}
             onAddStep={handleAddStep}
-            stepSubject={stepSubject}
-            setStepSubject={setStepSubject}
-            stepBody={stepBody}
-            setStepBody={setStepBody}
-            stepDelay={stepDelay}
-            setStepDelay={setStepDelay}
-            addingStep={addingStep}
-            stepError={stepError}
-            editingStepId={editingStepId}
-            onStartEditStep={handleStartEditStep}
-            onCancelEditStep={handleCancelEditStep}
-            onSaveEditStep={handleSaveEditStep}
-            editSubject={editSubject}
-            setEditSubject={setEditSubject}
-            editBody={editBody}
-            setEditBody={setEditBody}
-            editDelay={editDelay}
-            setEditDelay={setEditDelay}
-            savingStepEdit={savingStepEdit}
-            stepEditError={stepEditError}
+            onSaveWait={handleSaveWaitDelay}
+            onCancelNewStep={handleCancelNewStep}
+            savingSelection={savingSelection}
+            selectionError={selectionError}
           />
         </TabsPanel>
 

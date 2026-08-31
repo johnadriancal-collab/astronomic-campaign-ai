@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_FOLLOWUP_DELAY_DAYS,
   DEFAULT_SENDING_DAYS,
+  formatDayCount,
   formatScheduleSummary,
   formatSendingDays,
   formatTimeOfDay,
@@ -133,6 +134,13 @@ test("toggleAllSendingDays clears to none when all seven are already selected", 
 
 test("DEFAULT_FOLLOWUP_DELAY_DAYS is 2", () => {
   assert.equal(DEFAULT_FOLLOWUP_DELAY_DAYS, 2);
+});
+
+test("formatDayCount pluralizes correctly, including the zero case", () => {
+  assert.equal(formatDayCount(0), "0 days");
+  assert.equal(formatDayCount(1), "1 day");
+  assert.equal(formatDayCount(2), "2 days");
+  assert.equal(formatDayCount(5), "5 days");
 });
 
 test("stepTimingLabel always reads Step 1 as 'Initial email', regardless of its stored delay_days", () => {

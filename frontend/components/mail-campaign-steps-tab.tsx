@@ -1,203 +1,133 @@
-import { AlertTriangle, ArrowDown, ArrowUp, Pencil, Plus, Trash2 } from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
-import { MAIL_TEMPLATE_VARIABLES, type MailSequenceStep } from "@/lib/api";
-import { stepTimingLabel, stepTimingSecondaryLabel } from "@/lib/mail";
+import { Dialog, DialogClose, DialogDescription, DialogFooter, DialogHeader, DialogPopup, DialogTitle } from "@/components/ui/dialog";
+import { MailCampaignStepsTimeline } from "@/components/mail-campaign-steps-timeline";
+import { MailCampaignStepEditor } from "@/components/mail-campaign-step-editor";
+import type { MailSequenceStep } from "@/lib/api";
+import type { StepSelection } from "@/lib/mail-campaign-steps";
 
-// Moved as-is from the old single-page layout's "Sequence" card -- same
-// handlers, same editable gating, no behavior changes.
+// The Steps tab's own two-column sequence builder layout -- a narrow
+// timeline on the left (mail-campaign-steps-timeline.tsx), a persistent
+// editor for whatever's selected on the right (mail-campaign-step-editor.tsx).
+// Stacks to a single column below `lg` (1024px) -- same breakpoint choice
+// as the Schedule tab's own desktop/mobile split (see schedule-day-row.tsx's
+// docstring for why lg, not md, was picked there), timeline first so a
+// narrow-viewport user sees the sequence structure before an editor for
+// whichever step happens to be selected.
+//
+// This component owns exactly two pieces of local state, both scoped to
+// mediating Timeline<->Editor interaction and deliberately NOT lifted to
+// page.tsx: `isEditorDirty` (reported by the editor whenever its unsaved
+// draft differs from what's persisted) and `pendingAction` (a switch-
+// selection/delete the user tried to make while dirty, held until they
+// confirm). Every other tab's state and API-call handlers still live in
+// page.tsx exactly as before -- selecting/saving/adding/deleting a step is
+// unaffected in success/failure; the only thing added here is a single gate
+// in front of any action that would silently discard an unsaved draft.
 export function MailCampaignStepsTab({
   steps,
   editable,
   busy,
+  selection,
+  onSelectEmail,
+  onSelectWait,
+  onStartAddStep,
   onMoveStep,
   onDeleteStep,
+  onSaveEmail,
   onAddStep,
-  stepSubject,
-  setStepSubject,
-  stepBody,
-  setStepBody,
-  stepDelay,
-  setStepDelay,
-  addingStep,
-  stepError,
-  editingStepId,
-  onStartEditStep,
-  onCancelEditStep,
-  onSaveEditStep,
-  editSubject,
-  setEditSubject,
-  editBody,
-  setEditBody,
-  editDelay,
-  setEditDelay,
-  savingStepEdit,
-  stepEditError,
+  onSaveWait,
+  onCancelNewStep,
+  savingSelection,
+  selectionError,
 }: {
   steps: MailSequenceStep[];
   editable: boolean;
   busy: boolean;
+  selection: StepSelection;
+  onSelectEmail: (step: MailSequenceStep) => void;
+  onSelectWait: (step: MailSequenceStep) => void;
+  onStartAddStep: () => void;
   onMoveStep: (index: number, direction: -1 | 1) => void;
   onDeleteStep: (stepId: string) => void;
-  onAddStep: (e: React.FormEvent) => void;
-  stepSubject: string;
-  setStepSubject: (value: string) => void;
-  stepBody: string;
-  setStepBody: (value: string) => void;
-  stepDelay: number;
-  setStepDelay: (value: number) => void;
-  addingStep: boolean;
-  stepError: string | null;
-  // Inline per-step editing -- a step is only ever edited one at a time
-  // (editingStepId holds that one step_id, or null). Cancel restores the
-  // last-saved values with no backend write; Save PATCHes only this step,
-  // never touching step_number/other steps. See page.tsx's handlers.
-  editingStepId: string | null;
-  onStartEditStep: (step: MailSequenceStep) => void;
-  onCancelEditStep: () => void;
-  onSaveEditStep: (stepId: string) => void;
-  editSubject: string;
-  setEditSubject: (value: string) => void;
-  editBody: string;
-  setEditBody: (value: string) => void;
-  editDelay: number;
-  setEditDelay: (value: number) => void;
-  savingStepEdit: boolean;
-  stepEditError: string | null;
+  onSaveEmail: (stepId: string, subject: string, body: string) => void;
+  onAddStep: (subject: string, body: string, delayDays: number) => void;
+  onSaveWait: (stepId: string, delayDays: number) => void;
+  onCancelNewStep: () => void;
+  savingSelection: boolean;
+  selectionError: string | null;
 }) {
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-sm">Sequence</CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3">
-        {steps.length === 0 && <p className="text-sm text-muted-foreground">No steps yet.</p>}
-        {steps.map((step, i) => {
-          const isEditing = step.step_id === editingStepId;
-          return (
-            <div key={step.step_id} className="rounded-md border border-border p-3 text-sm">
-              {isEditing ? (
-                <div className="space-y-2">
-                  {stepEditError && (
-                    <Alert variant="destructive">
-                      <AlertTriangle />
-                      <AlertDescription>{stepEditError}</AlertDescription>
-                    </Alert>
-                  )}
-                  <p className="text-xs font-medium text-muted-foreground">
-                    Editing Step {step.step_number} -- allowed variables: {MAIL_TEMPLATE_VARIABLES.map((v) => `{{${v}}}`).join(", ")}
-                  </p>
-                  <Input value={editSubject} onChange={(e) => setEditSubject(e.target.value)} placeholder="Subject" />
-                  <Textarea value={editBody} onChange={(e) => setEditBody(e.target.value)} placeholder="Body" rows={3} />
-                  {step.step_number === 1 ? (
-                    <p className="text-xs text-muted-foreground">
-                      {stepTimingLabel(step)} -- {stepTimingSecondaryLabel(step)}
-                    </p>
-                  ) : (
-                    <div className="flex items-center gap-2">
-                      <label className="text-xs text-muted-foreground">Wait</label>
-                      <Input
-                        type="number"
-                        min={0}
-                        value={editDelay}
-                        onChange={(e) => setEditDelay(Number(e.target.value))}
-                        className="w-20"
-                      />
-                      <label className="text-xs text-muted-foreground">day(s) after previous step</label>
-                    </div>
-                  )}
-                  <div className="flex gap-2">
-                    <Button
-                      size="sm"
-                      onClick={() => onSaveEditStep(step.step_id)}
-                      disabled={savingStepEdit || !editSubject.trim() || !editBody.trim()}
-                    >
-                      {savingStepEdit ? "Saving..." : "Save"}
-                    </Button>
-                    <Button variant="outline" size="sm" onClick={onCancelEditStep} disabled={savingStepEdit}>
-                      Cancel
-                    </Button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
-                    <p className="font-medium">
-                      Step {step.step_number}: {step.subject}
-                    </p>
-                    <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{step.body}</p>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      {stepTimingLabel(step)}
-                      {stepTimingSecondaryLabel(step) && ` -- ${stepTimingSecondaryLabel(step)}`}
-                    </p>
-                  </div>
-                  {editable && (
-                    <div className="flex shrink-0 gap-1">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={() => onStartEditStep(step)}
-                        disabled={busy || editingStepId !== null}
-                      >
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => onMoveStep(i, -1)} disabled={busy || i === 0}>
-                        <ArrowUp className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => onMoveStep(i, 1)} disabled={busy || i === steps.length - 1}>
-                        <ArrowDown className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button variant="outline" size="sm" onClick={() => onDeleteStep(step.step_id)} disabled={busy}>
-                        <Trash2 className="h-3.5 w-3.5" />
-                      </Button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+  const [isEditorDirty, setIsEditorDirty] = useState(false);
+  // The switch/delete the user tried to make while the editor was dirty --
+  // held here, not run, until they explicitly confirm via the dialog below.
+  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
 
-        {editable && (
-          <form onSubmit={onAddStep} className="space-y-2 rounded-md border border-dashed border-border p-3">
-            {stepError && (
-              <Alert variant="destructive">
-                <AlertTriangle />
-                <AlertDescription>{stepError}</AlertDescription>
-              </Alert>
-            )}
-            <p className="text-xs font-medium text-muted-foreground">
-              Add a step -- allowed variables: {MAIL_TEMPLATE_VARIABLES.map((v) => `{{${v}}}`).join(", ")}
-            </p>
-            <Input value={stepSubject} onChange={(e) => setStepSubject(e.target.value)} placeholder="Subject, e.g. Quick intro, {{first_name}}" />
-            <Textarea value={stepBody} onChange={(e) => setStepBody(e.target.value)} placeholder="Body" rows={3} />
-            {steps.length === 0 ? (
-              <p className="text-xs text-muted-foreground">
-                Initial email -- Eligible when the lead enters the campaign
-              </p>
-            ) : (
-              <div className="flex items-center gap-2">
-                <label className="text-xs text-muted-foreground">Wait</label>
-                <Input
-                  type="number"
-                  min={0}
-                  value={stepDelay}
-                  onChange={(e) => setStepDelay(Number(e.target.value))}
-                  className="w-20"
-                />
-                <label className="text-xs text-muted-foreground">day(s) after previous step</label>
-              </div>
-            )}
-            <Button type="submit" size="sm" disabled={addingStep || !stepSubject.trim() || !stepBody.trim()} className="gap-1.5">
-              <Plus className="h-3.5 w-3.5" />
-              {addingStep ? "Adding..." : "Add step"}
+  // Reordering (Move up/down) is NEVER gated here -- the editor's `key`
+  // (below) is the selected step's own id, which a reorder never changes,
+  // so the open draft survives a reorder untouched regardless of dirtiness.
+  function attempt(action: () => void) {
+    if (isEditorDirty) {
+      setPendingAction(() => action);
+    } else {
+      action();
+    }
+  }
+
+  const guardedSelectEmail = (step: MailSequenceStep) => attempt(() => onSelectEmail(step));
+  const guardedSelectWait = (step: MailSequenceStep) => attempt(() => onSelectWait(step));
+  const guardedStartAddStep = () => attempt(() => onStartAddStep());
+  const guardedDeleteStep = (stepId: string) => attempt(() => onDeleteStep(stepId));
+
+  const editorKey = selection === null ? "empty" : selection.type === "new-email" ? "new-email" : `${selection.type}-${selection.stepId}`;
+
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[300px_1fr] lg:items-start">
+      <MailCampaignStepsTimeline
+        steps={steps}
+        selection={selection}
+        onSelectEmail={guardedSelectEmail}
+        onSelectWait={guardedSelectWait}
+        onStartAddStep={guardedStartAddStep}
+        editable={editable}
+      />
+      <MailCampaignStepEditor
+        key={editorKey}
+        steps={steps}
+        selection={selection}
+        editable={editable}
+        busy={busy}
+        saving={savingSelection}
+        error={selectionError}
+        onSaveEmail={onSaveEmail}
+        onAddStep={onAddStep}
+        onSaveWait={onSaveWait}
+        onCancelNewStep={onCancelNewStep}
+        onMoveStep={onMoveStep}
+        onDeleteStep={guardedDeleteStep}
+        onDirtyChange={setIsEditorDirty}
+      />
+
+      <Dialog open={pendingAction !== null} onOpenChange={(open) => { if (!open) setPendingAction(null); }}>
+        <DialogPopup className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Discard unsaved changes?</DialogTitle>
+            <DialogDescription>You have changes that haven&apos;t been saved.</DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <DialogClose render={<Button type="button" variant="outline">Keep editing</Button>} />
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                pendingAction?.();
+                setPendingAction(null);
+              }}
+            >
+              Discard changes
             </Button>
-          </form>
-        )}
-      </CardContent>
-    </Card>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+    </div>
   );
 }

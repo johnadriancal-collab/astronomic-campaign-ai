@@ -131,6 +131,13 @@ export function formatScheduleSummary(campaign: {
 // their own unexplained literal 2.
 export const DEFAULT_FOLLOWUP_DELAY_DAYS = 2;
 
+/** "1 day" / "5 days" -- the one place delay_days pluralization happens,
+ * shared by stepTimingLabel() below and the Steps timeline's compact Wait
+ * node label (see mail-campaign-steps-timeline.tsx). */
+export function formatDayCount(days: number): string {
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
 // Step 1 always reads as "Initial email" here, regardless of its stored
 // delay_days -- this never inspects that field for position 1. That's a
 // display choice, not a claim about the data: a legacy campaign whose
@@ -142,7 +149,7 @@ export const DEFAULT_FOLLOWUP_DELAY_DAYS = 2;
 export function stepTimingLabel(step: { step_number: number; delay_days: number }): string {
   if (step.step_number === 1) return "Initial email";
   if (step.delay_days === 0) return "Sent immediately";
-  return `${step.delay_days} day${step.delay_days === 1 ? "" : "s"} after previous step`;
+  return `${formatDayCount(step.delay_days)} after previous step`;
 }
 
 // Step 1 only -- deliberately NOT "sent immediately": actual delivery
