@@ -6,6 +6,7 @@ import { Button, buttonVariants } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { ApiError, sendAstroChatMessage, type AstroChatAttachment, type AstroChatMessage } from "@/lib/api";
+import { AstroMarkdown } from "@/components/astro-markdown";
 import {
   appendUserMessage,
   buildDownloadHref,
@@ -116,11 +117,13 @@ export default function Home() {
                   >
                     <div
                       className={cn(
-                        "max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm",
-                        m.role === "user" ? "bg-primary text-primary-foreground" : "bg-secondary/60 text-foreground"
+                        "max-w-[85%] rounded-lg px-3 py-2 text-sm",
+                        m.role === "user"
+                          ? "whitespace-pre-wrap bg-primary text-primary-foreground"
+                          : "bg-secondary/60 text-foreground"
                       )}
                     >
-                      {m.content}
+                      {m.role === "assistant" ? <AstroMarkdown content={m.content} /> : m.content}
                     </div>
                     {isRenderableAttachment(m.attachment) && (
                       <div className="flex w-full max-w-[85%] flex-col gap-1.5 rounded-lg border border-border bg-secondary/40 px-3 py-2">
