@@ -125,6 +125,19 @@ class InvalidMailTemplateVariableError(ValueError):
         )
 
 
+class InvalidMailSequenceStepDelayError(ValueError):
+    """Raised by add_step()/update_step() for a negative delay_days on a
+    Step 2+ (a follow-up). Never raised for the step at position 1 -- that
+    step's delay_days is unconditionally forced to 0 instead (see
+    add_step()/update_step()/_renumber()'s docstrings for the full
+    invariant), so a negative value there is silently overridden, not
+    rejected."""
+
+    def __init__(self, delay_days: int):
+        self.delay_days = delay_days
+        super().__init__(f"delay_days must be 0 or greater for a follow-up step (got {delay_days}).")
+
+
 class MailboxChannelNotFoundError(Exception):
     """Raised by set_channel_mailboxes() when a requested mailbox_id doesn't
     resolve to any real Mailbox at all (never for a merely disconnected one --
@@ -212,6 +225,16 @@ _LEGACY_SCHEDULE_PATCH_FIELDS = {"sending_days", "start_time", "end_time", "all_
 
 _ALL_DAY_SENTINEL_START = time(0, 0)
 _ALL_DAY_SENTINEL_END = time(23, 59)
+
+# The step at position 1 always has delay_days = 0 (it has no previous step
+# to follow) -- enforced here, in the service, on every add/edit/reorder/
+# delete, never only as a frontend display rule (see add_step()/
+# update_step()/_renumber()). This is the value a step demoted FROM
+# position 1 (via reorder) is reset to, as a real follow-up step -- named
+# once so neither this file nor the frontend accumulates an unexplained
+# literal 2 (see frontend/lib/mail.ts's DEFAULT_FOLLOWUP_DELAY_DAYS, the
+# same constant mirrored for the Add-step form's own default).
+DEFAULT_MAIL_SEQUENCE_FOLLOWUP_DELAY_DAYS = 2
 
 
 def _parse_time_of_day(value: str) -> time:
@@ -483,12 +506,27 @@ class MailCampaignService:
     async def add_step(
         self, mail_campaign_id: str, subject: str, body: str, delay_days: int = 0, reply_in_thread: bool = True
     ) -> MailSequenceStep:
+        """
+        Sequence timing invariant: the step landing at position 1 (an
+        empty sequence's first add) always gets delay_days=0, regardless of
+        what the caller passed -- overridden here, not merely rejected,
+        since a first step genuinely has no "previous step" for a delay to
+        be relative to. A Step 2+ keeps its caller-supplied delay_days, but
+        a negative one is rejected (InvalidMailSequenceStepDelayError) --
+        the frontend's numeric input is not the only place this is
+        enforced.
+        """
         campaign = await self._require_campaign(mail_campaign_id)
         self._require_draft(campaign)
         self._validate_variables(subject, body)
 
         existing = await self.step_store.list_for_campaign(mail_campaign_id)
         next_number = (max((s.step_number for s in existing), default=0)) + 1
+
+        if next_number == 1:
+            delay_days = 0
+        elif delay_days < 0:
+            raise InvalidMailSequenceStepDelayError(delay_days)
 
         now = datetime.now(timezone.utc)
         step = MailSequenceStep(
@@ -506,6 +544,17 @@ class MailCampaignService:
         return step
 
     async def update_step(self, mail_campaign_id: str, step_id: str, patch: dict[str, Any]) -> MailSequenceStep:
+        """
+        Same delay_days invariant as add_step() (see its docstring), applied
+        on edit: a step currently at position 1 always ends up with
+        delay_days=0 -- forced here unconditionally, even if the patch
+        doesn't mention delay_days at all, so editing a legacy Step 1's
+        subject/body alone (from before this invariant existed) also
+        lazily self-heals its stale nonzero delay_days as a side effect of
+        that same save. A Step 2+ patch touching delay_days is rejected
+        (InvalidMailSequenceStepDelayError) if negative; left alone
+        entirely if the patch doesn't touch it.
+        """
         campaign = await self._require_campaign(mail_campaign_id)
         self._require_draft(campaign)
         step = await self._require_step(mail_campaign_id, step_id)
@@ -514,6 +563,11 @@ class MailCampaignService:
         new_subject = allowed.get("subject", step.subject)
         new_body = allowed.get("body", step.body)
         self._validate_variables(new_subject, new_body)
+
+        if step.step_number == 1:
+            allowed["delay_days"] = 0
+        elif "delay_days" in allowed and allowed["delay_days"] < 0:
+            raise InvalidMailSequenceStepDelayError(allowed["delay_days"])
 
         updated = step.model_copy(update={**allowed, "updated_at": datetime.now(timezone.utc)})
         await self.step_store.save(updated)
@@ -553,7 +607,20 @@ class MailCampaignService:
         1..N in the requested order. Neither phase can ever collide with
         the UNIQUE(mail_campaign_id, step_number) constraint, unlike a
         naive direct 1..N reassignment (which could transiently collide
-        with a step that hasn't been renumbered yet)."""
+        with a step that hasn't been renumbered yet).
+
+        Shared by both reorder_steps() and delete_step()'s post-delete
+        renumber -- so the delay_days invariant only needs enforcing here,
+        once, to cover "move another step above Step 1", "move Step 1
+        down", and "delete Step 1 so old Step 2 becomes Step 1" all alike:
+        whichever step lands at the new step_number 1 gets delay_days
+        forced to 0 (it has no previous step anymore, regardless of what it
+        held before); a step that WAS at step_number 1 but is being moved
+        away from it gets reset to DEFAULT_MAIL_SEQUENCE_FOLLOWUP_DELAY_DAYS
+        rather than keeping the enforced 0 it only had because it used to
+        be first. Every other step's delay_days is left completely alone --
+        a real, user-configured follow-up delay must survive a reorder that
+        doesn't touch its position relative to "am I first."""
         steps_by_id = {s.step_id: s for s in await self.step_store.list_for_campaign(mail_campaign_id)}
         offset = 100_000
         now = datetime.now(timezone.utc)
@@ -565,7 +632,13 @@ class MailCampaignService:
         renumbered: list[MailSequenceStep] = []
         for i, step_id in enumerate(ordered_step_ids):
             step = steps_by_id[step_id]
-            updated = step.model_copy(update={"step_number": i + 1, "updated_at": now})
+            new_number = i + 1
+            update: dict[str, Any] = {"step_number": new_number, "updated_at": now}
+            if new_number == 1:
+                update["delay_days"] = 0
+            elif step.step_number == 1:
+                update["delay_days"] = DEFAULT_MAIL_SEQUENCE_FOLLOWUP_DELAY_DAYS
+            updated = step.model_copy(update=update)
             await self.step_store.save(updated)
             renumbered.append(updated)
         return renumbered
@@ -878,6 +951,24 @@ class MailCampaignService:
         )
         if reasons:
             raise MailCampaignNotReadyError(mail_campaign_id, reasons)
+
+        # Lazy normalization of the Step 1 delay_days invariant (see
+        # add_step()/update_step()/_renumber()'s docstrings) for a legacy
+        # sequence created before that invariant existed. Deliberately
+        # placed AFTER the readiness check above and BEFORE anything else
+        # below: a campaign that isn't otherwise ready is never touched by
+        # this at all, and this step-store write is a single, ordinary,
+        # atomic step save (same primitive add_step/update_step/_renumber
+        # already use) -- not a new kind of write. There is no cross-store
+        # transaction wrapping this whole method (the enrollment loop below
+        # already commits one row at a time, unchanged by this addition),
+        # so this is not claiming end-to-end atomicity for mark_ready() as
+        # a whole -- only that this specific, always-correct normalization
+        # cannot itself be applied "halfway," and can never fire for a
+        # campaign whose Ready attempt was going to fail anyway.
+        first_step = next((s for s in steps if s.step_number == 1), None)
+        if first_step is not None and first_step.delay_days != 0:
+            await self.step_store.save(first_step.model_copy(update={"delay_days": 0, "updated_at": datetime.now(timezone.utc)}))
 
         enrolled = already_enrolled = suppressed_at_enrollment = 0
         now = datetime.now(timezone.utc)

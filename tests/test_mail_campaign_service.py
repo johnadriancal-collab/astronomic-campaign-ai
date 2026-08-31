@@ -25,6 +25,8 @@ from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import (
+    DEFAULT_MAIL_SEQUENCE_FOLLOWUP_DELAY_DAYS,
+    InvalidMailSequenceStepDelayError,
     InvalidMailTemplateVariableError,
     MailboxChannelNotFoundError,
     MailboxChannelNotUsableError,
@@ -480,6 +482,172 @@ async def test_step_mutation_rejected_once_ready(service, crm):
         await service.add_step(ready.mail_campaign_id, "New step", "Body")
 
 
+# --- Step 1 delay_days invariant -----------------------------------------
+#
+# Whatever step currently has step_number == 1 must have delay_days == 0 --
+# a real, stored fact (not a display trick), enforced by the service on
+# every add/edit/reorder/delete. See add_step()/update_step()/_renumber()'s
+# docstrings for the exact rule and reasoning.
+
+
+async def test_first_ever_step_forces_delay_to_zero_even_if_supplied_nonzero(service):
+    campaign = await service.create_campaign("Draft")
+    step = await service.add_step(campaign.mail_campaign_id, "Subject", "Body", delay_days=2)
+    assert step.step_number == 1
+    assert step.delay_days == 0
+
+
+async def test_first_ever_step_forces_delay_to_zero_even_if_supplied_negative(service):
+    """Step 1 is force-overridden to 0 unconditionally, never rejected --
+    only a Step 2+'s negative delay_days is a validation error (see
+    test_add_step_rejects_negative_delay below). A negative value here is
+    silently normalized the same way a positive one is."""
+    campaign = await service.create_campaign("Draft")
+    step = await service.add_step(campaign.mail_campaign_id, "Subject", "Body", delay_days=-5)
+    assert step.step_number == 1
+    assert step.delay_days == 0
+
+
+async def test_second_step_defaults_and_honors_explicit_delay(service):
+    campaign = await service.create_campaign("Draft")
+    await service.add_step(campaign.mail_campaign_id, "S1", "B1")
+    s2_default = await service.add_step(campaign.mail_campaign_id, "S2", "B2")
+    assert s2_default.delay_days == 0  # add_step()'s own signature default, unrelated to the frontend's UI default
+
+    campaign2 = await service.create_campaign("Draft 2")
+    await service.add_step(campaign2.mail_campaign_id, "S1", "B1")
+    s2_explicit = await service.add_step(campaign2.mail_campaign_id, "S2", "B2", delay_days=5)
+    assert s2_explicit.delay_days == 5
+
+
+async def test_add_step_rejects_negative_delay_for_a_follow_up(service):
+    campaign = await service.create_campaign("Draft")
+    await service.add_step(campaign.mail_campaign_id, "S1", "B1")  # step 1, unaffected
+    with pytest.raises(InvalidMailSequenceStepDelayError):
+        await service.add_step(campaign.mail_campaign_id, "S2", "B2", delay_days=-1)
+
+
+async def test_editing_step_1_delay_is_always_forced_to_zero(service):
+    campaign = await service.create_campaign("Draft")
+    step = await service.add_step(campaign.mail_campaign_id, "S1", "B1")
+    updated = await service.update_step(campaign.mail_campaign_id, step.step_id, {"delay_days": 5})
+    assert updated.step_number == 1
+    assert updated.delay_days == 0
+
+
+async def test_editing_step_1_subject_alone_self_heals_a_legacy_nonzero_delay(service):
+    """Simulates a pre-invariant record (e.g. the known production Step 1
+    with delay_days=2) by writing directly through the step store, bypassing
+    add_step()'s own enforcement -- then proves a completely unrelated edit
+    (just the subject) still normalizes the stale delay_days as a side
+    effect, with no separate migration and no delay_days key in the patch
+    at all."""
+    from app.models.mail import MailSequenceStep
+
+    campaign = await service.create_campaign("Draft")
+    now = datetime.now(timezone.utc)
+    legacy_step = MailSequenceStep(
+        step_id="legacy-1",
+        mail_campaign_id=campaign.mail_campaign_id,
+        step_number=1,
+        subject="Old subject",
+        body="Old body",
+        delay_days=2,
+        created_at=now,
+        updated_at=now,
+    )
+    await service.step_store.create(legacy_step)
+
+    updated = await service.update_step(campaign.mail_campaign_id, "legacy-1", {"subject": "New subject"})
+    assert updated.subject == "New subject"
+    assert updated.delay_days == 0
+
+
+async def test_editing_step_2_delay_works(service):
+    campaign = await service.create_campaign("Draft")
+    await service.add_step(campaign.mail_campaign_id, "S1", "B1")
+    s2 = await service.add_step(campaign.mail_campaign_id, "S2", "B2", delay_days=2)
+    updated = await service.update_step(campaign.mail_campaign_id, s2.step_id, {"delay_days": 7})
+    assert updated.delay_days == 7
+
+
+async def test_editing_step_2_to_negative_delay_is_rejected(service):
+    campaign = await service.create_campaign("Draft")
+    await service.add_step(campaign.mail_campaign_id, "S1", "B1")
+    s2 = await service.add_step(campaign.mail_campaign_id, "S2", "B2", delay_days=2)
+    with pytest.raises(InvalidMailSequenceStepDelayError):
+        await service.update_step(campaign.mail_campaign_id, s2.step_id, {"delay_days": -3})
+    # rejected -- nothing was written
+    persisted = await service.step_store.get(s2.step_id)
+    assert persisted.delay_days == 2
+
+
+async def test_reorder_moving_a_later_step_to_first_zeroes_its_delay_and_promotes_old_first(service):
+    campaign = await service.create_campaign("Draft")
+    s1 = await service.add_step(campaign.mail_campaign_id, "S1", "B1")  # delay 0 (forced, first)
+    s2 = await service.add_step(campaign.mail_campaign_id, "S2", "B2", delay_days=2)
+    s3 = await service.add_step(campaign.mail_campaign_id, "S3", "B3", delay_days=9)
+
+    reordered = await service.reorder_steps(campaign.mail_campaign_id, [s2.step_id, s1.step_id, s3.step_id])
+    by_id = {s.step_id: s for s in reordered}
+
+    assert by_id[s2.step_id].step_number == 1
+    assert by_id[s2.step_id].delay_days == 0  # new #1 -- forced to 0
+
+    assert by_id[s1.step_id].step_number == 2
+    assert by_id[s1.step_id].delay_days == DEFAULT_MAIL_SEQUENCE_FOLLOWUP_DELAY_DAYS  # demoted old #1 -- default follow-up
+
+    assert by_id[s3.step_id].step_number == 3
+    assert by_id[s3.step_id].delay_days == 9  # untouched -- never was #1, position unaffected
+
+
+async def test_reorder_a_step_that_was_never_first_keeps_its_configured_delay(service):
+    """A pure swap of two non-first steps must never touch either delay --
+    only a step's OWN transition into/out of position 1 changes anything."""
+    campaign = await service.create_campaign("Draft")
+    s1 = await service.add_step(campaign.mail_campaign_id, "S1", "B1")
+    s2 = await service.add_step(campaign.mail_campaign_id, "S2", "B2", delay_days=3)
+    s3 = await service.add_step(campaign.mail_campaign_id, "S3", "B3", delay_days=8)
+
+    reordered = await service.reorder_steps(campaign.mail_campaign_id, [s1.step_id, s3.step_id, s2.step_id])
+    by_id = {s.step_id: s for s in reordered}
+
+    assert by_id[s1.step_id].delay_days == 0
+    assert by_id[s3.step_id].delay_days == 8
+    assert by_id[s2.step_id].delay_days == 3
+
+
+async def test_delete_step_1_promotes_and_zeroes_new_first_without_disturbing_others(service):
+    campaign = await service.create_campaign("Draft")
+    s1 = await service.add_step(campaign.mail_campaign_id, "S1", "B1")
+    s2 = await service.add_step(campaign.mail_campaign_id, "S2", "B2", delay_days=4)
+    s3 = await service.add_step(campaign.mail_campaign_id, "S3", "B3", delay_days=6)
+
+    remaining = await service.delete_step(campaign.mail_campaign_id, s1.step_id)
+    by_id = {s.step_id: s for s in remaining}
+
+    assert by_id[s2.step_id].step_number == 1
+    assert by_id[s2.step_id].delay_days == 0  # promoted to #1 -- forced to 0
+
+    assert by_id[s3.step_id].step_number == 2
+    assert by_id[s3.step_id].delay_days == 6  # never was #1 -- untouched
+
+
+async def test_deleting_a_non_first_step_does_not_disturb_unrelated_delays(service):
+    campaign = await service.create_campaign("Draft")
+    s1 = await service.add_step(campaign.mail_campaign_id, "S1", "B1")
+    s2 = await service.add_step(campaign.mail_campaign_id, "S2", "B2", delay_days=4)
+    s3 = await service.add_step(campaign.mail_campaign_id, "S3", "B3", delay_days=6)
+
+    remaining = await service.delete_step(campaign.mail_campaign_id, s2.step_id)
+    by_id = {s.step_id: s for s in remaining}
+
+    assert by_id[s1.step_id].step_number == 1
+    assert by_id[s1.step_id].delay_days == 0
+    assert by_id[s3.step_id].step_number == 2
+    assert by_id[s3.step_id].delay_days == 6  # unrelated delay survives a deletion elsewhere
+
+
 # --- mark_ready / audience snapshot --------------------------------------
 
 
@@ -504,6 +672,43 @@ async def test_mark_ready_succeeds_and_creates_enrollments(service, crm):
     enrollments = await service.list_enrollments(ready.mail_campaign_id)
     assert len(enrollments) == 3
     assert all(e.status == MailEnrollmentStatus.PENDING for e in enrollments)
+
+
+async def test_mark_ready_normalizes_a_legacy_nonzero_step_1_delay(service, crm):
+    """Simulates a pre-invariant Step 1 (e.g. the known production campaign
+    with delay_days=2 on its first step) by overwriting it directly through
+    the step store after _make_valid_schedule_campaign() sets everything
+    else up -- add_step()/update_step() can no longer produce this state
+    themselves, so this is the only way to reproduce genuinely legacy data
+    in a test. Proves mark_ready() lazily corrects it as part of the
+    explicit Ready transition, with no separate migration."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    steps = await service.list_steps(campaign.mail_campaign_id)
+    legacy_step = steps[0]
+    await service.step_store.save(legacy_step.model_copy(update={"delay_days": 2}))
+
+    await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    normalized = await service.step_store.get(legacy_step.step_id)
+    assert normalized.delay_days == 0
+
+
+async def test_mark_ready_does_not_touch_steps_when_readiness_checks_fail(service):
+    """A campaign that ISN'T otherwise ready must never have its Step 1
+    silently rewritten by a failed Mark Ready attempt -- normalization only
+    runs after every other readiness reason has already been cleared (see
+    mark_ready()'s docstring)."""
+    campaign = await service.create_campaign("Draft")
+    step = await service.add_step(campaign.mail_campaign_id, "Subject", "Body")
+    await service.step_store.save(step.model_copy(update={"delay_days": 2}))  # simulate legacy bad data
+
+    with pytest.raises(MailCampaignNotReadyError):
+        # missing audience/mailbox/schedule -- mark_ready() must fail before
+        # ever reaching the normalization write
+        await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    untouched = await service.step_store.get(step.step_id)
+    assert untouched.delay_days == 2  # still the legacy value -- nothing was written
 
 
 async def test_mark_ready_marks_suppressed_contacts_as_suppressed_not_pending(service, crm):

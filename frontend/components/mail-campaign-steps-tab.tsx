@@ -5,6 +5,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { MAIL_TEMPLATE_VARIABLES, type MailSequenceStep } from "@/lib/api";
+import { stepTimingLabel, stepTimingSecondaryLabel } from "@/lib/mail";
 
 // Moved as-is from the old single-page layout's "Sequence" card -- same
 // handlers, same editable gating, no behavior changes.
@@ -91,17 +92,23 @@ export function MailCampaignStepsTab({
                   </p>
                   <Input value={editSubject} onChange={(e) => setEditSubject(e.target.value)} placeholder="Subject" />
                   <Textarea value={editBody} onChange={(e) => setEditBody(e.target.value)} placeholder="Body" rows={3} />
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs text-muted-foreground">Wait</label>
-                    <Input
-                      type="number"
-                      min={0}
-                      value={editDelay}
-                      onChange={(e) => setEditDelay(Number(e.target.value))}
-                      className="w-20"
-                    />
-                    <label className="text-xs text-muted-foreground">day(s) after previous step</label>
-                  </div>
+                  {step.step_number === 1 ? (
+                    <p className="text-xs text-muted-foreground">
+                      {stepTimingLabel(step)} -- {stepTimingSecondaryLabel(step)}
+                    </p>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <label className="text-xs text-muted-foreground">Wait</label>
+                      <Input
+                        type="number"
+                        min={0}
+                        value={editDelay}
+                        onChange={(e) => setEditDelay(Number(e.target.value))}
+                        className="w-20"
+                      />
+                      <label className="text-xs text-muted-foreground">day(s) after previous step</label>
+                    </div>
+                  )}
                   <div className="flex gap-2">
                     <Button
                       size="sm"
@@ -123,7 +130,8 @@ export function MailCampaignStepsTab({
                     </p>
                     <p className="mt-1 whitespace-pre-wrap text-muted-foreground">{step.body}</p>
                     <p className="mt-1 text-xs text-muted-foreground">
-                      {step.delay_days === 0 ? "Sent immediately" : `${step.delay_days} day${step.delay_days === 1 ? "" : "s"} after previous step`}
+                      {stepTimingLabel(step)}
+                      {stepTimingSecondaryLabel(step) && ` -- ${stepTimingSecondaryLabel(step)}`}
                     </p>
                   </div>
                   {editable && (
@@ -166,17 +174,23 @@ export function MailCampaignStepsTab({
             </p>
             <Input value={stepSubject} onChange={(e) => setStepSubject(e.target.value)} placeholder="Subject, e.g. Quick intro, {{first_name}}" />
             <Textarea value={stepBody} onChange={(e) => setStepBody(e.target.value)} placeholder="Body" rows={3} />
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-muted-foreground">Wait</label>
-              <Input
-                type="number"
-                min={0}
-                value={stepDelay}
-                onChange={(e) => setStepDelay(Number(e.target.value))}
-                className="w-20"
-              />
-              <label className="text-xs text-muted-foreground">day(s) after previous step</label>
-            </div>
+            {steps.length === 0 ? (
+              <p className="text-xs text-muted-foreground">
+                Initial email -- Eligible when the lead enters the campaign
+              </p>
+            ) : (
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-muted-foreground">Wait</label>
+                <Input
+                  type="number"
+                  min={0}
+                  value={stepDelay}
+                  onChange={(e) => setStepDelay(Number(e.target.value))}
+                  className="w-20"
+                />
+                <label className="text-xs text-muted-foreground">day(s) after previous step</label>
+              </div>
+            )}
             <Button type="submit" size="sm" disabled={addingStep || !stepSubject.trim() || !stepBody.trim()} className="gap-1.5">
               <Plus className="h-3.5 w-3.5" />
               {addingStep ? "Adding..." : "Add step"}

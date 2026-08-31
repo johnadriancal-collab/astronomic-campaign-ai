@@ -32,6 +32,7 @@ from app.models.mail import (
 from app.models.mailbox import Mailbox
 from app.services.crm_service import CrmContactListNotFound
 from app.services.mail_campaign_service import (
+    InvalidMailSequenceStepDelayError,
     InvalidMailTemplateVariableError,
     MailboxChannelNotFoundError,
     MailboxChannelNotUsableError,
@@ -343,6 +344,8 @@ async def add_step(
         raise HTTPException(status_code=409, detail=str(e))
     except InvalidMailTemplateVariableError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except InvalidMailSequenceStepDelayError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.patch("/campaigns/{mail_campaign_id}/steps/{step_id}", response_model=MailSequenceStep)
@@ -361,6 +364,8 @@ async def update_step(
     except MailCampaignNotEditableError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except InvalidMailTemplateVariableError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except InvalidMailSequenceStepDelayError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 

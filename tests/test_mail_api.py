@@ -294,6 +294,36 @@ def test_unknown_variable_returns_400(client):
     assert resp.status_code == 400
 
 
+def test_first_step_ignores_a_negative_delay_and_stores_zero(client):
+    """The first step in an empty sequence is force-normalized to
+    delay_days=0, not rejected -- only a Step 2+'s negative delay is a
+    validation error (see the two tests below)."""
+    created = client.post("/mail/campaigns", json={"name": "First step delay"}).json()
+    resp = client.post(
+        f"/mail/campaigns/{created['mail_campaign_id']}/steps",
+        json={"subject": "Hi", "body": "Body", "delay_days": -3},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["delay_days"] == 0
+
+
+def test_negative_delay_on_a_follow_up_step_returns_400(client):
+    created = client.post("/mail/campaigns", json={"name": "Follow-up delay"}).json()
+    cid = created["mail_campaign_id"]
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S1", "body": "B1"})
+    resp = client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S2", "body": "B2", "delay_days": -1})
+    assert resp.status_code == 400
+
+
+def test_editing_a_follow_up_step_to_a_negative_delay_returns_400(client):
+    created = client.post("/mail/campaigns", json={"name": "Edit delay"}).json()
+    cid = created["mail_campaign_id"]
+    client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S1", "body": "B1"})
+    s2 = client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "S2", "body": "B2", "delay_days": 2}).json()
+    resp = client.patch(f"/mail/campaigns/{cid}/steps/{s2['step_id']}", json={"delay_days": -2})
+    assert resp.status_code == 400
+
+
 def test_editing_a_ready_campaign_returns_409(client, crm, mailbox_store):
     import asyncio
 

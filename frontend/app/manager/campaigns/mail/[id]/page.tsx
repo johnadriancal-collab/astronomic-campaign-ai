@@ -15,6 +15,7 @@ import { MailCampaignScheduleTab, type TabWindow } from "@/components/mail-campa
 import { MailCampaignSettingsTab } from "@/components/mail-campaign-settings-tab";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
 import { findOverlappingPairs, isLocalWindowId, minutesFromTimeString, timeStringFromMinutes } from "@/lib/schedule";
+import { DEFAULT_FOLLOWUP_DELAY_DAYS } from "@/lib/mail";
 import { cn } from "@/lib/utils";
 import {
   addMailSequenceStep,
@@ -73,7 +74,7 @@ export default function MailCampaignDetailPage() {
 
   const [stepSubject, setStepSubject] = useState("");
   const [stepBody, setStepBody] = useState("");
-  const [stepDelay, setStepDelay] = useState(2);
+  const [stepDelay, setStepDelay] = useState(DEFAULT_FOLLOWUP_DELAY_DAYS);
   const [addingStep, setAddingStep] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
 
@@ -235,11 +236,17 @@ export default function MailCampaignDetailPage() {
     if (!stepSubject.trim() || !stepBody.trim()) return;
     setAddingStep(true);
     setStepError(null);
+    // The backend forces delay_days=0 for a first step regardless of what's
+    // sent, but submitting it explicitly here too keeps the request honest
+    // about what's about to be stored -- steps.length===0's Add form never
+    // shows a Delay input, so `stepDelay` may still hold a stale value from
+    // a step added/removed earlier in this session.
+    const delayDays = steps.length === 0 ? 0 : stepDelay;
     try {
-      await addMailSequenceStep(campaignId, { subject: stepSubject, body: stepBody, delay_days: stepDelay });
+      await addMailSequenceStep(campaignId, { subject: stepSubject, body: stepBody, delay_days: delayDays });
       setStepSubject("");
       setStepBody("");
-      setStepDelay(2);
+      setStepDelay(DEFAULT_FOLLOWUP_DELAY_DAYS);
       setSteps(await listMailSequenceSteps(campaignId));
       await refreshReview();
     } catch (err) {
@@ -280,11 +287,18 @@ export default function MailCampaignDetailPage() {
     setSavingStepEdit(true);
     setStepEditError(null);
     try {
-      const updated = await updateMailSequenceStep(campaignId, stepId, {
-        subject: editSubject,
-        body: editBody,
-        delay_days: editDelay,
-      });
+      // Step 1 has no editable Delay control (see mail-campaign-steps-tab.tsx),
+      // so `editDelay` was never touched for it here -- omit delay_days from
+      // the patch entirely rather than send a value the user never saw. The
+      // backend forces Step 1's delay_days to 0 unconditionally regardless
+      // of whether this key is present, which also self-heals a legacy
+      // Step 1 whose stored delay_days predates this invariant.
+      const editingStep = steps.find((s) => s.step_id === stepId);
+      const patch: Record<string, unknown> = { subject: editSubject, body: editBody };
+      if (editingStep && editingStep.step_number !== 1) {
+        patch.delay_days = editDelay;
+      }
+      const updated = await updateMailSequenceStep(campaignId, stepId, patch);
       setSteps((prev) => prev.map((s) => (s.step_id === stepId ? updated : s)));
       setEditingStepId(null);
       await refreshReview();

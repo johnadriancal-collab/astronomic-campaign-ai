@@ -118,3 +118,38 @@ export function formatScheduleSummary(campaign: {
     campaign.end_time
   )} (${campaign.timezone})`;
 }
+
+// --- Sequence step timing -----------------------------------------------
+//
+// The step at position 1 always has delay_days = 0 -- enforced by the
+// backend on every add/edit/reorder/delete (see MailCampaignService's
+// add_step()/update_step()/_renumber()/mark_ready() docstrings), never
+// only a display rule here. This is the value a real follow-up step
+// (Step 2+) defaults to in the Add form, and what a step demoted FROM
+// position 1 is reset to on reorder -- named once so this file and the
+// backend's DEFAULT_MAIL_SEQUENCE_FOLLOWUP_DELAY_DAYS don't each carry
+// their own unexplained literal 2.
+export const DEFAULT_FOLLOWUP_DELAY_DAYS = 2;
+
+// Step 1 always reads as "Initial email" here, regardless of its stored
+// delay_days -- this never inspects that field for position 1. That's a
+// display choice, not a claim about the data: a legacy campaign whose
+// Step 1 still carries a stale nonzero delay_days (from before this
+// invariant existed) already displays correctly here with no read-time
+// write of its own -- it self-heals in storage the next time that step is
+// legitimately edited, reordered around, or the campaign is marked Ready
+// (see mark_ready()'s docstring for that lazy-normalization decision).
+export function stepTimingLabel(step: { step_number: number; delay_days: number }): string {
+  if (step.step_number === 1) return "Initial email";
+  if (step.delay_days === 0) return "Sent immediately";
+  return `${step.delay_days} day${step.delay_days === 1 ? "" : "s"} after previous step`;
+}
+
+// Step 1 only -- deliberately NOT "sent immediately": actual delivery
+// still has to respect the campaign's Schedule/Channels/suppression and
+// (eventually) a real sending engine, so this describes sequence-position
+// eligibility, not a delivery promise. Null for every other step, which
+// uses stepTimingLabel()'s own text with no secondary line.
+export function stepTimingSecondaryLabel(step: { step_number: number }): string | null {
+  return step.step_number === 1 ? "Eligible when the lead enters the campaign" : null;
+}

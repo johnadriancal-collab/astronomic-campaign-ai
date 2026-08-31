@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  DEFAULT_FOLLOWUP_DELAY_DAYS,
   DEFAULT_SENDING_DAYS,
   formatScheduleSummary,
   formatSendingDays,
@@ -11,6 +12,8 @@ import {
   mailEnrollmentStatusLabel,
   mailSuppressionReasonLabel,
   nextSuppressionAction,
+  stepTimingLabel,
+  stepTimingSecondaryLabel,
   suppressionToggleLabel,
   toggleAllSendingDays,
   toggleSendingDay,
@@ -124,4 +127,33 @@ test("toggleAllSendingDays selects all seven days when not already all selected"
 
 test("toggleAllSendingDays clears to none when all seven are already selected", () => {
   assert.deepEqual(toggleAllSendingDays([0, 1, 2, 3, 4, 5, 6]), []);
+});
+
+// --- Sequence step timing (Step 1 delay_days invariant) -------------------
+
+test("DEFAULT_FOLLOWUP_DELAY_DAYS is 2", () => {
+  assert.equal(DEFAULT_FOLLOWUP_DELAY_DAYS, 2);
+});
+
+test("stepTimingLabel always reads Step 1 as 'Initial email', regardless of its stored delay_days", () => {
+  assert.equal(stepTimingLabel({ step_number: 1, delay_days: 0 }), "Initial email");
+  // A legacy record with a stale nonzero delay_days must still display
+  // correctly -- this never inspects delay_days for position 1 at all.
+  assert.equal(stepTimingLabel({ step_number: 1, delay_days: 2 }), "Initial email");
+});
+
+test("stepTimingLabel for a follow-up step reports its real delay_days", () => {
+  assert.equal(stepTimingLabel({ step_number: 2, delay_days: 0 }), "Sent immediately");
+  assert.equal(stepTimingLabel({ step_number: 2, delay_days: 1 }), "1 day after previous step");
+  assert.equal(stepTimingLabel({ step_number: 3, delay_days: 5 }), "5 days after previous step");
+});
+
+test("stepTimingSecondaryLabel is Step-1-only explanatory copy, never a delivery promise", () => {
+  assert.equal(stepTimingSecondaryLabel({ step_number: 1 }), "Eligible when the lead enters the campaign");
+  assert.equal(stepTimingSecondaryLabel({ step_number: 2 }), null);
+});
+
+test("Step 1's secondary copy never claims immediate delivery", () => {
+  const secondary = stepTimingSecondaryLabel({ step_number: 1 });
+  assert.doesNotMatch(secondary ?? "", /sent immediately/i);
 });

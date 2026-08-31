@@ -56,15 +56,24 @@ test("Cancel makes no backend write -- it only clears local edit state", () => {
 
 test("Save calls updateMailSequenceStep with this step's id and the edited fields", () => {
   const fn = PAGE_SOURCE.slice(PAGE_SOURCE.indexOf("async function handleSaveEditStep"), PAGE_SOURCE.indexOf("async function handleMoveStep"));
-  assert.match(fn, /updateMailSequenceStep\(campaignId, stepId, \{/);
+  assert.match(fn, /updateMailSequenceStep\(campaignId, stepId, patch\)/);
   assert.match(fn, /subject: editSubject/);
   assert.match(fn, /body: editBody/);
-  assert.match(fn, /delay_days: editDelay/);
+  // delay_days is only conditionally added to the patch (Step 1 has no
+  // editable Delay control at all -- see mail-campaign-steps-delay.test.ts)
+  // via an assignment, not an object-literal key, now that the base patch
+  // is built incrementally rather than as one static object literal.
+  assert.match(fn, /patch\.delay_days = editDelay/);
 });
 
-test("Save's patch never includes step_number -- editing never reorders the sequence", () => {
+test("Save's patch never includes step_number as an outgoing field -- editing never reorders the sequence", () => {
   const fn = PAGE_SOURCE.slice(PAGE_SOURCE.indexOf("async function handleSaveEditStep"), PAGE_SOURCE.indexOf("async function handleMoveStep"));
-  assert.doesNotMatch(fn, /step_number/);
+  // A read-only comparison against the edited step's OWN step_number (to
+  // decide whether delay_days belongs in the patch at all -- see
+  // mail-campaign-steps-delay.test.ts) is fine; step_number must never be
+  // written onto the outgoing patch object itself.
+  assert.doesNotMatch(fn, /patch\.step_number/);
+  assert.doesNotMatch(fn, /step_number:/);
   assert.doesNotMatch(fn, /reorderMailSequenceSteps/);
 });
 
