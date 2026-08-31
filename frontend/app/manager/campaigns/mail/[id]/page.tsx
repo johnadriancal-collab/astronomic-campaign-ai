@@ -35,6 +35,7 @@ import {
   setMailCampaignSchedule,
   unlockMailCampaign,
   updateMailCampaign,
+  updateMailSequenceStep,
   type CrmContactListSummary,
   type Mailbox,
   type MailCampaign,
@@ -75,6 +76,13 @@ export default function MailCampaignDetailPage() {
   const [stepDelay, setStepDelay] = useState(2);
   const [addingStep, setAddingStep] = useState(false);
   const [stepError, setStepError] = useState<string | null>(null);
+
+  const [editingStepId, setEditingStepId] = useState<string | null>(null);
+  const [editSubject, setEditSubject] = useState("");
+  const [editBody, setEditBody] = useState("");
+  const [editDelay, setEditDelay] = useState(0);
+  const [savingStepEdit, setSavingStepEdit] = useState(false);
+  const [stepEditError, setStepEditError] = useState<string | null>(null);
 
   const [mailboxes, setMailboxes] = useState<Mailbox[] | null>(null);
   const [selectedMailboxIds, setSelectedMailboxIds] = useState<string[]>([]);
@@ -254,6 +262,39 @@ export default function MailCampaignDetailPage() {
     }
   }
 
+  function handleStartEditStep(step: MailSequenceStep) {
+    setEditingStepId(step.step_id);
+    setEditSubject(step.subject);
+    setEditBody(step.body);
+    setEditDelay(step.delay_days);
+    setStepEditError(null);
+  }
+
+  function handleCancelEditStep() {
+    setEditingStepId(null);
+    setStepEditError(null);
+  }
+
+  async function handleSaveEditStep(stepId: string) {
+    if (!editSubject.trim() || !editBody.trim() || savingStepEdit) return;
+    setSavingStepEdit(true);
+    setStepEditError(null);
+    try {
+      const updated = await updateMailSequenceStep(campaignId, stepId, {
+        subject: editSubject,
+        body: editBody,
+        delay_days: editDelay,
+      });
+      setSteps((prev) => prev.map((s) => (s.step_id === stepId ? updated : s)));
+      setEditingStepId(null);
+      await refreshReview();
+    } catch (err) {
+      setStepEditError(err instanceof ApiError ? `Couldn't save step (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setSavingStepEdit(false);
+    }
+  }
+
   async function handleMoveStep(index: number, direction: -1 | 1) {
     const target = index + direction;
     if (target < 0 || target >= steps.length) return;
@@ -411,6 +452,18 @@ export default function MailCampaignDetailPage() {
             setStepDelay={setStepDelay}
             addingStep={addingStep}
             stepError={stepError}
+            editingStepId={editingStepId}
+            onStartEditStep={handleStartEditStep}
+            onCancelEditStep={handleCancelEditStep}
+            onSaveEditStep={handleSaveEditStep}
+            editSubject={editSubject}
+            setEditSubject={setEditSubject}
+            editBody={editBody}
+            setEditBody={setEditBody}
+            editDelay={editDelay}
+            setEditDelay={setEditDelay}
+            savingStepEdit={savingStepEdit}
+            stepEditError={stepEditError}
           />
         </TabsPanel>
 
