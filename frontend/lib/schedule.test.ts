@@ -17,6 +17,7 @@ import {
   minutesFromTimeString,
   neighborBounds,
   newLocalWindowId,
+  removeWindowById,
   snapToInterval,
   timeStringFromMinutes,
   windowsOverlap,
@@ -302,4 +303,58 @@ test("formatHourMark never repeats AM/PM on interior hours -- every mark from TI
     "12PM", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11",
     "12AM",
   ]);
+});
+
+// --- removeWindowById -- the single implementation both the timeline's ×
+// and the manual "Remove" link call -------------------------------------
+
+test("removeWindowById removes the only window, producing an empty (day-inactive) result", () => {
+  const windows = [{ id: "a", start: 480, end: 600 }];
+  assert.deepEqual(removeWindowById(windows, "a"), []);
+});
+
+test("removeWindowById removes the first of several windows, leaving the rest untouched", () => {
+  const windows = [
+    { id: "a", start: 480, end: 600 },
+    { id: "b", start: 600, end: 720 },
+    { id: "c", start: 720, end: 840 },
+  ];
+  const result = removeWindowById(windows, "a");
+  assert.deepEqual(result.map((w) => w.id), ["b", "c"]);
+});
+
+test("removeWindowById removes a specific middle/second window, not just the first", () => {
+  const windows = [
+    { id: "a", start: 480, end: 600 },
+    { id: "b", start: 600, end: 720 },
+    { id: "c", start: 720, end: 840 },
+  ];
+  const result = removeWindowById(windows, "b");
+  assert.deepEqual(result.map((w) => w.id), ["a", "c"]);
+});
+
+test("removeWindowById only removes the targeted window -- the other window's own data is unaffected", () => {
+  const windows = [
+    { id: "a", start: 480, end: 600 },
+    { id: "b", start: 600, end: 720 },
+  ];
+  const result = removeWindowById(windows, "a");
+  assert.deepEqual(result[0], { id: "b", start: 600, end: 720 });
+});
+
+test("removeWindowById is a no-op for an id that isn't present", () => {
+  const windows = [{ id: "a", start: 480, end: 600 }];
+  const result = removeWindowById(windows, "does-not-exist");
+  assert.deepEqual(result, windows);
+});
+
+test("removeWindowById never mutates the input array", () => {
+  const windows = [
+    { id: "a", start: 480, end: 600 },
+    { id: "b", start: 600, end: 720 },
+  ];
+  const originalLength = windows.length;
+  removeWindowById(windows, "a");
+  assert.equal(windows.length, originalLength);
+  assert.equal(windows[0].id, "a"); // original untouched
 });

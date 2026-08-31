@@ -12,6 +12,7 @@ import {
   minutesFromTimeString,
   neighborBounds,
   newLocalWindowId,
+  removeWindowById,
   timeStringFromMinutes,
 } from "@/lib/schedule";
 import { WEEKDAY_LABELS } from "@/lib/mail";
@@ -54,7 +55,7 @@ export function ScheduleDayRow({
   }
 
   function removeWindow(id: string) {
-    onWindowsChange(windows.filter((w) => w.id !== id));
+    onWindowsChange(removeWindowById(windows, id));
   }
 
   function addWindow() {

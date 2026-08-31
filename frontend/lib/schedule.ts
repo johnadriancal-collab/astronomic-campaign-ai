@@ -38,6 +38,19 @@ export function isLocalWindowId(id: string): boolean {
   return id.startsWith(LOCAL_WINDOW_ID_PREFIX);
 }
 
+// Removes exactly one window (by id) from a day's local, not-yet-saved
+// window list -- the single implementation both remove entry points call
+// (the timeline block's × and the manual-controls "Remove" link, see
+// schedule-day-row.tsx), so there's only ever one place this behavior can
+// drift. Purely local-state math: never calls the backend itself -- the
+// removal only reaches the server on the next explicit "Save Schedule",
+// same as every other edit in this tab. A no-op (returns an equal-length,
+// unchanged-content array) if `id` isn't present, and never mutates the
+// input array.
+export function removeWindowById<T extends { id: string }>(windows: T[], id: string): T[] {
+  return windows.filter((w) => w.id !== id);
+}
+
 // --- Timeline hour marks (gridlines + labels) -------------------------
 //
 // One mark per hour boundary, 0 through 24 inclusive (25 marks -> 24

@@ -161,6 +161,60 @@ test("windows are removable from both the visual block and the manual input row"
   assert.match(DAY_ROW_SOURCE, /Remove/);
 });
 
+// --- The timeline block's x button: click-through regression -----------
+//
+// Root cause (see schedule-window-block.tsx's own comment): the x button
+// had no onPointerDown of its own, so a pointerdown on it bubbled to the
+// BLOCK's onPointerDown (mode="move"), which called setPointerCapture on
+// the block -- capture then retargeted the follow-up pointerup/click away
+// from the button entirely, so onClick silently never ran. These guard
+// against that regressing, and against the two "don't blindly fix this"
+// wrong turns (z-index-only, or removing keyboard focusability).
+
+test("the x button has its own onPointerDown that stops propagation before the block's drag handler can see it", () => {
+  const buttonBlock = BLOCK_SOURCE.slice(BLOCK_SOURCE.indexOf("<button"));
+  assert.match(buttonBlock, /onPointerDown=\{\(e\) => e\.stopPropagation\(\)\}/);
+});
+
+test("the x button's onClick also stops propagation and calls the same onRemove the manual Remove link uses", () => {
+  const buttonBlock = BLOCK_SOURCE.slice(BLOCK_SOURCE.indexOf("<button"));
+  assert.match(buttonBlock, /e\.stopPropagation\(\)/);
+  assert.match(buttonBlock, /onRemove\(\)/);
+});
+
+test("the x button never calls beginDrag -- it must not be able to initiate a drag or resize", () => {
+  const buttonBlock = BLOCK_SOURCE.slice(BLOCK_SOURCE.indexOf("<button"));
+  assert.doesNotMatch(buttonBlock, /beginDrag/);
+});
+
+test("the x button has a real, specific aria-label naming the window it removes", () => {
+  assert.match(BLOCK_SOURCE, /aria-label=\{`Remove \$\{label\} send time`\}/);
+});
+
+test("the x button is never display:none -- it stays focusable for keyboard users, only its opacity is hover/focus-revealed", () => {
+  const buttonBlock = BLOCK_SOURCE.slice(BLOCK_SOURCE.indexOf("<button"), BLOCK_SOURCE.indexOf("</button>"));
+  // Check the className attribute specifically -- the button intentionally
+  // contains aria-hidden="true" on its decorative inner glyph, which would
+  // false-positive a bare /\bhidden\b/ check across the whole block.
+  const classNameMatch = buttonBlock.match(/className="([^"]*)"/);
+  assert.ok(classNameMatch, "expected the x button to have a className attribute");
+  const classNames = classNameMatch![1];
+  assert.doesNotMatch(classNames, /\bhidden\b/);
+  assert.match(classNames, /opacity-0/);
+  assert.match(classNames, /group-hover:opacity-100/);
+  assert.match(classNames, /focus-visible:opacity-100/);
+});
+
+test("the x button's clickable hit target is a real button element sized larger than the old 16px box", () => {
+  const buttonBlock = BLOCK_SOURCE.slice(BLOCK_SOURCE.indexOf("<button"), BLOCK_SOURCE.indexOf("</button>"));
+  assert.match(buttonBlock, /h-5 w-5/);
+});
+
+test("removeWindowById (the single remove implementation) is used by the day row, not a second inline filter", () => {
+  assert.match(DAY_ROW_SOURCE, /removeWindowById/);
+  assert.doesNotMatch(DAY_ROW_SOURCE, /windows\.filter\(\(w\) => w\.id !== id\)/);
+});
+
 // --- 15-minute snapping ------------------------------------------------------
 
 test("drag interactions snap through the shared snapping helper, not ad-hoc rounding", () => {
