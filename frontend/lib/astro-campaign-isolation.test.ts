@@ -57,11 +57,17 @@ test("Astro AI's pure submit logic has no campaign/Apollo/routing concerns", () 
   assert.doesNotMatch(ASTRO_LOGIC_SOURCE, /campaign|apollo|router|prospect/i);
 });
 
-test("Campaign Manager's Apollo choice card no longer says 'Continue to Astro'", () => {
+test("Campaign Manager's create-campaign page no longer offers an Apollo option", () => {
+  // Product direction: Apollo Campaign/Sequence integration is disabled in
+  // Campaign Manager for now. This page used to fork between "Astronomic
+  // Mail" and "Apollo" (routing to /campaign-builder) -- the Apollo card
+  // is now removed from this page entirely (not deleted from the app;
+  // /campaign-builder itself is untouched and still reachable directly).
   const source = readFileSync(
     new URL("../app/manager/campaigns/new/page.tsx", import.meta.url),
     "utf-8"
   );
   assert.doesNotMatch(source, /Continue to Astro\b/);
-  assert.match(source, /\/campaign-builder/);
+  assert.doesNotMatch(source, /\/campaign-builder/);
+  assert.doesNotMatch(source, /\bApollo\b/);
 });

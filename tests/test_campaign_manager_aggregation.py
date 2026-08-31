@@ -1,10 +1,14 @@
 """
 Tests for GET /campaign-manager/campaigns -- the Campaign Manager
-Integration Phase's read-side aggregation endpoint. Verifies the merge of
-the existing Apollo Campaign list and Astronomic Mail campaign list into
-UnifiedCampaignSummary rows, without touching either underlying store or
-enum. Exercises just the campaign, mail, and campaign_manager routers
-against a fresh FastAPI app -- not app.main's full lifespan.
+dashboard's listing endpoint.
+
+Product direction: Apollo Campaign/Sequence integration is disabled in the
+Campaign Manager surface for now, so this endpoint returns Astronomic Mail
+campaigns ONLY -- Apollo-backed Campaign records must never appear here,
+even when they exist in the store. app/api/campaign.py's own router is
+still mounted and exercised directly in these tests (via apollo_store) to
+prove it remains fully functional on its own; it's just never called from
+this aggregation endpoint anymore.
 """
 
 from unittest.mock import AsyncMock
@@ -46,6 +50,11 @@ def make_apollo_campaign(campaign_id: str, created_at: str, **overrides) -> Camp
 
 @pytest.fixture
 def test_client():
+    # apollo_store/campaign_service/sequence_sync_service exist here only to
+    # (a) prove app/api/campaign.py's own router still works untouched, and
+    # (b) prove the aggregation endpoint excludes Apollo campaigns even when
+    # they're present in the store -- not because the aggregation endpoint
+    # itself depends on them anymore.
     apollo_store = MemoryCampaignStore()
     fake_agent = AsyncMock()
     fake_apollo = AsyncMock()
@@ -87,35 +96,35 @@ def test_empty_returns_empty_array(test_client):
 
 
 @pytest.mark.asyncio
-async def test_apollo_campaigns_appear_with_correct_sending_method_and_route(test_client):
+async def test_apollo_campaigns_are_excluded_even_when_present(test_client):
+    """The core regression this file now exists to guard: an Apollo-backed
+    Campaign record existing in the store must never surface in the
+    Campaign Manager dashboard's response."""
     client, apollo_store, _mail_service, _agent, _apollo, _ranker = test_client
 
-    await apollo_store.create(make_apollo_campaign("c1", "2026-01-01T00:00:00Z", total_matches=160, selected_prospects=[{"id": "p1"}]))
+    await apollo_store.create(
+        make_apollo_campaign("c1", "2026-01-01T00:00:00Z", total_matches=160, selected_prospects=[{"id": "p1"}])
+    )
 
     resp = client.get("/campaign-manager/campaigns")
 
     assert resp.status_code == 200
-    body = resp.json()
-    assert len(body) == 1
-    item = body[0]
-    assert item["id"] == "c1"
-    assert item["sending_method"] == "apollo"
-    assert item["name"] == "Campaign c1"
-    assert item["raw_status"] == "draft"
-    assert item["status_bucket"] == "draft"
-    assert item["summary"] == "160 matches · 1 selected"
-    assert item["detail_path"] == "/manager/campaigns/c1"
+    assert resp.json() == []
 
 
 @pytest.mark.asyncio
-async def test_apollo_campaign_with_no_search_yet_shows_neutral_summary(test_client):
+async def test_apollo_router_still_works_directly_even_though_excluded_here(test_client):
+    """app/api/campaign.py's own GET /campaign must remain fully functional
+    on its own -- only the campaign-manager aggregation stopped calling it."""
     client, apollo_store, _mail_service, _agent, _apollo, _ranker = test_client
 
     await apollo_store.create(make_apollo_campaign("c1", "2026-01-01T00:00:00Z"))
 
-    resp = client.get("/campaign-manager/campaigns")
+    resp = client.get("/campaign")
 
-    assert resp.json()[0]["summary"] == "Not searched yet"
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+    assert resp.json()[0]["campaign_id"] == "c1"
 
 
 @pytest.mark.asyncio
@@ -141,8 +150,6 @@ async def test_mail_campaigns_appear_with_correct_sending_method_and_route(test_
 
 @pytest.mark.asyncio
 async def test_mail_campaign_ready_status_shows_eligible_count_not_fake_zero(test_client):
-    from datetime import time as dt_time
-
     client, _apollo_store, mail_service, _agent, _apollo, _ranker = test_client
 
     crm_list = await mail_service.crm_service.create_contact_list("Test List")
@@ -169,60 +176,24 @@ async def test_mail_campaign_ready_status_shows_eligible_count_not_fake_zero(tes
 
 
 @pytest.mark.asyncio
-async def test_both_providers_merge_and_sort_newest_first(test_client):
-    client, apollo_store, mail_service, _agent, _apollo, _ranker = test_client
+async def test_mail_campaigns_sort_newest_first(test_client):
+    client, _apollo_store, mail_service, _agent, _apollo, _ranker = test_client
 
-    await apollo_store.create(make_apollo_campaign("oldest", "2026-01-01T00:00:00Z"))
-    await mail_service.create_campaign("middle")
-    await apollo_store.create(make_apollo_campaign("newest", "2026-07-01T00:00:00Z"))
+    await mail_service.create_campaign("oldest")
+    await mail_service.create_campaign("newest")
 
-    # Force the mail campaign's created_at between the two Apollo ones so the
-    # sort assertion actually exercises cross-provider ordering.
-    mail_campaigns = await mail_service.list_campaigns()
-    mail_campaigns[0].created_at = mail_campaigns[0].created_at.replace(year=2026, month=3, day=1)
-    await mail_service.campaign_store.save(mail_campaigns[0])
-
-    resp = client.get("/campaign-manager/campaigns")
-
-    assert resp.status_code == 200
-    ordered = [(item["sending_method"], item["id"]) for item in resp.json()]
-    ids_only = [item[1] if item[0] == "apollo" else "middle" for item in ordered]
-    assert ids_only == ["newest", "middle", "oldest"]
-
-
-@pytest.mark.asyncio
-async def test_archived_apollo_campaign_is_excluded_by_default(test_client):
-    """Matches GET /campaign's existing default -- the aggregation never
-    overrides include_archived, so the dashboard's archived-hiding behavior
-    is unchanged."""
-    from datetime import datetime, timezone
-
-    from app.models.email_sequence import EmailSequence, EmailSequenceStatus
-
-    client, apollo_store, _mail_service, _agent, _apollo, _ranker = test_client
-
-    await apollo_store.create(make_apollo_campaign("visible", "2026-07-01T00:00:00Z"))
-    await apollo_store.create(make_apollo_campaign("archived", "2026-07-02T00:00:00Z"))
-
-    app = client.app
-    sequence_sync_service = app.dependency_overrides[get_email_sequence_sync_service]()
-    now = datetime.now(timezone.utc)
-    await sequence_sync_service.store.create(
-        EmailSequence(
-            email_sequence_id="seq-1",
-            campaign_id="archived",
-            apollo_sequence_id="apollo-seq-1",
-            name="Archived one",
-            status=EmailSequenceStatus.ARCHIVED,
-            created_at=now,
-            updated_at=now,
-        )
-    )
+    campaigns = await mail_service.list_campaigns()
+    oldest = next(c for c in campaigns if c.name == "oldest")
+    newest = next(c for c in campaigns if c.name == "newest")
+    oldest.created_at = oldest.created_at.replace(year=2020)
+    newest.created_at = newest.created_at.replace(year=2027)
+    await mail_service.campaign_store.save(oldest)
+    await mail_service.campaign_store.save(newest)
 
     resp = client.get("/campaign-manager/campaigns")
 
-    ids = {item["id"] for item in resp.json()}
-    assert ids == {"visible"}
+    names = [item["name"] for item in resp.json()]
+    assert names == ["newest", "oldest"]
 
 
 def test_never_calls_claude_or_apollo(test_client):
@@ -233,3 +204,5 @@ def test_never_calls_claude_or_apollo(test_client):
     fake_agent.generate_campaign_plan.assert_not_called()
     fake_ranker.rank.assert_not_called()
     fake_apollo.search_people.assert_not_called()
+    fake_apollo.list_sequences.assert_not_called()
+    fake_apollo.get_sequence.assert_not_called()

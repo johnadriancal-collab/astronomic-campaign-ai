@@ -1,61 +1,30 @@
 """
 Campaign Manager Integration Phase -- the ONE new backend surface for
-"Option D" (read-side aggregation, approved architecture). This router
-merges the existing Apollo Campaign list and the existing Astronomic Mail
-campaign list into a single presentation DTO for the unified dashboard.
+"Option D" (read-side aggregation, approved architecture).
 
-It deliberately calls the two existing list routes' functions directly
-(list_campaigns from app.api.campaign, list_campaigns from app.api.mail)
-instead of duplicating their filtering logic -- both remain the single
-source of truth for what "the Apollo campaign list" / "the Mail campaign
-list" even means. Nothing here ever writes to either store, calls Claude,
-or calls Apollo. Nothing here merges the two underlying models -- Campaign
-and MailCampaign are read as-is and reshaped into UnifiedCampaignSummary
-rows only for this endpoint's response.
+Product direction: Apollo Campaign/Sequence integration is disabled in the
+Campaign Manager surface for now, so this router returns Astronomic Mail
+campaigns ONLY. It used to also merge in the
+Apollo-backed Campaign list (app.api.campaign's list_campaigns); that half
+is intentionally removed from this endpoint's response, NOT deleted from
+the codebase -- app/api/campaign.py, CampaignService, CampaignSyncService,
+and EmailSequenceSyncService are untouched and still fully functional if
+called directly. Nothing here writes to any store, calls Claude, or calls
+Apollo.
 """
 
 from fastapi import APIRouter, Depends
 
-from app.api.campaign import list_campaigns as list_apollo_campaigns
 from app.api.mail import list_campaigns as list_mail_campaigns
-from app.dependencies import get_campaign_service, get_email_sequence_sync_service, get_mail_campaign_service
-from app.models.campaign import Campaign
-from app.models.campaign_manager import (
-    APOLLO_STATUS_BUCKET as _APOLLO_STATUS_BUCKET,
-)
+from app.dependencies import get_mail_campaign_service
 from app.models.campaign_manager import (
     MAIL_STATUS_BUCKET as _MAIL_STATUS_BUCKET,
 )
 from app.models.campaign_manager import SendingMethod, UnifiedCampaignSummary
 from app.models.mail import MailCampaign
-from app.services.campaign_service import CampaignService
-from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.mail_campaign_service import MailCampaignService
 
 router = APIRouter(prefix="/campaign-manager", tags=["campaign-manager"])
-
-
-def _apollo_summary(campaign: Campaign) -> UnifiedCampaignSummary:
-    # Astronomic Mail has no sending yet, so no sent/reply/open metrics
-    # exist for it -- Apollo's summary line only ever describes information
-    # Apollo campaigns actually have (matches/selection), never a fabricated
-    # send metric either. `total_matches is None` means search() hasn't run
-    # yet -- a neutral state, not a fake "0 matches".
-    if campaign.total_matches is None:
-        summary = "Not searched yet"
-    else:
-        summary = f"{campaign.total_matches} matches · {campaign.selected_prospect_count} selected"
-
-    return UnifiedCampaignSummary(
-        id=campaign.campaign_id,
-        sending_method=SendingMethod.APOLLO,
-        name=campaign.plan.campaign_name,
-        status_bucket=_APOLLO_STATUS_BUCKET[campaign.status.value],
-        raw_status=campaign.status.value,
-        summary=summary,
-        created_at=campaign.created_at,
-        detail_path=f"/manager/campaigns/{campaign.campaign_id}",
-    )
 
 
 async def _mail_summary(campaign: MailCampaign, mail_service: MailCampaignService) -> UnifiedCampaignSummary:
@@ -88,24 +57,16 @@ async def _mail_summary(campaign: MailCampaign, mail_service: MailCampaignServic
 
 @router.get("/campaigns", response_model=list[UnifiedCampaignSummary])
 async def list_unified_campaigns(
-    campaign_service: CampaignService = Depends(get_campaign_service),
-    sequence_sync_service: EmailSequenceSyncService = Depends(get_email_sequence_sync_service),
     mail_service: MailCampaignService = Depends(get_mail_campaign_service),
 ):
     """
-    Read-side aggregation for the Campaign Manager dashboard: merges the
-    existing Apollo Campaign list (GET /campaign, archived excluded -- same
-    default the dashboard already used) with the existing Astronomic Mail
-    campaign list (GET /mail/campaigns). Read-only against both stores;
-    never calls Claude or Apollo.
+    Read-side listing for the Campaign Manager dashboard: Astronomic Mail
+    campaigns only (GET /mail/campaigns). Apollo Campaign/Sequence records
+    are deliberately excluded -- see module docstring. Read-only; never
+    calls Claude or Apollo.
     """
-    apollo_campaigns = await list_apollo_campaigns(
-        service=campaign_service, sequence_sync_service=sequence_sync_service
-    )
     mail_campaigns = await list_mail_campaigns(service=mail_service)
 
-    summaries = [_apollo_summary(c) for c in apollo_campaigns]
-    for mail_campaign in mail_campaigns:
-        summaries.append(await _mail_summary(mail_campaign, mail_service))
+    summaries = [await _mail_summary(mail_campaign, mail_service) for mail_campaign in mail_campaigns]
 
     return sorted(summaries, key=lambda s: s.created_at, reverse=True)

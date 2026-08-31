@@ -2,14 +2,12 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Loader2, Megaphone, RefreshCw } from "lucide-react";
+import { AlertTriangle, Megaphone } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { buttonVariants } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { CampaignStatusBadge } from "@/components/campaign-status-badge";
-import { ApiError, listUnifiedCampaigns, syncCampaigns, type CampaignStatus, type UnifiedCampaignSummary } from "@/lib/api";
+import { ApiError, listUnifiedCampaigns, type UnifiedCampaignSummary } from "@/lib/api";
 import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel } from "@/lib/mail";
 import type { MailCampaignStatus } from "@/lib/api";
 import { cn } from "@/lib/utils";
@@ -22,14 +20,11 @@ function formatDate(iso: string): string {
   });
 }
 
-// Each provider keeps rendering its own already-built status badge (Apollo's
-// 8-state CampaignStatusBadge, Mail's 3-state pill) -- this never forces
-// them into one shared status component, per the Campaign Manager
-// Integration Phase's explicit "do not merge status displays" instruction.
-function ProviderStatusBadge({ item }: { item: UnifiedCampaignSummary }) {
-  if (item.sending_method === "apollo") {
-    return <CampaignStatusBadge status={item.raw_status as CampaignStatus} />;
-  }
+// Campaign Manager's Apollo Campaign/Sequence integration is disabled --
+// this endpoint now only ever returns astronomic_mail items (see
+// app/api/campaign_manager.py), so there is exactly one status shape to
+// render here. No sending-method badge is needed since there's only one.
+function StatusBadge({ item }: { item: UnifiedCampaignSummary }) {
   const status = item.raw_status as MailCampaignStatus;
   return (
     <span className={cn("shrink-0 rounded-full px-2 py-0.5 text-xs font-medium", mailCampaignStatusBadgeClass(status))}>
@@ -38,19 +33,9 @@ function ProviderStatusBadge({ item }: { item: UnifiedCampaignSummary }) {
   );
 }
 
-function SendingMethodBadge({ item }: { item: UnifiedCampaignSummary }) {
-  return (
-    <Badge variant="outline" className="rounded-full border-border/60 font-normal text-muted-foreground">
-      {item.sending_method === "apollo" ? "Apollo" : "Astronomic Mail"}
-    </Badge>
-  );
-}
-
 export default function CampaignsPage() {
   const [campaigns, setCampaigns] = useState<UnifiedCampaignSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [syncing, setSyncing] = useState(false);
-  const [syncError, setSyncError] = useState<string | null>(null);
 
   async function loadCampaigns(): Promise<void> {
     try {
@@ -70,31 +55,7 @@ export default function CampaignsPage() {
     let cancelled = false;
 
     (async () => {
-      // Render whatever's already stored immediately -- sync is
-      // non-blocking, same pattern as every other "Sync now" in this app.
-      // A failed sync leaves the page showing last-known-good data rather
-      // than blocking or blanking the view. Sync only ever affects the
-      // Apollo side (Astronomic Mail has nothing to sync against) --
-      // reloading afterwards re-fetches both through the same aggregated
-      // endpoint either way.
-      await loadCampaigns();
-      if (cancelled) return;
-
-      setSyncing(true);
-      try {
-        await syncCampaigns();
-        if (!cancelled) await loadCampaigns();
-      } catch (err) {
-        if (!cancelled) {
-          setSyncError(
-            err instanceof ApiError
-              ? `Couldn't sync with Apollo (${err.status}) -- showing last known data.`
-              : "Couldn't reach the backend to sync -- showing last known data."
-          );
-        }
-      } finally {
-        if (!cancelled) setSyncing(false);
-      }
+      if (!cancelled) await loadCampaigns();
     })();
 
     return () => {
@@ -109,31 +70,10 @@ export default function CampaignsPage() {
         <div>
           <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">Campaigns</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-            Every campaign across both sending methods -- Apollo and Astronomic Mail.
+            Create and manage your Astronomic Mail campaigns.
           </p>
         </div>
-        <div className="mt-1.5 flex shrink-0 items-center gap-1.5 whitespace-nowrap text-xs text-muted-foreground">
-          {syncing ? (
-            <>
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-              Syncing…
-            </>
-          ) : (
-            <>
-              <RefreshCw className="h-3.5 w-3.5" />
-              Synced
-            </>
-          )}
-        </div>
       </div>
-
-      {syncError && (
-        <Alert variant="destructive" className="mb-4">
-          <AlertTriangle />
-          <AlertTitle>Sync failed</AlertTitle>
-          <AlertDescription>{syncError}</AlertDescription>
-        </Alert>
-      )}
 
       {error && (
         <Alert variant="destructive">
@@ -159,7 +99,7 @@ export default function CampaignsPage() {
           <div>
             <p className="font-medium">No campaigns yet</p>
             <p className="mt-1 max-w-sm text-sm text-muted-foreground">
-              Campaigns you create, whether through Apollo or Astronomic Mail, will show up here once they exist.
+              Campaigns you create will show up here once they exist.
             </p>
           </div>
           <Link href="/manager/campaigns/new" className={cn(buttonVariants({ size: "sm" }), "mt-1")}>
@@ -176,9 +116,8 @@ export default function CampaignsPage() {
                 <CardHeader>
                   <div className="mb-1 flex items-start justify-between gap-2">
                     <CardTitle className="leading-snug">{item.name}</CardTitle>
-                    <ProviderStatusBadge item={item} />
+                    <StatusBadge item={item} />
                   </div>
-                  <SendingMethodBadge item={item} />
                 </CardHeader>
                 <CardContent className="flex flex-wrap items-center gap-1.5">
                   <span className="text-sm text-muted-foreground">{item.summary}</span>
