@@ -71,6 +71,7 @@ from app.repositories.mailbox_send_policy_store import MailboxSendPolicyStore
 from app.repositories.mailbox_store import MailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.mail_scheduler import compute_eligible_at, is_within_window, resolve_next_send_time
+from app.services.rfc_message_id import generate_rfc_message_id
 
 # --- Placeholder safety defaults --------------------------------------------
 # None of these numbers are product-approved -- they exist only so the
@@ -96,13 +97,225 @@ class NoUsableMailboxError(Exception):
         super().__init__(f"No usable (selected + CONNECTED) mailbox for campaign {mail_campaign_id}")
 
 
+class SendOutcomeCertainty(str, Enum):
+    """How certain a MailSenderPort.send() FAILURE (a raised exception)
+    leaves us about whether the provider actually accepted the message
+    before raising. Owned here, by the execution layer, not by any one
+    provider adapter -- every current and future MailSenderPort
+    implementation is expected to expose this same two-valued vocabulary
+    on its exceptions (see MailSendError below) so a future Phase C
+    caller can rely on ONE contract regardless of which provider raised.
+
+    B2 does NOT act on this -- process_one_due_step() still treats every
+    raised exception identically (leave the row in SENDING, let
+    reap_orphans() move it to UNKNOWN -- see that method's docstring).
+    This enum exists so the INFORMATION is available on the exception
+    when Phase C is ready to use it for a real retry/requeue policy; it
+    is not itself a behavior change.
+
+    DEFINITELY_NOT_SENT: the provider observably rejected the request
+      BEFORE it could have created/queued the message -- e.g. a real
+      HTTP response confirming an auth/permission/rate-limit/malformed-
+      request rejection, or a network failure proven to have occurred
+      before any request bytes could have left this process (the
+      connection was never established). Safe for a future retry policy
+      to requeue without risk of a duplicate send.
+    OUTCOME_UNKNOWN: we cannot prove the provider did NOT accept the
+      message -- includes every ambiguous network failure (a read/write
+      timeout after the request may already have been transmitted),
+      every provider-side 5xx (the provider's own server may have
+      partially processed the request before erroring), and a malformed/
+      unparseable 200-equivalent response (the provider's own success
+      signal, just one we failed to read). MUST be treated exactly like
+      Phase A's existing SENDING->UNKNOWN path (see
+      MailEnrollmentStepStatus.UNKNOWN's docstring) -- never
+      auto-retried."""
+
+    DEFINITELY_NOT_SENT = "definitely_not_sent"
+    OUTCOME_UNKNOWN = "outcome_unknown"
+
+
+class MailSendError(Exception):
+    """Base class every MailSenderPort implementation's failures SHOULD
+    subclass so a future Phase C caller can inspect `.certainty` (see
+    SendOutcomeCertainty above) -- NOT enforced by MailSenderPort.send()'s
+    type signature (a concrete sender may still raise a bare Exception;
+    process_one_due_step() treats that identically to any MailSendError,
+    per that method's own contract). Defaults conservatively to
+    OUTCOME_UNKNOWN -- a subclass must explicitly opt INTO
+    DEFINITELY_NOT_SENT, never the reverse, matching this module's
+    established "be conservative around ambiguity" principle (see
+    MailEnrollmentStepStatus.UNKNOWN's docstring)."""
+
+    certainty: SendOutcomeCertainty = SendOutcomeCertainty.OUTCOME_UNKNOWN
+
+
+class MailSendRequestValidationError(ValueError):
+    """Raised by MailSendRequest.__post_init__ -- a plain ValueError
+    subclass (matching this codebase's existing convention, e.g.
+    MailScheduleValidationError in app/models/mail.py) for a structurally
+    invalid request. Always raised before any provider code runs (a
+    frozen dataclass's __post_init__ runs at construction time, so an
+    invalid MailSendRequest can never exist long enough to be passed to
+    a sender)."""
+
+
+@dataclass(frozen=True)
+class MailSendRequest:
+    """The complete, immutable input to ONE MailSenderPort.send() call --
+    the provider boundary's single entry contract. Everything a concrete
+    sender needs to construct and transmit a message, and -- most
+    importantly -- everything it is NOT allowed to invent on its own.
+
+    `rfc_message_id` is EXECUTION-OWNED, not provider-owned (a B2
+    hardening-pass correction). The reason: Phase A's durable execution
+    model requires the outbound Message-ID to be knowable BEFORE crossing
+    the provider-call uncertainty boundary (see MailEnrollmentStepStatus.
+    SENDING's docstring in app/models/mail.py) -- if the ID were instead
+    generated INSIDE the provider adapter (as B2's first pass originally
+    did), a crash between "Gmail received the message" and "our process
+    persists the provider's response" would leave the durable execution
+    row with no way to ever learn which Message-ID was actually sent, so
+    reconciliation could never confirm or rule out a duplicate. Requiring
+    the caller to generate (see app/services/rfc_message_id.py's
+    generate_rfc_message_id()) and supply the ID here means a future
+    Phase C worker can persist it onto MailEnrollmentStep.rfc_message_id
+    BEFORE the CLAIMED->SENDING transition -- at which point it survives
+    a crash regardless of what happens next, and a retry/reconciliation
+    pass can reuse the SAME persisted value instead of generating a new
+    one (this is also what resolves B2's original "deterministic for a
+    specific execution attempt" open item: determinism-by-generation was
+    never the right mechanism -- determinism-by-PERSISTENCE is).
+    MailSenderPort implementations (GmailSender included) must CONSUME
+    this value, never generate or replace it -- see
+    tests/test_gmail_sender.py's determinism/no-silent-replacement tests.
+
+    NOT YET WIRED: B2 does not add the "persist before SENDING" write to
+    MailSendingService.process_one_due_step() -- that would be Phase A
+    execution-behavior work, explicitly out of B2's scope. See that
+    method's own inline comment at its sender.send() call site for
+    exactly what B2 DOES do instead (generate inline, not persisted) and
+    why that's a deliberate, temporary, fully-documented gap.
+
+    MANDATORY PHASE C INVARIANT (recorded here now, enforced by nothing
+    in this codebase yet -- B2 does not implement Phase C): before any
+    provider invocation becomes possible, execution MUST perform this
+    exact durable sequence, in this exact order:
+      1. Obtain/generate the RFC Message-ID (see app/services/
+         rfc_message_id.py's generate_rfc_message_id()).
+      2. Persist that EXACT Message-ID onto MailEnrollmentStep.
+         rfc_message_id.
+      3. Commit that persistence successfully (the write must actually
+         land before proceeding -- step 4 must never start on the
+         strength of an unconfirmed write).
+      4. Transition/commit the row into the provider uncertainty
+         boundary (CLAIMED->SENDING -- see MailEnrollmentStepStatus.
+         SENDING's docstring in app/models/mail.py).
+      5. Invoke a MailSenderPort implementation (e.g. GmailSender) using
+         a MailSendRequest built with that exact persisted Message-ID --
+         never a newly generated one.
+    Recovery rules this sequence exists to enable:
+      - A crash after step 2/3 but BEFORE step 5 (provider invocation):
+        later execution (a retry or reconciliation pass) MUST re-read
+        and reuse the ALREADY-PERSISTED Message-ID from the row, never
+        generate a second one for the same attempt.
+      - A crash AFTER step 5 with an uncertain outcome (see
+        SendOutcomeCertainty.OUTCOME_UNKNOWN above): execution MUST
+        follow the existing UNKNOWN/manual-reconciliation safety model
+        (MailEnrollmentStepStatus.UNKNOWN, reap_orphans() -- this module,
+        unchanged since Phase A) and MUST NOT automatically resend.
+    Nothing in B2 violates this invariant (process_one_due_step()'s
+    current inline-generate-without-persisting behavior is a KNOWN,
+    documented, temporary gap relative to it, not a conflicting design)
+    -- but nothing in B2 implements it either. Phase C must not begin
+    provider wiring without satisfying steps 1-5 above in full.
+
+    `reply_in_thread` is copied from MailSequenceStep/MailEnrollmentStep's
+    own field of the same name (see app/models/mail.py) -- an AUTHORING
+    PREFERENCE ("thread this step under its predecessor, if one exists"),
+    not a promise that threading context is actually available for THIS
+    particular request. Step 1 always has `reply_in_thread` copied from
+    its MailSequenceStep (commonly True, per that model's own default)
+    even though there is, by definition, no prior message to thread under
+    -- so `reply_in_thread=True` with no threading fields at all is a
+    NORMAL, valid, expected shape, not an error.
+
+    Threading fields, enforced by __post_init__ below:
+      - `reply_in_thread=False`: `in_reply_to_message_id`, `references`,
+        and `thread_id` must ALL be unset -- a send explicitly marked
+        "not threaded" must never carry threading context.
+      - `reply_in_thread=True`: `in_reply_to_message_id` and `thread_id`
+        must be given TOGETHER or not at all -- one without the other is
+        an incomplete threading request (the RFC parent for MIME
+        In-Reply-To/References without Gmail's own thread identifier for
+        the API's `threadId`, or vice versa), not a valid partial one.
+        Both absent is fine (see above -- e.g. Step 1, or any step whose
+        prior message's identifiers aren't available to this caller).
+        `references` is optional even when both are present (a first
+        reply has only one ancestor -- itself `in_reply_to_message_id`);
+        when given, `in_reply_to_message_id` must also be given.
+      Gmail's ACTUAL threading behavior with this shape is NOT proven by
+      anything in this codebase yet -- see app/google/gmail_sender.py's
+      module docstring; this is request-shape validation only."""
+
+    mailbox: Mailbox
+    to_email: str
+    subject: str
+    body: str
+    rfc_message_id: str
+    reply_in_thread: bool
+    in_reply_to_message_id: str | None = None
+    references: tuple[str, ...] = ()
+    thread_id: str | None = None
+
+    def __post_init__(self) -> None:
+        mid = self.rfc_message_id
+        if not mid or not mid.strip():
+            raise MailSendRequestValidationError("rfc_message_id must be a non-empty string.")
+        if any(ch in mid for ch in ("\r", "\n", "<", ">")):
+            raise MailSendRequestValidationError(
+                "rfc_message_id must be a bare local-part@domain value -- no angle brackets, no line breaks."
+            )
+        if "@" not in mid:
+            raise MailSendRequestValidationError("rfc_message_id must contain '@' (local-part@domain shape).")
+
+        if not self.reply_in_thread:
+            if self.in_reply_to_message_id is not None or self.references or self.thread_id is not None:
+                raise MailSendRequestValidationError(
+                    "reply_in_thread=False (a new-thread send) must not carry any threading context "
+                    "(in_reply_to_message_id/references/thread_id) -- set reply_in_thread=True instead "
+                    "if this is actually a follow-up."
+                )
+        else:
+            has_in_reply_to = self.in_reply_to_message_id is not None
+            has_thread_id = self.thread_id is not None
+            if has_in_reply_to != has_thread_id:
+                raise MailSendRequestValidationError(
+                    "in_reply_to_message_id and thread_id must be supplied TOGETHER or not at all -- "
+                    "an incomplete threading request (one without the other) is invalid. Neither being "
+                    "set is fine even when reply_in_thread=True (e.g. Step 1, or any step whose prior "
+                    "message's identifiers aren't available to this caller) -- the send simply starts "
+                    "a new thread despite the authoring preference; see MailSendRequest's docstring."
+                )
+
+        if self.references and self.in_reply_to_message_id is None:
+            raise MailSendRequestValidationError(
+                "references requires in_reply_to_message_id to also be set -- a References chain "
+                "with no immediate parent is not a valid reply."
+            )
+
+
 @dataclass(frozen=True)
 class SendResult:
     """What a real send would report back -- provider-assigned identity
-    for the message, filled onto MailEnrollmentStep on success. No field
-    here is ever synthesized by this service; a real MailSenderPort
-    implementation (Phase C+) would build this from Gmail's own API
-    response."""
+    for the message, filled onto MailEnrollmentStep on success.
+    `rfc_message_id` here MUST echo the value the caller supplied on the
+    originating MailSendRequest (see that dataclass's docstring) -- a
+    conforming MailSenderPort implementation never returns a different
+    one. `provider_message_id`/`provider_thread_id` are the only two
+    fields a real implementation actually invents (from the provider's
+    own response); nothing here is ever synthesized by this service
+    itself."""
 
     provider_message_id: str
     provider_thread_id: str
@@ -111,22 +324,33 @@ class SendResult:
 
 class MailSenderPort(ABC):
     """The ONLY boundary through which a message could ever actually be
-    sent. Phase A defines this interface and nothing else -- no concrete
-    implementation exists anywhere under app/ (grep for `MailSenderPort)`
-    subclasses turns up only test doubles under tests/). A real
-    implementation (Gmail API, gmail.send scope, MIME construction) is
-    explicitly out of Phase A's boundary; adding one is Phase C's job, and
-    when it happens it plugs into this exact interface without
-    process_one_due_step() changing at all."""
+    sent. Phase A defined this interface with no concrete implementation
+    anywhere under app/. Phase B2 (Gmail Sender Foundation) added the
+    first one -- GmailSender (app/google/gmail_sender.py) -- but it is
+    NOT wired to anything: no route, worker, or scheduler in this
+    codebase ever constructs one and hands it to process_one_due_step()
+    (see GmailSender's own module docstring, and tests/
+    test_gmail_sending_safety.py, which is what actually enforces that).
+    Wiring a real sender into a real, scheduled worker loop is Phase C's
+    job, and when it happens it plugs into this exact interface without
+    process_one_due_step() changing at all.
+
+    UPDATED by the B2 hardening pass: send() now takes a single immutable
+    MailSendRequest rather than five separate keyword arguments -- see
+    that dataclass's own docstring for why (short version: `rfc_message_id`
+    must be execution-supplied, not provider-invented, and a growing pile
+    of optional threading kwargs was the wrong shape for that requirement
+    to live in)."""
 
     @abstractmethod
-    async def send(
-        self, *, mailbox: Mailbox, to_email: str, subject: str, body: str, reply_in_thread: bool
-    ) -> SendResult:
+    async def send(self, request: MailSendRequest) -> SendResult:
         """Must raise on any failure or uncertain outcome -- never return a
         synthetic/partial SendResult. process_one_due_step() treats a raised
         exception here as "provider call outcome unknown" and deliberately
-        leaves the row in SENDING for orphan-reaping, never auto-retries."""
+        leaves the row in SENDING for orphan-reaping, never auto-retries
+        (see SendOutcomeCertainty above for the richer information a
+        MailSendError-subclassing implementation SHOULD expose on top of
+        that uniform behavior, for Phase C's future use)."""
 
 
 class SendBlockReason(str, Enum):
@@ -818,14 +1042,30 @@ class MailSendingService:
         if not sending_applied:
             return ProcessOutcome(sent=False, blocked_reason=SendBlockReason.LOST_CLAIM_RACE)
 
+        # B2 hardening pass: MailSenderPort.send() now requires a
+        # MailSendRequest carrying its own rfc_message_id (see that
+        # dataclass's docstring for why). Generating it HERE, inline,
+        # keeps every existing write and test assertion in this method
+        # byte-for-byte unchanged -- it is deliberately NOT added to
+        # `sending_step`'s update dict above, so it is NOT persisted
+        # before this CLAIMED->SENDING transition. That means the real
+        # durability guarantee MailSendRequest exists to enable
+        # ("generate + persist BEFORE SENDING, so a crash mid-send is
+        # recoverable by re-reading the row") is still NOT built here --
+        # this call site only adapts to the new required TYPE, it does
+        # not change WHEN anything is written. Reordering this method's
+        # own writes to close that gap for real is explicitly Phase C's
+        # job (see MailSendRequest's docstring).
+        send_request = MailSendRequest(
+            mailbox=mailbox,
+            to_email=enrollment.email_at_enrollment,
+            subject=sending_step.subject,
+            body=sending_step.body,
+            rfc_message_id=generate_rfc_message_id(mailbox.email.rsplit("@", 1)[-1]),
+            reply_in_thread=sending_step.reply_in_thread,
+        )
         try:
-            result = await sender.send(
-                mailbox=mailbox,
-                to_email=enrollment.email_at_enrollment,
-                subject=sending_step.subject,
-                body=sending_step.body,
-                reply_in_thread=sending_step.reply_in_thread,
-            )
+            result = await sender.send(send_request)
         except Exception as e:
             # Provider call outcome is UNKNOWN -- never guess. The row stays
             # in SENDING; reap_orphans() is the only thing that ever moves

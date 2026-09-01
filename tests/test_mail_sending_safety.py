@@ -1,11 +1,24 @@
 """
 Static sending-safety checks for Astronomic Mail Phase A (durable execution
 model). These are a backstop, not the primary guarantee -- the primary
-guarantee is that MailSenderPort (app/services/mail_sending_service.py)
-has zero concrete implementation anywhere under app/, so there is no
-object process_one_due_step() could ever be given that would actually
-deliver a message. See tests/test_mail_sending_service.py for the
-behavioral tests (all driven by FakeMailSender, defined only in tests/).
+guarantee is architectural: nothing under app/ ever WIRES a concrete
+MailSenderPort implementation into anything reachable (no route, no
+worker, no scheduler -- see tests/test_gmail_sending_safety.py, which is
+where that guarantee is actually enforced now). See tests/
+test_mail_sending_service.py for the behavioral tests (all driven by
+FakeMailSender, defined only in tests/).
+
+UPDATED for Phase B2 (Gmail Sender Foundation): MailSenderPort gained its
+first real subclass, GmailSender (app/google/gmail_sender.py) -- see that
+class's own module docstring for exactly why "a concrete implementation
+exists" and "a concrete implementation is reachable" are deliberately
+different guarantees, and why only the second one is the actual safety
+boundary. test_no_concrete_mailsenderport_implementation_exists_under_app()
+below is intentionally renamed/narrowed to reflect this: it now allow-lists
+EXACTLY GmailSender (the one approved, fully-tested, dormant
+implementation) and still fails on any OTHER concrete subclass appearing
+anywhere under app/ -- an unreviewed second implementation slipping in
+unnoticed remains exactly the failure mode this file exists to catch.
 
 Not marked asyncio -- these are plain sync source-scanning checks, mirroring
 tests/test_mailbox_sending_safety.py's own convention.
@@ -16,19 +29,29 @@ from pathlib import Path
 
 APP_ROOT = Path("app")
 
+# Phase B2: the ONE approved concrete MailSenderPort implementation.
+# Adding a second entry here must never be a casual edit -- see this
+# module's docstring.
+_APPROVED_MAILSENDERPORT_IMPLEMENTATIONS = {
+    ("app/google/gmail_sender.py", "GmailSender"),
+}
+
 
 def _all_app_source() -> list[Path]:
     return sorted(APP_ROOT.rglob("*.py"))
 
 
-def test_no_concrete_mailsenderport_implementation_exists_under_app():
-    """MailSenderPort is an ABC with one abstract method (send()) -- if
-    anything under app/ ever subclasses it, that would be a real send
-    capability slipping into production code. Only tests/test_mail_sending_
-    service.py's FakeMailSender may ever subclass it."""
-    pattern = re.compile(r"class\s+\w+\s*\(\s*MailSenderPort\s*\)")
-    offenders = [str(path) for path in _all_app_source() if pattern.search(path.read_text())]
-    assert offenders == []
+def test_only_the_approved_mailsenderport_implementation_exists_under_app():
+    """MailSenderPort is an ABC with one abstract method (send()) -- every
+    class under app/ that subclasses it must be exactly the
+    Phase-B2-approved GmailSender; anything else is an unreviewed real
+    send capability slipping into production code."""
+    pattern = re.compile(r"class\s+(\w+)\s*\(\s*MailSenderPort\s*\)")
+    found: set[tuple[str, str]] = set()
+    for path in _all_app_source():
+        for match in pattern.finditer(path.read_text()):
+            found.add((str(path), match.group(1)))
+    assert found == _APPROVED_MAILSENDERPORT_IMPLEMENTATIONS
 
 
 def test_mail_sending_service_never_imports_gmail_smtp_or_oauth():

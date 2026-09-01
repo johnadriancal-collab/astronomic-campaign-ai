@@ -1,9 +1,11 @@
 """
 Tests for MailSendingService -- Phase A's durable execution engine. Uses
-in-memory stores throughout, and FakeMailSender (below) as the ONLY
-MailSenderPort implementation anywhere in this codebase -- see that
-class's docstring for why it deliberately lives here, in tests/, and not
-under app/.
+in-memory stores throughout, and FakeMailSender (below) as the
+test-only MailSenderPort implementation used by every test in this file
+-- see that class's docstring for why it deliberately lives here, in
+tests/, and not under app/ (GmailSender, app/google/gmail_sender.py, is
+the one real implementation, added in Phase B2 -- this fake exists so
+MailSendingService's own tests never depend on Gmail-specific code).
 """
 
 from datetime import datetime, time, timedelta, timezone
@@ -36,6 +38,7 @@ from app.services.activity_log_service import ActivityLogService
 from app.services.mail_sending_service import (
     DEFAULT_MAILBOX_DAILY_SEND_LIMIT,
     DEFAULT_MAILBOX_MIN_SECONDS_BETWEEN_SENDS,
+    MailSendRequest,
     MailSenderPort,
     MailSendingService,
     NoUsableMailboxError,
@@ -50,27 +53,26 @@ NOW = datetime(2026, 9, 7, 15, 0, tzinfo=timezone.utc)  # Monday, mid-afternoon 
 
 
 class FakeMailSender(MailSenderPort):
-    """The ONLY MailSenderPort implementation in this codebase, and it
-    lives in tests/ specifically so it can never be mistaken for a
-    production-capable sender (see MailSenderPort's own docstring: no
-    concrete implementation exists anywhere under app/). Records every call
-    it receives so tests can assert on exactly what would have been sent,
-    without ever actually sending anything."""
+    """A MailSenderPort test double -- lives in tests/, not under app/, so
+    it can never be mistaken for a production-capable sender. Records
+    every MailSendRequest it receives so tests can assert on exactly what
+    would have been sent, without ever actually sending anything. Echoes
+    `request.rfc_message_id` back on the returned SendResult -- never
+    invents its own -- matching the real contract every MailSenderPort
+    implementation must honor (see MailSendRequest's docstring)."""
 
     def __init__(self, fail: bool = False):
         self.fail = fail
-        self.calls: list[dict] = []
+        self.calls: list[MailSendRequest] = []
 
-    async def send(self, *, mailbox, to_email, subject, body, reply_in_thread) -> SendResult:
-        self.calls.append(
-            {"mailbox_id": mailbox.mailbox_id, "to_email": to_email, "subject": subject, "body": body}
-        )
+    async def send(self, request: MailSendRequest) -> SendResult:
+        self.calls.append(request)
         if self.fail:
             raise RuntimeError("FakeMailSender configured to fail")
         return SendResult(
             provider_message_id=f"msg-{len(self.calls)}",
             provider_thread_id=f"thr-{len(self.calls)}",
-            rfc_message_id=f"<rfc-{len(self.calls)}>",
+            rfc_message_id=request.rfc_message_id,
         )
 
 
