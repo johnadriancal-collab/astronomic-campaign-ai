@@ -102,6 +102,41 @@ class Settings(BaseSettings):
     frontend_origin: str | None = None
     mailbox_token_encryption_key: str | None = None
 
+    # Astronomic Mail Phase B3 (Unsubscribe Architecture) -- see
+    # app/services/unsubscribe_token.py and
+    # app/services/mail_unsubscribe_composition.py. Both None until
+    # deliberately configured; URL/token-generation call sites raise a
+    # clear NotConfigured error rather than silently emitting a broken or
+    # localhost-pointing link -- same fail-closed convention as every
+    # other integration secret above.
+    #
+    # public_backend_origin: this backend's own publicly reachable origin
+    # (scheme + host, no trailing slash -- e.g.
+    # "https://api.astronomicconnect.com"), used ONLY to build
+    # fully-qualified outbound links that must work from OUTSIDE this
+    # app entirely (an email client, a mail-security scanner) -- NOT the
+    # same thing as frontend_origin (where a browser gets sent back to
+    # after an OAuth callback) or the frontend's own BACKEND_ORIGIN
+    # rewrite-proxy target (next.config.ts -- that's for the browser's
+    # own same-origin calls while looking at a Hub page, a different
+    # concern entirely). Deliberately left unset until
+    # api.astronomicconnect.com's TLS certificate is actually ready --
+    # see the B1.5/B3 investigation history for why the current Railway
+    # domain is not the intended long-term value here.
+    #
+    # unsubscribe_token_encryption_keys: one or more Fernet keys,
+    # comma-separated, NEWEST KEY FIRST (e.g. "new_key,old_key") -- a
+    # completely separate secret from mailbox_token_encryption_key above
+    # (different trust domain, different rotation cadence; rotating one
+    # must never require touching the other). The first key is used to
+    # encrypt every newly generated unsubscribe token; ALL configured
+    # keys are tried when decrypting (via cryptography.fernet.MultiFernet)
+    # -- so an old token stays valid across a key rotation for as long as
+    # its issuing key remains present in this list, and is only ever
+    # truly retired once that key is finally dropped.
+    public_backend_origin: str | None = None
+    unsubscribe_token_encryption_keys: str | None = None
+
     # Internal Hub login (single shared account -- see app/services/auth_service.py's
     # module docstring for why this phase deliberately has no per-user
     # accounts/signup/roles). Both None until configured; POST /auth/login

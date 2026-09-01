@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_FOLLOWUP_DELAY_DAYS,
   DEFAULT_SENDING_DAYS,
+  canOrdinaryUnsuppress,
   formatDayCount,
   formatScheduleSummary,
   formatSendingDays,
@@ -57,6 +58,17 @@ test("nextSuppressionAction: not-suppressed -> clicking suppresses", () => {
 
 test("nextSuppressionAction: suppressed -> clicking unsuppresses", () => {
   assert.equal(nextSuppressionAction(true), "unsuppress");
+});
+
+// Phase B3: an explicit recipient unsubscribe is not reversible through
+// the ordinary toggle -- see MailSuppressionService.unsuppress()'s
+// UnsubscribeReversalNotAllowedError (backend, source of truth).
+test("canOrdinaryUnsuppress: false only for an unsubscribed reason", () => {
+  assert.equal(canOrdinaryUnsuppress("unsubscribed"), false);
+  assert.equal(canOrdinaryUnsuppress("manual"), true);
+  assert.equal(canOrdinaryUnsuppress("hard_bounce"), true);
+  assert.equal(canOrdinaryUnsuppress("complaint"), true);
+  assert.equal(canOrdinaryUnsuppress(null), true);
 });
 
 test("formatSendingDays handles empty, every-day, and a specific subset", () => {

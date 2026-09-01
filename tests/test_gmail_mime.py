@@ -178,6 +178,62 @@ def test_injection_is_rejected_before_any_message_object_is_built():
 # --- encode_gmail_raw -----------------------------------------------------------
 
 
+# --- build_mime_message: List-Unsubscribe headers (Phase B3) -----------------
+
+
+def test_no_list_unsubscribe_headers_by_default():
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",
+        rfc_message_id="mid@astronomic.com",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    assert parsed["List-Unsubscribe"] is None
+    assert parsed["List-Unsubscribe-Post"] is None
+
+
+def test_list_unsubscribe_headers_set_together():
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",
+        rfc_message_id="mid@astronomic.com",
+        list_unsubscribe="<https://api.astronomicconnect.com/mail/unsubscribe/one-click?token=abc>",
+        list_unsubscribe_post="List-Unsubscribe=One-Click",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    assert parsed["List-Unsubscribe"] == "<https://api.astronomicconnect.com/mail/unsubscribe/one-click?token=abc>"
+    assert parsed["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+
+
+def test_list_unsubscribe_without_post_is_rejected():
+    """RFC 8058: having only List-Unsubscribe without List-Unsubscribe-Post
+    does not satisfy one-click -- this function refuses to construct that
+    half-compliant shape at all."""
+    with pytest.raises(ValueError):
+        build_mime_message(
+            from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",
+            rfc_message_id="mid@astronomic.com",
+            list_unsubscribe="<https://example.com/one-click?token=abc>",
+        )
+
+
+def test_list_unsubscribe_post_without_list_unsubscribe_is_rejected():
+    with pytest.raises(ValueError):
+        build_mime_message(
+            from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",
+            rfc_message_id="mid@astronomic.com",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+
+
+def test_crlf_in_list_unsubscribe_is_rejected():
+    with pytest.raises(HeaderInjectionError):
+        build_mime_message(
+            from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",
+            rfc_message_id="mid@astronomic.com",
+            list_unsubscribe="<https://example.com/x>\r\nBcc: attacker@evil.com",
+            list_unsubscribe_post="List-Unsubscribe=One-Click",
+        )
+
+
 def test_encode_gmail_raw_uses_urlsafe_alphabet_and_round_trips():
     mime_bytes = build_mime_message(
         from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",

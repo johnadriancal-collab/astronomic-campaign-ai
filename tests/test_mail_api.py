@@ -1091,6 +1091,18 @@ def test_unsuppress_round_trip(client):
     assert status["suppressed"] is False
 
 
+def test_unsuppress_an_explicit_unsubscribe_returns_409_not_200(client):
+    """Phase B3: the ordinary CRM suppression toggle must not be able to
+    casually reverse a real recipient unsubscribe."""
+    client.post("/mail/suppressions", json={"email": "amos@example.com", "reason": "unsubscribed"})
+    resp = client.post("/mail/suppressions/unsuppress", json={"email": "amos@example.com"})
+    assert resp.status_code == 409
+
+    status = client.get("/mail/suppressions/amos@example.com").json()
+    assert status["suppressed"] is True  # untouched by the refused attempt
+    assert status["reason"] == "unsubscribed"
+
+
 # --- H. Launch safety: no route exists that can activate/send ------------
 
 

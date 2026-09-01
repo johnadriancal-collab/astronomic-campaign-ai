@@ -46,7 +46,8 @@ _FORBIDDEN_HEADER_CHARS = ("\r", "\n")
 
 class HeaderInjectionError(ValueError):
     """Raised when a value destined for a MIME header (From/To/Subject/
-    Message-ID/In-Reply-To/References) contains a raw CR or LF -- the
+    Message-ID/In-Reply-To/References/List-Unsubscribe/
+    List-Unsubscribe-Post) contains a raw CR or LF -- the
     classic email-header-injection vector (smuggling an extra header, or
     an extra recipient, through a value this codebase otherwise treats as
     plain text -- e.g. a CRM contact's name, or a campaign's subject
@@ -70,6 +71,8 @@ def build_mime_message(
     date: datetime | None = None,
     in_reply_to_message_id: str | None = None,
     references: list[str] | None = None,
+    list_unsubscribe: str | None = None,
+    list_unsubscribe_post: str | None = None,
 ) -> bytes:
     """Builds a complete, RFC 5322 / RFC 2045-2047 compliant plain-text
     MIME message as raw bytes, ready for base64url encoding (see
@@ -90,16 +93,38 @@ def build_mime_message(
     caller's responsibility once real threading history is being tracked
     (Phase C, not built here -- see this module's docstring).
 
+    `list_unsubscribe` (RFC 8058/RFC 2369, e.g. "<https://.../one-click?token=...>",
+    ALREADY bracketed -- this function does not add brackets itself, unlike
+    the Message-ID-family headers above, since RFC 2369 allows multiple
+    comma-separated URIs inside one header value and this function has no
+    business assuming there's exactly one) and `list_unsubscribe_post`
+    (RFC 8058's fixed literal, "List-Unsubscribe=One-Click") are set
+    together or not at all -- see this module's own tests for why B2's
+    "one without the other" pattern doesn't apply here: unlike In-Reply-To/
+    thread_id (two independent pieces of context), these two headers are a
+    single RFC-defined pair with no meaningful partial state. Neither is
+    generated here -- see app/services/mail_unsubscribe_composition.py for
+    the (currently unwired -- see that module's own safety note) caller
+    that builds these values from a real per-recipient token.
+
     Raises HeaderInjectionError before constructing anything if
     from_email/to_email/subject/rfc_message_id/in_reply_to_message_id/any
-    reference contains a raw CR or LF.
+    reference/list_unsubscribe/list_unsubscribe_post contains a raw CR or
+    LF. Raises ValueError if exactly one of list_unsubscribe/
+    list_unsubscribe_post is given without the other.
     """
+    if (list_unsubscribe is None) != (list_unsubscribe_post is None):
+        raise ValueError("list_unsubscribe and list_unsubscribe_post must be given together or not at all.")
+
     for value, name in ((from_email, "From"), (to_email, "To"), (subject, "Subject"), (rfc_message_id, "Message-ID")):
         _assert_safe_header_value(value, name)
     if in_reply_to_message_id is not None:
         _assert_safe_header_value(in_reply_to_message_id, "In-Reply-To")
     for ref in references or ():
         _assert_safe_header_value(ref, "References")
+    if list_unsubscribe is not None:
+        _assert_safe_header_value(list_unsubscribe, "List-Unsubscribe")
+        _assert_safe_header_value(list_unsubscribe_post, "List-Unsubscribe-Post")
 
     msg = EmailMessage()
     msg["From"] = from_email
@@ -111,6 +136,9 @@ def build_mime_message(
         msg["In-Reply-To"] = f"<{in_reply_to_message_id}>"
     if references:
         msg["References"] = " ".join(f"<{ref}>" for ref in references)
+    if list_unsubscribe is not None:
+        msg["List-Unsubscribe"] = list_unsubscribe
+        msg["List-Unsubscribe-Post"] = list_unsubscribe_post
     # Adds Content-Type (text/plain; charset="utf-8"), a correctly chosen
     # Content-Transfer-Encoding, and MIME-Version -- all automatic, see
     # this module's docstring.

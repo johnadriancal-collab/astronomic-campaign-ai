@@ -62,6 +62,18 @@ export function nextSuppressionAction(suppressed: boolean): "suppress" | "unsupp
   return suppressed ? "unsuppress" : "suppress";
 }
 
+// Phase B3: an explicit recipient unsubscribe (reason "unsubscribed") is
+// NOT reversible through the ordinary CRM toggle -- the backend enforces
+// this as a service-level guard (MailSuppressionService.unsuppress()'s
+// UnsubscribeReversalNotAllowedError, mapped to a 409 in app/api/mail.py)
+// and would reject the request anyway; this just means the frontend never
+// offers an action the backend will refuse. `reason` is `null` for a
+// never-suppressed contact -- always allowed in that case (there's nothing
+// to reverse), matching nextSuppressionAction's "suppress" default.
+export function canOrdinaryUnsuppress(reason: MailSuppressionReason | null): boolean {
+  return reason !== "unsubscribed";
+}
+
 // 0=Monday .. 6=Sunday -- matches app/models/mail.py's convention exactly
 // (Python's date.weekday()), NOT JavaScript's Date.getDay() (0=Sunday) --
 // callers must never pass a raw getDay() value here.

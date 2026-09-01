@@ -9,6 +9,19 @@ docstring in app/models/mail.py).
 Suppressing/unsuppressing NEVER triggers a send, a queue action, or any
 CRM contact mutation -- both are pure record-keeping in this phase, since
 there is nothing downstream yet that could act on them.
+
+Phase B3: unsuppress() now refuses to reverse an active UNSUBSCRIBED
+suppression (see UnsubscribeReversalNotAllowedError below) -- an
+affirmative recipient opt-out is not the same kind of thing as a staff
+member's manual suppression. RECOMMENDATION, NOT YET IMPLEMENTED: COMPLAINT
+(a spam complaint) arguably deserves the same protection, or stronger --
+reversing it risks real sender-reputation/deliverability harm, not just a
+compliance question. HARD_BOUNCE is murkier: a bounce can be a genuinely
+temporary/fixable condition (e.g. a contact's email was mistyped and later
+corrected), so blocking its reversal outright could be actively wrong. Both
+were deliberately left unchanged in B3 pending an explicit decision --
+their semantics must not be silently altered alongside this unsubscribe
+work.
 """
 
 import uuid
@@ -33,6 +46,34 @@ class MailSuppressionNotFoundError(Exception):
         super().__init__(f"'{email_normalized}' has never been suppressed.")
 
 
+class UnsubscribeReversalNotAllowedError(Exception):
+    """Raised by unsuppress() when the target row's CURRENT reason is
+    UNSUBSCRIBED and it's still active -- Phase B3's explicit decision:
+    an affirmative recipient opt-out is materially different from an
+    operational/manual suppression and must not be reversible through
+    the same generic action a staff member uses for everything else.
+    This is a SERVICE-LEVEL guard (not merely a frontend warning) --
+    calling unsuppress() directly, from anywhere, on such a row always
+    raises this; there is no way around it at this layer.
+
+    Deliberately NO administrative override exists yet -- build one only
+    if actually needed (per the B3 approval). If a genuine business need
+    arises (e.g. a recipient re-subscribes by replying to say so), the
+    fix belongs in a new, explicit, audited method -- never by quietly
+    special-casing this one back open.
+
+    HARD_BOUNCE and COMPLAINT are NOT covered by this guard in B3 -- see
+    this module's own docstring for the explicit recommendation (not yet
+    implemented) that COMPLAINT likely deserves the same protection."""
+
+    def __init__(self, email_normalized: str):
+        self.email_normalized = email_normalized
+        super().__init__(
+            f'"{email_normalized}" was suppressed by an explicit recipient unsubscribe and cannot be '
+            "reversed through ordinary unsuppress."
+        )
+
+
 class MailSuppressionService:
     def __init__(self, store: MailSuppressionStore, activity_log: ActivityLogService):
         self.store = store
@@ -42,11 +83,24 @@ class MailSuppressionService:
         self, email: str, reason: MailSuppressionReason = MailSuppressionReason.MANUAL, notes: str | None = None
     ) -> MailSuppression:
         """
-        Idempotent: suppressing an email that's already active is a pure
-        no-op returning the existing row unchanged (no duplicate row is
-        even possible -- email_normalized is the primary key). Re-
-        suppressing a previously-unsuppressed (inactive) row reactivates it
-        in place, updating reason/notes, rather than erroring.
+        Idempotent: suppressing an email that's already active WITH THE
+        SAME reason is a pure no-op returning the existing row unchanged
+        (no duplicate row is even possible -- email_normalized is the
+        primary key, and no activity-log event fires for a true no-op).
+        Re-suppressing a previously-unsuppressed (inactive) row
+        reactivates it in place, updating reason/notes, rather than
+        erroring.
+
+        Phase B3 correction: suppressing an ALREADY-ACTIVE row with a
+        DIFFERENT reason is NOT a no-op -- the reason (and notes) are
+        updated in place, and this DOES log a fresh activity event. This
+        is what makes decision #6 ("MANUAL -> recipient unsubscribe
+        should result in active UNSUBSCRIBED") actually true: without
+        this reason-equality check, a contact already MANUAL-suppressed
+        who later unsubscribed for real would have kept showing as
+        MANUAL forever, since the prior code's early return fired for
+        ANY already-active row regardless of reason. Found and fixed
+        during B3 implementation, not present before it.
         """
         normalized = normalize_email(email)
         if not normalized:
@@ -55,7 +109,7 @@ class MailSuppressionService:
         now = datetime.now(timezone.utc)
         existing = await self.store.get(normalized)
 
-        if existing is not None and existing.active:
+        if existing is not None and existing.active and existing.reason == reason:
             return existing
 
         if existing is not None:
@@ -82,7 +136,14 @@ class MailSuppressionService:
     async def unsuppress(self, email: str) -> MailSuppression:
         """Raises MailSuppressionNotFoundError if this email has never been
         suppressed at all. A no-op (returns the existing row unchanged) if
-        it's already inactive -- unsuppressing twice is not an error."""
+        it's already inactive -- unsuppressing twice is not an error.
+
+        Phase B3: raises UnsubscribeReversalNotAllowedError if the row is
+        ACTIVE and its reason is UNSUBSCRIBED -- see that exception's own
+        docstring. Checked AFTER the not-found/already-inactive checks
+        above (an inactive UNSUBSCRIBED row is already a no-op via the
+        `not existing.active` branch, so the guard only ever needs to
+        fire for the one case that would actually change anything)."""
         normalized = normalize_email(email)
         if not normalized:
             raise InvalidMailSuppressionEmailError(email)
@@ -92,6 +153,8 @@ class MailSuppressionService:
             raise MailSuppressionNotFoundError(normalized)
         if not existing.active:
             return existing
+        if existing.reason == MailSuppressionReason.UNSUBSCRIBED:
+            raise UnsubscribeReversalNotAllowedError(normalized)
 
         now = datetime.now(timezone.utc)
         updated = existing.model_copy(update={"active": False, "unsuppressed_at": now, "updated_at": now})

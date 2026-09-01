@@ -57,6 +57,7 @@ from app.api.leads import router as leads_router
 from app.api.luma import mapping_router as luma_mapping_router
 from app.api.luma import router as luma_router
 from app.api.mail import router as mail_router
+from app.api.mail_unsubscribe import router as mail_unsubscribe_router
 from app.api.mailboxes import router as mailboxes_router
 from app.api.sync import router as sync_router
 from app.config import settings
@@ -401,6 +402,7 @@ app.include_router(activity_router)
 app.include_router(email_intake_sync_router)
 app.include_router(email_intake_crm_router)
 app.include_router(mail_router)
+app.include_router(mail_unsubscribe_router)
 app.include_router(mailboxes_router)
 app.include_router(luma_router)
 app.include_router(luma_mapping_router)

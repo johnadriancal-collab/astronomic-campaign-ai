@@ -27,6 +27,18 @@ session cookie:
     mechanism (verify_luma_webhook_request in app/dependencies.py), not a
     token we issue. /sync/luma-backfill is deliberately NOT here -- it's
     an internal admin action and stays behind the normal session gate.
+  - /mail/unsubscribe, /mail/unsubscribe/one-click (Phase B3): reached by
+    an anonymous recipient (a human clicking a link, or a mail provider's
+    infrastructure POSTing List-Unsubscribe-Post) who by definition has
+    no Hub session -- authenticated instead by a self-contained, opaque,
+    Fernet-encrypted token in the QUERY STRING (see
+    app/services/unsubscribe_token.py). This is exactly why the token
+    lives in the query string and not a path segment: this middleware
+    matches request.url.path by EXACT STRING ONLY (see below) -- it has
+    no mechanism for a parameterized public path, so
+    "/mail/unsubscribe/{token}" could never be allow-listed here, but
+    "/mail/unsubscribe?token=..." matches the fixed path fine since the
+    query string isn't part of `request.url.path` at all.
 
 Everything else -- every CRM/campaign/lead/mailbox-data route, /docs,
 /redoc, /openapi.json, and even this backend's own "/" status page --
@@ -48,6 +60,8 @@ PUBLIC_PATHS = frozenset(
         "/sync/itf-contact",
         "/sync/email-intake",
         "/sync/luma-event",
+        "/mail/unsubscribe",
+        "/mail/unsubscribe/one-click",
     }
 )
 

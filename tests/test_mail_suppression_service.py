@@ -13,6 +13,7 @@ from app.services.mail_suppression_service import (
     InvalidMailSuppressionEmailError,
     MailSuppressionNotFoundError,
     MailSuppressionService,
+    UnsubscribeReversalNotAllowedError,
 )
 
 
@@ -155,6 +156,76 @@ async def test_list_active_suppressed_emails_excludes_unsuppressed(service):
 
     active = await service.list_active_suppressed_emails()
     assert active == {"a@example.com"}
+
+
+
+# --- Phase B3: UNSUBSCRIBED reversal guard ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_unsuppress_refuses_an_active_unsubscribed_row(service):
+    await service.suppress("amos@example.com", MailSuppressionReason.UNSUBSCRIBED)
+    with pytest.raises(UnsubscribeReversalNotAllowedError):
+        await service.unsuppress("amos@example.com")
+
+    # And the row itself is provably untouched by the refused attempt.
+    row = (await service.list_all())[0]
+    assert row.active is True
+    assert row.reason == MailSuppressionReason.UNSUBSCRIBED
+
+
+@pytest.mark.asyncio
+async def test_unsuppress_still_allows_manual_hard_bounce_and_complaint(service):
+    """Regression guard: B3 must not have silently changed unsuppress()
+    behavior for any reason OTHER than UNSUBSCRIBED."""
+    for reason in (MailSuppressionReason.MANUAL, MailSuppressionReason.HARD_BOUNCE, MailSuppressionReason.COMPLAINT):
+        email = f"{reason.value}@example.com"
+        await service.suppress(email, reason)
+        updated = await service.unsuppress(email)
+        assert updated.active is False
+
+
+@pytest.mark.asyncio
+async def test_unsuppress_on_an_already_inactive_unsubscribed_row_is_still_a_safe_noop(service):
+    """The guard only needs to fire for the one case that would actually
+    change something -- an already-inactive row (however it got that
+    way) remains the existing no-op, not a new error."""
+    await service.suppress("amos@example.com", MailSuppressionReason.MANUAL)
+    row = await service.store.get("amos@example.com")
+    # Simulate a row that is inactive but whose LAST reason was
+    # UNSUBSCRIBED (e.g. a hypothetical future admin override already
+    # ran) -- unsuppress() must not raise for an inactive row regardless
+    # of reason, since nothing would actually change.
+    await service.store.upsert(row.model_copy(update={"active": False, "reason": MailSuppressionReason.UNSUBSCRIBED}))
+    result = await service.unsuppress("amos@example.com")
+    assert result.active is False
+
+
+# --- Phase B3: MANUAL -> recipient unsubscribe -------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manual_suppression_then_recipient_unsubscribe_becomes_active_unsubscribed(service):
+    await service.suppress("amos@example.com", MailSuppressionReason.MANUAL)
+    updated = await service.suppress("amos@example.com", MailSuppressionReason.UNSUBSCRIBED)
+
+    assert updated.active is True
+    assert updated.reason == MailSuppressionReason.UNSUBSCRIBED
+
+    all_rows = await service.list_all()
+    assert len(all_rows) == 1  # same row, reason updated in place -- not a second row
+
+
+@pytest.mark.asyncio
+async def test_repeated_recipient_unsubscribe_remains_idempotent(service):
+    first = await service.suppress("amos@example.com", MailSuppressionReason.UNSUBSCRIBED)
+    second = await service.suppress("amos@example.com", MailSuppressionReason.UNSUBSCRIBED)
+    third = await service.suppress("amos@example.com", MailSuppressionReason.UNSUBSCRIBED)
+
+    assert first.active is second.active is third.active is True
+    assert first.reason == second.reason == third.reason == MailSuppressionReason.UNSUBSCRIBED
+    all_rows = await service.list_all()
+    assert len(all_rows) == 1
 
 
 @pytest.mark.asyncio

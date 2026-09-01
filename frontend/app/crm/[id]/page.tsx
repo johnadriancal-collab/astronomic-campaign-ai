@@ -29,7 +29,7 @@ import {
 import { buildEventHistory } from "@/lib/contact-event-history";
 import { buildContactSummary } from "@/lib/contact-summary";
 import { DIETARY_PREFERENCE_OPTIONS, INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
-import { nextSuppressionAction, suppressionToggleLabel } from "@/lib/mail";
+import { canOrdinaryUnsuppress, nextSuppressionAction, suppressionToggleLabel } from "@/lib/mail";
 import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
 
 const CORE_TEXT_FIELDS: [keyof CrmContact, string][] = [
@@ -300,6 +300,12 @@ export default function CrmContactDetailPage() {
 
   async function handleUnsuppress() {
     if (!contact?.email) return;
+    // Defense in depth -- the toggle below never renders an unsuppress
+    // action for this state at all, but this guard means calling
+    // handleUnsuppress from anywhere can never even attempt the request
+    // the backend would refuse with a 409 (see MailSuppressionService.
+    // unsuppress()'s UnsubscribeReversalNotAllowedError).
+    if (!canOrdinaryUnsuppress(suppression?.reason ?? null)) return;
     setSuppressionBusy(true);
     setSuppressionError(null);
     try {
@@ -419,16 +425,32 @@ export default function CrmContactDetailPage() {
         </div>
         <div className="flex flex-wrap justify-end gap-2">
           {contact.email && suppression && (
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={handleToggleSuppression}
-              disabled={suppressionBusy}
-              className="gap-1.5"
-            >
-              <Ban className="h-3.5 w-3.5" />
-              {suppressionToggleLabel(suppression.suppressed)}
-            </Button>
+            suppression.suppressed && !canOrdinaryUnsuppress(suppression.reason) ? (
+              // Phase B3: this person unsubscribed themselves -- not
+              // reversible through the ordinary toggle (see
+              // MailSuppressionService.unsuppress()'s
+              // UnsubscribeReversalNotAllowedError). Shown as a plain,
+              // non-actionable indicator rather than a disabled button,
+              // so it doesn't look like a transient/loading state.
+              <span
+                title="This person unsubscribed themselves and isn't reversible from here."
+                className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm text-muted-foreground"
+              >
+                <Ban className="h-3.5 w-3.5" />
+                Unsubscribed by recipient
+              </span>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleToggleSuppression}
+                disabled={suppressionBusy}
+                className="gap-1.5"
+              >
+                <Ban className="h-3.5 w-3.5" />
+                {suppressionToggleLabel(suppression.suppressed)}
+              </Button>
+            )
           )}
           <Button variant="outline" size="sm" onClick={handleArchive} className="gap-1.5" disabled={contact.archived}>
             <Archive className="h-3.5 w-3.5" />

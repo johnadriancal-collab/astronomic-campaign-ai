@@ -55,6 +55,7 @@ from app.services.mail_suppression_service import (
     InvalidMailSuppressionEmailError,
     MailSuppressionNotFoundError,
     MailSuppressionService,
+    UnsubscribeReversalNotAllowedError,
 )
 
 router = APIRouter(prefix="/mail", tags=["mail"])
@@ -497,6 +498,13 @@ async def unsuppress_email(
         raise HTTPException(status_code=400, detail=str(e))
     except MailSuppressionNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except UnsubscribeReversalNotAllowedError as e:
+        # 409: the request is well-formed and the resource exists, but
+        # the current state (an explicit recipient unsubscribe) forbids
+        # this specific transition -- see MailSuppressionService.
+        # unsuppress()'s own docstring. No administrative override route
+        # exists yet, deliberately (Phase B3 decision).
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 @router.get("/suppressions/{email}", response_model=MailContactSuppressionStatus)

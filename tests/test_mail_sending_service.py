@@ -297,6 +297,37 @@ async def test_suppressed_recipient_stops_sequence_with_no_future_materializatio
     assert enrollment_after.status == MailEnrollmentStatus.SUPPRESSED
 
 
+async def test_unsubscribed_recipient_stops_sequence_same_as_manual_suppression(
+    svc, basic_setup, step_store, enrollment_store, suppression_store
+):
+    """Phase B3 regression guard: the live pre-send suppression check
+    (this test's real subject, unmodified by B3) must honor a row whose
+    reason is UNSUBSCRIBED exactly the same way it already honors MANUAL
+    -- this service has no reason-specific branching, and B3 must not
+    have accidentally introduced any. See app/api/mail_unsubscribe.py for
+    the (separate, unwired) route that would actually create such a row."""
+    steps = [make_step("s1", 1), make_step("s2", 2, delay_days=2)]
+    enrollment = make_enrollment("e1", email="unsubscribed@example.com")
+    await enrollment_store.create(enrollment)
+    await suppression_store.upsert(
+        MailSuppression(
+            email_normalized="unsubscribed@example.com", reason=MailSuppressionReason.UNSUBSCRIBED,
+            active=True, created_at=NOW, updated_at=NOW,
+        )
+    )
+    row1 = await svc.create_step1_execution(enrollment=enrollment, step1=steps[0], windows=all_day_windows(), timezone_name=TZ, now=NOW)
+    sender = FakeMailSender()
+
+    outcome = await svc.process_one_due_step(row1, sender=sender, claimed_by="w1", sequence_steps=steps, windows=all_day_windows(), timezone_name=TZ, now=NOW)
+    assert outcome.blocked_reason == SendBlockReason.RECIPIENT_SUPPRESSED
+    assert len(sender.calls) == 0
+
+    rows = await step_store.list_for_enrollment("e1")
+    assert rows[0].status == MailEnrollmentStepStatus.SKIPPED_SUPPRESSED
+    enrollment_after = await enrollment_store.get("e1")
+    assert enrollment_after.status == MailEnrollmentStatus.SUPPRESSED
+
+
 async def test_suppress_enrollment_leaves_a_sending_row_untouched(svc, step_store, enrollment_store):
     """A row already past the provider-call-uncertainty boundary is never
     touched by the suppression cascade -- it resolves via reap_orphans()
