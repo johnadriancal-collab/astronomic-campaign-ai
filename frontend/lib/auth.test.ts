@@ -60,3 +60,32 @@ test("isPublicProxyPath gates every real page route", () => {
 test("isPublicProxyPath does not accidentally match a path that merely starts with 'login'", () => {
   assert.equal(isPublicProxyPath("/loginhack"), false);
 });
+
+// --- /about, /privacy, /terms (Google OAuth Branding prerequisite, 2026-09) ---
+// These are the ONLY other paths added to the public set -- every other
+// product surface must remain gated. See app/about, app/privacy,
+// app/terms and components/public-page-shell.tsx.
+
+test("isPublicProxyPath allows the three OAuth Branding pages through", () => {
+  assert.equal(isPublicProxyPath("/about"), true);
+  assert.equal(isPublicProxyPath("/privacy"), true);
+  assert.equal(isPublicProxyPath("/terms"), true);
+});
+
+test("isPublicProxyPath does not accidentally match a path that merely starts with one of those names", () => {
+  assert.equal(isPublicProxyPath("/aboutus"), false);
+  assert.equal(isPublicProxyPath("/privacypolicy"), false);
+  assert.equal(isPublicProxyPath("/termsofservice"), false);
+});
+
+test("isPublicProxyPath still gates the actual product surfaces after the OAuth Branding pages were added", () => {
+  // The root Astro AI page in particular -- easy to accidentally exempt
+  // by a too-broad matcher, and the single most sensitive page to get
+  // wrong (it's the Hub's primary authenticated surface).
+  assert.equal(isPublicProxyPath("/"), false);
+  assert.equal(isPublicProxyPath("/crm"), false);
+  assert.equal(isPublicProxyPath("/crm/lists"), false);
+  assert.equal(isPublicProxyPath("/manager"), false);
+  assert.equal(isPublicProxyPath("/manager/campaigns/mail/c1"), false);
+  assert.equal(isPublicProxyPath("/campaign-builder"), false);
+});

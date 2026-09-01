@@ -6,6 +6,7 @@ import { usePathname } from "next/navigation";
 import { LogOut } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { logout } from "@/lib/api";
+import { isPublicProxyPath } from "@/lib/auth";
 import { TOP_LEVEL_NAV_AREAS } from "@/lib/top-level-nav";
 import { cn } from "@/lib/utils";
 
@@ -17,9 +18,14 @@ function isAreaActive(pathname: string, href: string) {
 export function SiteHeader() {
   const pathname = usePathname();
 
-  // Login itself never shows the authenticated shell's nav/logout -- there
-  // is no session to log out of, and no protected area to navigate to yet.
+  // Every public page (login, plus the OAuth-branding pages /about,
+  // /privacy, /terms -- see lib/auth.ts's isPublicProxyPath, the SAME
+  // predicate proxy.ts itself uses) never shows the authenticated
+  // shell's nav/logout -- there is no session to log out of on any of
+  // them, and showing links to protected product areas to a logged-out
+  // visitor would be confusing, not useful.
   const isLoginPage = pathname === "/login";
+  const isPublicPage = isPublicProxyPath(pathname);
 
   async function handleLogout() {
     try {
@@ -56,7 +62,7 @@ export function SiteHeader() {
             />
           </div>
         </Link>
-        {!isLoginPage && (
+        {!isPublicPage && (
           <div className="flex items-center gap-4">
             <nav className="hidden items-center gap-6 sm:flex">
               {TOP_LEVEL_NAV_AREAS.map((area) => {
@@ -80,6 +86,11 @@ export function SiteHeader() {
               Log out
             </Button>
           </div>
+        )}
+        {isPublicPage && !isLoginPage && (
+          <Link href="/login" className="text-sm font-medium text-muted-foreground hover:text-foreground">
+            Sign in
+          </Link>
         )}
       </div>
     </header>

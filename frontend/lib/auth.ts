@@ -27,7 +27,17 @@ export function sanitizeNextPath(next: string | null | undefined): string {
 // including the login form's own POST /backend/auth/login -- would be
 // silently turned into a 200 response containing the /login page's HTML
 // instead of ever reaching the backend at all.
+//
+// "/about", "/privacy", "/terms" (Google OAuth Branding prerequisite,
+// 2026-09) are the Hub's only public informational/legal pages -- they
+// carry no session/campaign/contact data of any kind (see app/about,
+// app/privacy, app/terms), so excluding them here is safe: it is the
+// SAME exclusion class as /login, not a weakening of it. No other route
+// is added to this list -- every actual product surface (the root Astro
+// AI page included) stays behind the session check.
+const PUBLIC_PAGE_PATHS = ["/login", "/about", "/privacy", "/terms"];
+
 export function isPublicProxyPath(pathname: string): boolean {
   if (pathname.startsWith("/backend/")) return true;
-  return pathname === "/login" || pathname.startsWith("/login/");
+  return PUBLIC_PAGE_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
 }
