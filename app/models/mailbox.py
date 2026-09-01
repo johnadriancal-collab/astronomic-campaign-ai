@@ -75,10 +75,30 @@ class MailboxCredential(BaseModel):
     ciphertext (see app/services/token_encryption.py); the plaintext
     refresh token exists only transiently in memory during
     MailboxService.handle_google_callback()/disconnect_mailbox().
+
+    `previous_encrypted_refresh_token` (Phase B1 addition) is a recovery
+    backup, populated ONLY when handle_google_callback() is about to
+    OVERWRITE `encrypted_refresh_token` with a new value (a reconnect or a
+    Gmail-send scope upgrade) -- it holds whatever `encrypted_refresh_token`
+    was immediately BEFORE that overwrite. This exists specifically so a
+    scope-upgrade credential write (which must happen before the public
+    Mailbox row's granted_scopes can safely reflect the upgrade -- see
+    MailboxService's module docstring for why that ordering is required)
+    never PERMANENTLY destroys the previously-working credential if the
+    subsequent Mailbox write fails/crashes: the old, still-valid
+    credential remains here, decryptable and restorable, rather than
+    being silently gone the instant the new one is written. Never read by
+    any operational code path in Phase B1 (no automatic rollback is
+    implemented) -- it is deliberately just a durable, recoverable trace,
+    not an active fallback mechanism. Left populated after a successful
+    commit too (harmless, inert historical data) -- not proactively
+    cleared, to avoid adding a third write / another crash window purely
+    for tidiness.
     """
 
     mailbox_id: str
     encrypted_refresh_token: str
+    previous_encrypted_refresh_token: str | None = None
     created_at: datetime
     updated_at: datetime
 

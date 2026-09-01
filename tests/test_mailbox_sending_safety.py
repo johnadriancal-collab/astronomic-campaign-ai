@@ -1,7 +1,8 @@
 """
 Static sending-safety checks for Astronomic Mail Phase 2 (Google Workspace
-Mailbox Connection). These are a backstop, not the primary guarantee --
-the primary guarantee is that no send-capable code exists at all (see
+Mailbox Connection) + Phase B1 (Gmail scope upgrade + token refresh
+foundation). These are a backstop, not the primary guarantee -- the
+primary guarantee is that no send-capable code exists at all (see
 tests/test_mailbox_service.py for the behavioral OAuth-flow tests, none of
 which ever calls anything resembling a Gmail send).
 
@@ -13,12 +14,49 @@ pytest.mark.asyncio` doesn't apply to them.
 import re
 from pathlib import Path
 
-from app.google.oauth_client import GoogleOAuthClient, SCOPES
+from app.google.oauth_client import GMAIL_SEND_SCOPE, GoogleOAuthClient, SCOPES
 from app.config import settings
 
 
 def test_oauth_scopes_are_exactly_openid_email_profile():
     assert set(SCOPES) == {"openid", "email", "profile"}
+
+
+def test_gmail_send_scope_constant_is_the_expected_url_but_never_in_base_scopes():
+    """Phase B1: GMAIL_SEND_SCOPE exists (a caller -- MailboxService.
+    begin_gmail_send_upgrade() -- can explicitly opt into requesting it),
+    but the BASE `SCOPES` tuple the ordinary connect flow always uses must
+    never silently include it."""
+    assert GMAIL_SEND_SCOPE == "https://www.googleapis.com/auth/gmail.send"
+    assert GMAIL_SEND_SCOPE not in SCOPES
+
+
+def test_mailbox_public_model_has_no_credential_fields_at_all():
+    """Structural, not just behavioral: the public Mailbox model (every
+    response_model in app/api/mailboxes.py) has neither of
+    MailboxCredential's two secret fields -- `encrypted_refresh_token` and
+    (Phase B1's new) `previous_encrypted_refresh_token` -- cannot leak
+    through it even if a future route accidentally tried to serialize the
+    wrong object, because FastAPI's response_model validation would
+    simply drop/reject fields that don't exist on Mailbox. `mailbox_id` is
+    deliberately excluded from this check -- it's the shared join key,
+    not a secret, and legitimately appears on both models."""
+    from app.models.mailbox import Mailbox, MailboxCredential
+
+    credential_secret_fields = MailboxCredential.model_fields.keys() - {"mailbox_id", "created_at", "updated_at"}
+    assert credential_secret_fields == {"encrypted_refresh_token", "previous_encrypted_refresh_token"}
+    assert Mailbox.model_fields.keys().isdisjoint(credential_secret_fields)
+
+
+def test_no_gmail_api_send_endpoint_url_appears_anywhere_in_oauth_or_mailbox_code():
+    """The most direct possible signal that a real sending capability was
+    added: the literal Gmail API send-endpoint URL/path
+    (`gmail/v1/users/.../messages/send`) must not appear anywhere in the
+    OAuth client or mailbox service, even as a stray string constant."""
+    for path in ("app/google/oauth_client.py", "app/services/mailbox_service.py", "app/api/mailboxes.py"):
+        source = Path(path).read_text()
+        assert "messages/send" not in source, f"found a Gmail send-endpoint-shaped string in {path}"
+        assert "googleapis.com/gmail" not in source, f"found a Gmail API host reference in {path}"
 
 
 def test_authorize_url_has_no_hosted_domain_restriction(monkeypatch):
