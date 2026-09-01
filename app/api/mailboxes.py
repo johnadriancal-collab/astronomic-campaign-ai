@@ -4,14 +4,18 @@ Astronomic Mail Phase 2 (Google Workspace mailbox CONNECTION) + Phase B1
 
 IMPORTANT, still load-bearing: there is no route here (and none anywhere
 else in this app) that sends an email, queues one, or activates a
-campaign. `MailboxService.begin_gmail_send_upgrade()` CAN request the
+campaign. `MailboxService.begin_gmail_send_upgrade()` requests the
 `gmail.send` scope (see app/google/oauth_client.py's GMAIL_SEND_SCOPE) for
-an existing mailbox -- but no route in this file (or anywhere else) calls
-it yet; it exists only as a directly-callable, directly-tested service
-method (see tests/test_mailbox_service.py), with no frontend affordance
-and no API entry point wired up in Phase B1. The ordinary connect flow
-(`/google/start`, `begin_google_oauth()`) is completely unchanged: base
-scopes only (`openid email profile`).
+an existing, already-connected mailbox -- reachable via GET
+/{mailbox_id}/google/gmail-send/start below, session-gated the same as
+every other route in this router (no per-route auth dependency needed --
+see app/session_auth_middleware.py, which protects everything not in
+PUBLIC_PATHS). Starting this flow never mutates the mailbox itself -- it
+only registers a pending OAuth state (see begin_gmail_send_upgrade()'s own
+docstring); every actual scope/status change happens exclusively inside
+handle_google_callback(), same as the ordinary connect flow. The ordinary
+connect flow (`/google/start`, `begin_google_oauth()`) is completely
+unchanged: base scopes only (`openid email profile`).
 
 The callback route always ends in an HTTP redirect back to the frontend's
 /manager/emails -- never a JSON error response a real browser navigation
@@ -55,6 +59,25 @@ async def list_mailboxes(service: MailboxService = Depends(get_mailbox_service))
 async def start_google_oauth(service: MailboxService = Depends(get_mailbox_service)):
     try:
         return {"authorize_url": service.begin_google_oauth()}
+    except GoogleOAuthNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.get("/{mailbox_id}/google/gmail-send/start")
+async def start_gmail_send_upgrade(mailbox_id: str, service: MailboxService = Depends(get_mailbox_service)):
+    """Begins the GMAIL_SEND_UPGRADE flow for an EXISTING mailbox -- see
+    MailboxService.begin_gmail_send_upgrade()'s own docstring for the full
+    contract (full desired scope set requested, pending state tagged with
+    `expected_mailbox_id`, no mailbox mutation on initiation). Mirrors
+    start_google_oauth() above exactly: returns the authorize URL as JSON
+    for the frontend to do a full top-level navigation to, rather than
+    redirecting itself (this IS an ordinary same-origin fetch from an
+    already-loaded Hub page, unlike the callback route below, which Google
+    itself navigates to directly)."""
+    try:
+        return {"authorize_url": await service.begin_gmail_send_upgrade(mailbox_id)}
+    except MailboxNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except GoogleOAuthNotConfiguredError as e:
         raise HTTPException(status_code=503, detail=str(e))
 

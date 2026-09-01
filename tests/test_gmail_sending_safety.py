@@ -78,16 +78,21 @@ def test_mail_sending_engine_enabled_still_defaults_false():
     assert Settings.model_fields["mail_sending_engine_enabled"].default is False
 
 
-def test_mailboxes_api_still_declares_only_the_four_approved_routes():
+def test_mailboxes_api_still_declares_only_the_five_approved_routes():
     """Re-asserted here (duplicate of a B1 check in
     tests/test_mailbox_sending_safety.py) so a future PR that touches
     app/api/mailboxes.py as part of Gmail-sending work trips THIS file
-    too, not only the B1 one."""
+    too, not only the B1 one. The fifth route (added deliberately,
+    reviewed, and still incapable of sending anything itself -- see
+    start_gmail_send_upgrade()'s own docstring) only ever REQUESTS an
+    additional OAuth scope; the actual scope/status change still happens
+    exclusively inside the unchanged callback route below."""
     source = Path("app/api/mailboxes.py").read_text()
     routes = re.findall(r'@router\.(get|post|patch|delete)\("([^"]*)"', source)
     assert set(routes) == {
         ("get", ""),
         ("get", "/google/start"),
+        ("get", "/{mailbox_id}/google/gmail-send/start"),
         ("get", "/google/callback"),
         ("post", "/{mailbox_id}/disconnect"),
     }

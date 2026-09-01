@@ -52,6 +52,10 @@ def client(auth_svc):
     async def oauth_callback():
         return {"ok": True}
 
+    @app.get("/mailboxes/{mailbox_id}/google/gmail-send/start")  # stands in for the Gmail-send upgrade route
+    async def gmail_send_upgrade_start(mailbox_id: str):
+        return {"authorize_url": "https://accounts.google.com/o/oauth2/v2/auth?..."}
+
     @app.post("/sync/itf-contact")  # stands in for the ITF webhook
     async def itf_webhook():
         return {"ok": True}
@@ -140,6 +144,27 @@ def test_oauth_callback_is_reachable_with_no_session(client):
     c, _svc = client
 
     resp = c.get("/mailboxes/google/callback")
+
+    assert resp.status_code == 200
+
+
+def test_gmail_send_upgrade_start_requires_a_session(client):
+    """Unlike the callback above, this route is reached by an ordinary
+    same-origin fetch from an already-loaded (and therefore already-
+    authenticated) Hub page -- it is NOT in PUBLIC_PATHS and must reject
+    an unauthenticated request exactly like any other private route."""
+    c, _svc = client
+
+    resp = c.get("/mailboxes/some-mailbox-id/google/gmail-send/start")
+
+    assert resp.status_code == 401
+
+
+def test_gmail_send_upgrade_start_succeeds_once_authenticated(client):
+    c, _svc = client
+    _login(c)
+
+    resp = c.get("/mailboxes/some-mailbox-id/google/gmail-send/start")
 
     assert resp.status_code == 200
 

@@ -92,12 +92,13 @@ def test_mailboxes_api_has_no_send_queue_or_activate_route():
         assert forbidden not in source
 
 
-def test_mailboxes_api_declares_only_the_four_approved_routes():
+def test_mailboxes_api_declares_only_the_five_approved_routes():
     source = Path("app/api/mailboxes.py").read_text()
     routes = re.findall(r'@router\.(get|post|patch|delete)\("([^"]*)"', source)
     assert set(routes) == {
         ("get", ""),
         ("get", "/google/start"),
+        ("get", "/{mailbox_id}/google/gmail-send/start"),
         ("get", "/google/callback"),
         ("post", "/{mailbox_id}/disconnect"),
     }

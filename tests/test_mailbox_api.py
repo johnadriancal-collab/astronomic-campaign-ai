@@ -195,6 +195,82 @@ def test_disconnect_missing_mailbox_returns_404(client):
     assert resp.status_code == 404
 
 
+# --- Gmail-send upgrade start route ------------------------------------------
+
+
+def test_gmail_send_upgrade_start_missing_mailbox_returns_404(client):
+    resp = client.get("/mailboxes/does-not-exist/google/gmail-send/start")
+
+    assert resp.status_code == 404
+
+
+def test_gmail_send_upgrade_start_returns_an_authorize_url_for_a_real_mailbox(client):
+    mailbox = _connect(client)
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
+
+    assert resp.status_code == 200
+    assert resp.json()["authorize_url"].startswith("https://accounts.google.com")
+
+
+def test_gmail_send_upgrade_start_requests_base_scopes_plus_gmail_send(client, oauth_client):
+    mailbox = _connect(client)
+    oauth_client.requested_scopes.clear()
+
+    client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
+
+    assert oauth_client.requested_scopes == [("openid", "email", "profile", "https://www.googleapis.com/auth/gmail.send")]
+
+
+def test_gmail_send_upgrade_start_never_mutates_the_mailbox(client):
+    """Initiation only registers a pending OAuth state -- see
+    MailboxService.begin_gmail_send_upgrade()'s own docstring. Every
+    actual scope/status change happens exclusively inside the callback."""
+    mailbox = _connect(client)
+    before = client.get("/mailboxes").json()[0]
+
+    client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
+
+    after = client.get("/mailboxes").json()[0]
+    assert after == before
+    assert "gmail.send" not in " ".join(after["granted_scopes"])
+    assert after["status"] == "connected"
+
+
+def test_gmail_send_upgrade_start_not_configured_returns_503(client, mailbox_service):
+    from app.google.oauth_client import GoogleOAuthClient
+
+    mailbox = _connect(client)
+    mailbox_service.oauth_client = GoogleOAuthClient()  # real client, no settings configured
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
+
+    assert resp.status_code == 503
+
+
+def test_gmail_send_upgrade_pending_state_carries_the_correct_flow_type_and_mailbox(client, mailbox_service):
+    from app.services.mailbox_service import OAuthFlowType
+
+    mailbox = _connect(client)
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
+    state = resp.json()["authorize_url"].split("state=")[1]
+
+    pending = mailbox_service._pending_states[state]
+    assert pending.flow_type == OAuthFlowType.GMAIL_SEND_UPGRADE
+    assert pending.expected_mailbox_id == mailbox["mailbox_id"]
+
+
+def test_ordinary_connect_flow_remains_base_scope_only_after_upgrade_route_exists(client, oauth_client):
+    """Regression guard: adding the upgrade route must never change what
+    the ORDINARY connect flow requests."""
+    oauth_client.requested_scopes.clear()
+
+    client.get("/mailboxes/google/start")
+
+    assert oauth_client.requested_scopes == [("openid", "email", "profile")]
+
+
 # --- tokens never appear in any API response --------------------------------
 
 

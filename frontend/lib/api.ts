@@ -1405,6 +1405,21 @@ export function disconnectMailbox(mailboxId: string): Promise<Mailbox> {
   return post<Mailbox>(`/mailboxes/${mailboxId}/disconnect`, {});
 }
 
+/**
+ * Starts the Gmail-send scope UPGRADE for an EXISTING, already-connected
+ * mailbox (see app/api/mailboxes.py's start_gmail_send_upgrade()) --
+ * returns the authorize URL for the same full-page-navigation pattern as
+ * startGoogleMailboxConnect() above. The Google account that completes
+ * this flow MUST be the same account already connected to `mailboxId`;
+ * a different account fails the backend's account-match check and
+ * changes nothing (see MailboxService.begin_gmail_send_upgrade()'s own
+ * docstring) -- the calling UI is responsible for warning the user about
+ * this BEFORE navigating away.
+ */
+export function startGmailSendUpgrade(mailboxId: string): Promise<{ authorize_url: string }> {
+  return request<{ authorize_url: string }>(`/mailboxes/${mailboxId}/google/gmail-send/start`);
+}
+
 // --- Mail Campaign Channels (selected sending mailboxes) -------------------
 //
 // Which already-connected mailboxes (see listMailboxes() above) may send a

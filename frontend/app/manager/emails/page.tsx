@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AlertTriangle, CheckCircle2, Mail, Plus, Search, Unlink } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Mail, Plus, Search, Send, Unlink } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ConnectEmailModal } from "@/components/connect-email-modal";
 import { DisconnectMailboxModal } from "@/components/disconnect-mailbox-modal";
+import { EnableGmailSendingModal } from "@/components/enable-gmail-sending-modal";
 import { ApiError, listMailboxes, type Mailbox } from "@/lib/api";
 import {
   DELIVERABILITY_TOOLTIP,
@@ -17,6 +18,7 @@ import {
   deriveTld,
   filterMailboxes,
   formatSendUsage,
+  gmailSendUpgradeState,
   mailboxDisplayName,
   mailboxStatusBadgeClass,
   mailboxStatusLabel,
@@ -35,6 +37,15 @@ const ERROR_MESSAGES: Record<string, string> = {
   missing_code: "Google didn't return an authorization code -- please try again.",
   token_exchange_failed: "Couldn't complete the connection with Google -- please try again.",
   not_configured: "Google Workspace connection isn't configured yet.",
+  // Gmail-send upgrade flow -- see app/api/mailboxes.py's
+  // google_oauth_callback() for exactly when the backend produces each
+  // of these (MailboxOAuthAccountMismatchError / ScopeNotGranted /
+  // UpgradeMissingRefreshToken / MailboxNotFound during a
+  // GMAIL_SEND_UPGRADE flow specifically).
+  account_mismatch: "That Google account doesn't match this inbox -- sign in with the same account you connected originally.",
+  scope_not_granted: "Gmail sending wasn't approved -- please try again and approve the Gmail sending permission.",
+  upgrade_needs_retry: "Google didn't return the permission needed to enable Gmail sending -- please try again.",
+  mailbox_not_found: "That inbox no longer exists -- please refresh and try again.",
 };
 
 // useSearchParams() requires a Suspense boundary above it -- this wrapper
@@ -56,6 +67,7 @@ function EmailsPageContent() {
   const [query, setQuery] = useState("");
   const [connectOpen, setConnectOpen] = useState(false);
   const [disconnectTarget, setDisconnectTarget] = useState<Mailbox | null>(null);
+  const [upgradeTarget, setUpgradeTarget] = useState<Mailbox | null>(null);
   const [banner, setBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   async function load() {
@@ -194,6 +206,7 @@ function EmailsPageContent() {
                   </th>
                 ))}
                 <th className="px-3 py-2 text-right font-medium">Status</th>
+                <th className="px-3 py-2 text-right font-medium">Gmail Sending</th>
                 <th className="px-3 py-2" />
               </tr>
             </thead>
@@ -227,6 +240,30 @@ function EmailsPageContent() {
                       </span>
                     </td>
                     <td className="px-3 py-2.5 text-right">
+                      {(() => {
+                        const upgradeState = gmailSendUpgradeState(mailbox);
+                        if (upgradeState === "enabled") {
+                          return (
+                            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
+                              <CheckCircle2 className="h-3.5 w-3.5" />
+                              Gmail sending enabled
+                            </span>
+                          );
+                        }
+                        if (upgradeState === "needs_reconnect") {
+                          return (
+                            <span className="text-xs text-muted-foreground">Reconnect this inbox to enable Gmail sending</span>
+                          );
+                        }
+                        return (
+                          <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => setUpgradeTarget(mailbox)}>
+                            <Send className="h-3.5 w-3.5" />
+                            Enable Gmail sending
+                          </Button>
+                        );
+                      })()}
+                    </td>
+                    <td className="px-3 py-2.5 text-right">
                       {mailbox.status !== "disconnected" && (
                         <Button
                           type="button"
@@ -253,6 +290,7 @@ function EmailsPageContent() {
         onOpenChange={(open) => !open && setDisconnectTarget(null)}
         onDisconnected={handleDisconnected}
       />
+      <EnableGmailSendingModal mailbox={upgradeTarget} onOpenChange={(open) => !open && setUpgradeTarget(null)} />
     </div>
   );
 }

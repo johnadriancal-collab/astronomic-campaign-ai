@@ -4,9 +4,12 @@ import type { Mailbox } from "./api.ts";
 import {
   DELIVERABILITY_TOOLTIP,
   EMAIL_ACCOUNT_TABLE_COLUMNS,
+  GMAIL_SEND_SCOPE,
   deriveTld,
   filterMailboxes,
   formatSendUsage,
+  gmailSendUpgradeState,
+  hasGmailSendScope,
   mailboxDisplayName,
   mailboxStatusBadgeClass,
   mailboxStatusLabel,
@@ -152,4 +155,51 @@ test("formatSendUsage shows a plain count with no limit configured", () => {
 
 test("formatSendUsage shows 'sent / limit' once a real limit exists", () => {
   assert.equal(formatSendUsage(24, 50), "24 / 50");
+});
+
+// --- Gmail-send upgrade state --------------------------------------------------
+// Matches app/google/oauth_client.py's SCOPES/GMAIL_SEND_SCOPE and
+// app/services/mailbox_service.py's begin_gmail_send_upgrade() contract --
+// derived ENTIRELY from status + granted_scopes, never a separate flag.
+
+test("GMAIL_SEND_SCOPE matches the backend's exact scope string", () => {
+  assert.equal(GMAIL_SEND_SCOPE, "https://www.googleapis.com/auth/gmail.send");
+});
+
+test("hasGmailSendScope is false for a base-scope-only mailbox", () => {
+  assert.equal(hasGmailSendScope(makeMailbox({ granted_scopes: ["openid", "email", "profile"] })), false);
+});
+
+test("hasGmailSendScope is true once gmail.send is present, alongside the base scopes", () => {
+  assert.equal(
+    hasGmailSendScope(makeMailbox({ granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE] })),
+    true
+  );
+});
+
+test("gmailSendUpgradeState is 'can_enable' for a connected, base-scope-only mailbox", () => {
+  const mailbox = makeMailbox({ status: "connected", granted_scopes: ["openid", "email", "profile"] });
+  assert.equal(gmailSendUpgradeState(mailbox), "can_enable");
+});
+
+test("gmailSendUpgradeState is 'enabled' for a connected mailbox that already has gmail.send", () => {
+  const mailbox = makeMailbox({ status: "connected", granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE] });
+  assert.equal(gmailSendUpgradeState(mailbox), "enabled");
+});
+
+test("gmailSendUpgradeState is 'needs_reconnect' for a needs_reauth mailbox regardless of granted_scopes", () => {
+  const mailboxWithoutSendScope = makeMailbox({ status: "needs_reauth", granted_scopes: ["openid", "email", "profile"] });
+  const mailboxWithSendScope = makeMailbox({
+    status: "needs_reauth",
+    granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE],
+  });
+  assert.equal(gmailSendUpgradeState(mailboxWithoutSendScope), "needs_reconnect");
+  // Critically: even a mailbox that WAS granted gmail.send before it needed
+  // reauth must not be shown as "enabled" -- it isn't currently usable.
+  assert.equal(gmailSendUpgradeState(mailboxWithSendScope), "needs_reconnect");
+});
+
+test("gmailSendUpgradeState is 'needs_reconnect' for a disconnected mailbox", () => {
+  const mailbox = makeMailbox({ status: "disconnected", granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE] });
+  assert.equal(gmailSendUpgradeState(mailbox), "needs_reconnect");
 });

@@ -638,6 +638,39 @@ async def test_upgrade_for_unknown_mailbox_raises(service):
         await service.begin_gmail_send_upgrade("does-not-exist")
 
 
+async def test_upgrade_authorize_url_uses_the_configured_production_redirect_uri(monkeypatch):
+    """Exercises the REAL GoogleOAuthClient (not FakeGoogleOAuthClient,
+    which doesn't embed redirect_uri in its stub URL at all -- see that
+    class's own docstring), configured with the actual production
+    GOOGLE_OAUTH_REDIRECT_URI value, to prove the upgrade flow's
+    authorize URL is built from that same setting -- the identical
+    code path the ordinary connect flow already uses (build_authorize_url()),
+    just with a different scope tuple."""
+    from urllib.parse import parse_qs, urlparse
+
+    from app.google import oauth_client as oauth_client_module
+    from app.google.oauth_client import GoogleOAuthClient
+
+    monkeypatch.setattr(oauth_client_module.settings, "google_oauth_client_id", "test-client-id")
+    monkeypatch.setattr(oauth_client_module.settings, "google_oauth_client_secret", "test-client-secret")
+    monkeypatch.setattr(
+        oauth_client_module.settings,
+        "google_oauth_redirect_uri",
+        "https://api.astronomicconnect.com/mailboxes/google/callback",
+    )
+
+    mailbox_store = MemoryMailboxStore()
+    await mailbox_store.create(_make_connected_mailbox())
+    service = MailboxService(
+        mailbox_store=mailbox_store, credential_store=MemoryMailboxCredentialStore(), oauth_client=GoogleOAuthClient()
+    )
+
+    url = await service.begin_gmail_send_upgrade("mb-victoria")
+
+    redirect_uri = parse_qs(urlparse(url).query)["redirect_uri"][0]
+    assert redirect_uri == "https://api.astronomicconnect.com/mailboxes/google/callback"
+
+
 # --- Gmail upgrade -- state remains opaque/single-use/expiring -------------
 
 
