@@ -1,27 +1,41 @@
 """
-Astronomic Mail routes -- Phase 1 (Foundation) plus Phase A's durable
-execution lifecycle.
+Astronomic Mail routes -- Phase 1 (Foundation), Phase A's durable
+execution lifecycle, and (Phase C) session-authenticated admin capability
+for manually resolving an UNKNOWN send outcome.
 
 IMPORTANT, and still load-bearing: there is NO route here (and none
-anywhere else in this app) capable of dispatching a real Gmail/SMTP call
-or starting any background worker. /activate DOES move a campaign into
-MailCampaignStatus.ACTIVE and materializes Step 1 execution rows (see
-MailCampaignService.activate_campaign()) -- but "ACTIVE" here means
-"eligible for a future worker to act on," never "a message was sent."
-MailSendingService.process_one_due_step() (the one thing that could ever
-reach a real send) is never called from anywhere in this file, or from
-anywhere else in this app -- reaching it requires a background worker,
-which does not exist in this phase. Also deliberately absent from this
-file: any route to drive process_one_due_step()/reap_orphans() directly
-(no /send, /queue, /dispatch, /worker/run) -- those remain Phase C's job.
+anywhere else in this app) capable of dispatching a real Gmail/SMTP call.
+/activate DOES move a campaign into MailCampaignStatus.ACTIVE and
+materializes Step 1 execution rows (see MailCampaignService.
+activate_campaign()) -- but "ACTIVE" here means "eligible for the Phase C
+worker to act on," never "a message was sent," and that worker itself
+will not even START unless mail_sending_engine_enabled is True (unset in
+this repo), then still cannot invoke a provider without BOTH
+controlled-test allowlists explicitly configured (also unset) AND
+currently holding the database execution lease -- see
+app/services/mail_execution_worker.py's own module docstring for the
+full chain. The three routes at the bottom of this file
+(POST .../resolve-sent, POST .../resolve-not-sent,
+POST .../resolve-prepare-blocked) do NOT send anything either -- they
+only let an authenticated human record what they already independently
+confirmed happened (or didn't) for a row ALREADY stuck in UNKNOWN, or
+explicitly resume a lead whose enrollment is PAUSED with no automatic
+recovery path (PREPARE_TRANSIENT_EXHAUSTED/PREPARE_UNCLASSIFIED_BLOCKED);
+see MailSendingService.resolve_unknown_step_confirmed_sent()/
+_confirmed_not_sent()/resolve_prepare_blocked_step()'s own docstrings for
+why these are fundamentally different capabilities from dispatching a
+send. Also deliberately absent from this file: any route to drive
+prepare_and_send_step()/reap_orphans()
+directly (no /send, /queue, /dispatch, /worker/run).
 """
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel
 
-from app.dependencies import get_mail_campaign_service, get_mail_suppression_service
+from app.dependencies import get_mail_campaign_service, get_mail_sending_service, get_mail_suppression_service
 from app.models.mail import (
     MailCampaign,
     MailCampaignReview,
@@ -50,6 +64,12 @@ from app.services.mail_campaign_service import (
     MailCampaignService,
     MailSendingEngineDisabledError,
     MailSequenceStepNotFound,
+)
+from app.services.mail_sending_service import (
+    MailSendingService,
+    PrepareBlockedWrongStateError,
+    UnknownStepNotFoundError,
+    UnknownStepWrongStatusError,
 )
 from app.services.mail_suppression_service import (
     InvalidMailSuppressionEmailError,
@@ -513,3 +533,92 @@ async def get_suppression_status(email: str, service: MailSuppressionService = D
     an address that's never been suppressed. This lets the CRM contact page
     call it unconditionally for any contact's email."""
     return await service.get_status(email)
+
+
+# --- Execution: UNKNOWN reconciliation (Phase C, minimum backend capability) --
+#
+# Session-authenticated like every other route in this file (this router
+# carries no PUBLIC_PATHS exemption -- see app/session_auth_middleware.py) --
+# deliberately NOT public. No polished frontend exists yet for these; they
+# exist so manual testing/reconciliation is possible via curl/Swagger UI
+# while a real UI is a later decision.
+
+
+class ResolveUnknownSentRequest(BaseModel):
+    provider_message_id: str
+    provider_thread_id: str
+
+
+@router.post("/execution/{enrollment_step_id}/resolve-sent")
+async def resolve_unknown_step_sent(
+    enrollment_step_id: str,
+    payload: ResolveUnknownSentRequest,
+    sending_service: MailSendingService = Depends(get_mail_sending_service),
+    campaign_service: MailCampaignService = Depends(get_mail_campaign_service),
+):
+    """A human has independently verified (via Gmail directly) that an
+    UNKNOWN row WAS actually delivered. Only ever permitted FROM UNKNOWN --
+    see resolve_unknown_step_confirmed_sent()'s own docstring. Requires the
+    real provider identifiers the human found, so the row's history stays
+    accurate (never synthesized)."""
+    step = await sending_service.step_store.get(enrollment_step_id)
+    if step is None:
+        raise HTTPException(status_code=404, detail="MailEnrollmentStep not found.")
+    try:
+        schedule = await campaign_service.get_schedule(step.mail_campaign_id)
+        sequence_steps = await campaign_service.list_steps(step.mail_campaign_id)
+        applied = await sending_service.resolve_unknown_step_confirmed_sent(
+            enrollment_step_id,
+            provider_message_id=payload.provider_message_id,
+            provider_thread_id=payload.provider_thread_id,
+            sequence_steps=sequence_steps,
+            windows=schedule.windows,
+            timezone_name=schedule.timezone or "UTC",
+            now=datetime.now(timezone.utc),
+        )
+    except UnknownStepNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except UnknownStepWrongStatusError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"applied": applied}
+
+
+@router.post("/execution/{enrollment_step_id}/resolve-prepare-blocked")
+async def resolve_prepare_blocked(
+    enrollment_step_id: str,
+    sending_service: MailSendingService = Depends(get_mail_sending_service),
+):
+    """An operator has independently confirmed the underlying issue is
+    fixed and explicitly resumes a lead whose enrollment is PAUSED
+    because message preparation exhausted its bounded transient-retry
+    budget, or failed for an unrecognized reason -- see
+    resolve_prepare_blocked_step()'s own docstring for exactly why these
+    two specific pause reasons have no automatic recovery path at all.
+    Only ever permitted from those two reasons -- a config-blocked or
+    mailbox-blocked enrollment is untouched by this route."""
+    try:
+        applied = await sending_service.resolve_prepare_blocked_step(enrollment_step_id, now=datetime.now(timezone.utc))
+    except UnknownStepNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except PrepareBlockedWrongStateError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"applied": applied}
+
+
+@router.post("/execution/{enrollment_step_id}/resolve-not-sent")
+async def resolve_unknown_step_not_sent(
+    enrollment_step_id: str,
+    sending_service: MailSendingService = Depends(get_mail_sending_service),
+):
+    """A human has independently verified that an UNKNOWN row was NOT
+    delivered. Requeues it, preserving its exact persisted rfc_message_id
+    -- see resolve_unknown_step_confirmed_not_sent()'s own docstring."""
+    try:
+        applied = await sending_service.resolve_unknown_step_confirmed_not_sent(
+            enrollment_step_id, now=datetime.now(timezone.utc)
+        )
+    except UnknownStepNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except UnknownStepWrongStatusError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return {"applied": applied}

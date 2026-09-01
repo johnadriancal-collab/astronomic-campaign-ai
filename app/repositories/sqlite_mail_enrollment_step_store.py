@@ -192,6 +192,16 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
             )
         return cursor.rowcount > 0
 
+    async def persist_prepared_fields(self, enrollment_step_id: str, updated: MailEnrollmentStep) -> bool:
+        # A semantically named, SAME-STATUS use of try_transition() -- see
+        # that method's ABC docstring on MailEnrollmentStepStore. Deliberately
+        # NOT a separate SQL statement: try_transition()'s conditional
+        # `WHERE ... AND status=?` already IS the correct atomic CAS for
+        # "persist this row iff it's still CLAIMED," it just needed a
+        # clearer name at the call site than passing CLAIMED as both the
+        # expected and the new status.
+        return await self.try_transition(enrollment_step_id, MailEnrollmentStepStatus.CLAIMED, updated)
+
     async def list_for_enrollment(self, enrollment_id: str) -> list[MailEnrollmentStep]:
         cursor = await self._connection.execute(
             "SELECT data FROM mail_enrollment_steps WHERE enrollment_id = ? ORDER BY step_number",

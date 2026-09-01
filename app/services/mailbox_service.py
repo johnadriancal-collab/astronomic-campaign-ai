@@ -77,10 +77,12 @@ from app.google.oauth_client import (
     GoogleUserinfoError,
     generate_state,
 )
+from app.models.activity import ActivityCategory, ActivitySource
 from app.models.crm import normalize_email
 from app.models.mailbox import Mailbox, MailboxCredential, MailboxProvider, MailboxStatus
 from app.repositories.mailbox_credential_store import MailboxCredentialStore
 from app.repositories.mailbox_store import MailboxStore
+from app.services.activity_log_service import ActivityLogService
 from app.services.token_encryption import TokenEncryptionNotConfiguredError, decrypt_refresh_token, encrypt_refresh_token
 
 _STATE_TTL = timedelta(minutes=10)
@@ -211,10 +213,18 @@ class MailboxService:
         mailbox_store: MailboxStore,
         credential_store: MailboxCredentialStore,
         oauth_client: GoogleOAuthClient,
+        activity_log: ActivityLogService | None = None,
     ):
         self.mailbox_store = mailbox_store
         self.credential_store = credential_store
         self.oauth_client = oauth_client
+        # Phase C addition -- Optional (not required) so every existing
+        # test/call site that constructs a MailboxService without it keeps
+        # working unchanged; refresh_mailbox_access_token() below simply
+        # skips the activity-log call when this is None, matching every
+        # other "best-effort, never raise" ActivityLogService.record() call
+        # site in this codebase (see that service's own module docstring).
+        self.activity_log = activity_log
         self._pending_states: dict[str, _PendingState] = {}
 
     async def list_mailboxes(self) -> list[Mailbox]:
@@ -530,6 +540,17 @@ class MailboxService:
             updated = mailbox.model_copy(update={"status": MailboxStatus.NEEDS_REAUTH, "updated_at": now})
             await self.mailbox_store.save(updated)
             logger.warning(f"Mailbox {mailbox_id} moved CONNECTED -> NEEDS_REAUTH (invalid_grant on token refresh).")
+            if self.activity_log is not None:
+                await self.activity_log.record(
+                    event_type="mailbox.needs_reauth",
+                    category=ActivityCategory.MAIL,
+                    source=ActivitySource.MAIL_SYSTEM,
+                    summary=f'Mailbox "{mailbox.email}" needs to be reconnected -- Google reports its grant is no '
+                    "longer valid.",
+                    entity_type="mailbox",
+                    entity_id=mailbox_id,
+                    entity_name=mailbox.email,
+                )
             raise
 
         return tokens["access_token"]

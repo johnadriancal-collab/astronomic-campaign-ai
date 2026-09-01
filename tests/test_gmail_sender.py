@@ -17,10 +17,10 @@ from datetime import datetime, timezone
 import pytest
 
 from app.google.gmail_api_client import GmailPermissionError, GmailRateLimitedError
-from app.google.gmail_sender import GmailSender
+from app.google.gmail_sender import GmailScopeMissingError, GmailSender, PreparedGmailSend
 from app.google.oauth_client import GoogleRefreshTokenInvalidError, GoogleTokenRefreshError
 from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
-from app.services.mail_sending_service import MailSendRequest, SendResult
+from app.services.mail_sending_service import MailSendRequest, SendOutcomeCertainty, SendResult
 
 pytestmark = pytest.mark.asyncio
 
@@ -308,3 +308,154 @@ async def test_new_thread_send_has_no_threading_headers_or_thread_id():
     decoded = base64.urlsafe_b64decode(api_client.calls[0]["raw_message"].encode("ascii")).decode("utf-8")
     assert "In-Reply-To:" not in decoded
     assert "References:" not in decoded
+
+
+# --- prepare() / send_prepared() split (Phase C) --------------------------------
+
+
+async def test_prepare_returns_a_prepared_gmail_send_without_calling_the_api_client():
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(FakeMailboxService(), api_client)
+
+    prepared = await sender.prepare(make_request())
+
+    assert isinstance(prepared, PreparedGmailSend)
+    assert api_client.calls == []
+
+
+async def test_prepare_carries_the_access_token_raw_message_thread_id_and_message_id():
+    mailbox_service = FakeMailboxService(access_token="tok-abc")
+    sender = GmailSender(mailbox_service, FakeGmailApiClient())
+
+    prepared = await sender.prepare(
+        make_request(
+            rfc_message_id="prep-id-1@astronomic.com",
+            reply_in_thread=True,
+            thread_id="thr-1",
+            in_reply_to_message_id="prior@astronomic.com",
+            references=("prior@astronomic.com",),
+        )
+    )
+
+    assert prepared.access_token == "tok-abc"
+    assert prepared.thread_id == "thr-1"
+    assert prepared.rfc_message_id == "prep-id-1@astronomic.com"
+
+
+async def test_send_prepared_makes_exactly_one_api_call_and_no_token_refresh():
+    mailbox_service = FakeMailboxService()
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(mailbox_service, api_client)
+    prepared = await sender.prepare(make_request())
+    mailbox_service.calls.clear()
+
+    result = await sender.send_prepared(prepared)
+
+    assert isinstance(result, SendResult)
+    assert len(api_client.calls) == 1
+    assert mailbox_service.calls == []  # send_prepared() never touches the mailbox/OAuth boundary
+
+
+async def test_send_prepared_passes_the_prepared_access_token_raw_message_and_thread_id_verbatim():
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(FakeMailboxService(), api_client)
+    prepared = PreparedGmailSend(
+        access_token="verbatim-token", raw_message="verbatim-raw", thread_id="verbatim-thread", rfc_message_id="verbatim-id@astronomic.com"
+    )
+
+    await sender.send_prepared(prepared)
+
+    assert api_client.calls[0] == {"access_token": "verbatim-token", "raw_message": "verbatim-raw", "thread_id": "verbatim-thread"}
+
+
+async def test_send_combines_prepare_and_send_prepared_with_identical_result_to_calling_them_separately():
+    api_client = FakeGmailApiClient()
+    sender_combined = GmailSender(FakeMailboxService(), api_client)
+    sender_split = GmailSender(FakeMailboxService(), FakeGmailApiClient(result=api_client.result))
+
+    combined_result = await sender_combined.send(make_request(rfc_message_id="combined@astronomic.com"))
+    split_result = await sender_split.send_prepared(await sender_split.prepare(make_request(rfc_message_id="combined@astronomic.com")))
+
+    assert combined_result == split_result
+
+
+# --- GmailScopeMissingError: missing gmail.send scope (Phase C) -----------------
+
+
+def make_mailbox_missing_send_scope() -> Mailbox:
+    return Mailbox(
+        mailbox_id="mb-1",
+        provider=MailboxProvider.GOOGLE,
+        email="victoria@astronomic.com",
+        display_name="Victoria",
+        status=MailboxStatus.CONNECTED,
+        google_user_id="sub-1",
+        granted_scopes=["openid", "email", "profile"],  # no gmail.send
+        connected_at=NOW,
+        updated_at=NOW,
+    )
+
+
+async def test_prepare_raises_scope_missing_error_when_mailbox_lacks_gmail_send_scope():
+    sender = GmailSender(FakeMailboxService(), FakeGmailApiClient())
+
+    with pytest.raises(GmailScopeMissingError):
+        await sender.prepare(make_request(mailbox=make_mailbox_missing_send_scope()))
+
+
+async def test_scope_missing_error_is_definitely_not_sent():
+    assert GmailScopeMissingError.certainty == SendOutcomeCertainty.DEFINITELY_NOT_SENT
+
+
+async def test_scope_check_happens_before_any_token_refresh_or_api_call():
+    """A purely local check -- must fail before spending a network round
+    trip on either the OAuth refresh or (obviously) the Gmail send call."""
+    mailbox_service = FakeMailboxService()
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(mailbox_service, api_client)
+
+    with pytest.raises(GmailScopeMissingError):
+        await sender.prepare(make_request(mailbox=make_mailbox_missing_send_scope()))
+
+    assert mailbox_service.calls == []
+    assert api_client.calls == []
+
+
+async def test_scope_missing_error_also_blocks_the_combined_send_method():
+    sender = GmailSender(FakeMailboxService(), FakeGmailApiClient())
+
+    with pytest.raises(GmailScopeMissingError):
+        await sender.send(make_request(mailbox=make_mailbox_missing_send_scope()))
+
+
+# --- List-Unsubscribe headers threaded through prepare() (Phase C) --------------
+
+
+async def test_list_unsubscribe_headers_are_threaded_from_request_into_the_prepared_mime():
+    import base64
+
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(FakeMailboxService(), api_client)
+    request = make_request(
+        list_unsubscribe_header="<https://astronomic.example/u/tok-1>",
+        list_unsubscribe_post_header="List-Unsubscribe=One-Click",
+    )
+
+    prepared = await sender.prepare(request)
+    await sender.send_prepared(prepared)
+
+    decoded = base64.urlsafe_b64decode(api_client.calls[0]["raw_message"].encode("ascii")).decode("utf-8")
+    assert "List-Unsubscribe: <https://astronomic.example/u/tok-1>" in decoded
+    assert "List-Unsubscribe-Post: List-Unsubscribe=One-Click" in decoded
+
+
+async def test_no_list_unsubscribe_headers_when_request_omits_them():
+    import base64
+
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(FakeMailboxService(), api_client)
+
+    await sender.send(make_request())
+
+    decoded = base64.urlsafe_b64decode(api_client.calls[0]["raw_message"].encode("ascii")).decode("utf-8")
+    assert "List-Unsubscribe" not in decoded

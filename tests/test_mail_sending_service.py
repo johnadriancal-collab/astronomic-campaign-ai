@@ -55,24 +55,40 @@ NOW = datetime(2026, 9, 7, 15, 0, tzinfo=timezone.utc)  # Monday, mid-afternoon 
 class FakeMailSender(MailSenderPort):
     """A MailSenderPort test double -- lives in tests/, not under app/, so
     it can never be mistaken for a production-capable sender. Records
-    every MailSendRequest it receives so tests can assert on exactly what
+    every MailSendRequest it receives (in prepare(), matching where a
+    real sender's own preparation work happens -- see GmailSender's
+    prepare()/send_prepared() split) so tests can assert on exactly what
     would have been sent, without ever actually sending anything. Echoes
     `request.rfc_message_id` back on the returned SendResult -- never
     invents its own -- matching the real contract every MailSenderPort
-    implementation must honor (see MailSendRequest's docstring)."""
+    implementation must honor (see MailSendRequest's docstring).
 
-    def __init__(self, fail: bool = False):
+    `fail_at` controls WHICH phase raises when `fail=True` -- "prepare"
+    (a pre-SENDING failure, matching GoogleRefreshTokenInvalidError/
+    scope-missing/composition-failure cases) or "send_prepared" (a
+    post-SENDING, provider-uncertain failure -- the default, matching
+    this class's original pre-split behavior exactly: append to
+    self.calls, then raise)."""
+
+    def __init__(self, fail: bool = False, fail_at: str = "send_prepared", error: Exception | None = None):
         self.fail = fail
+        self.fail_at = fail_at
+        self.error = error
         self.calls: list[MailSendRequest] = []
 
-    async def send(self, request: MailSendRequest) -> SendResult:
+    async def prepare(self, request: MailSendRequest) -> MailSendRequest:
         self.calls.append(request)
-        if self.fail:
-            raise RuntimeError("FakeMailSender configured to fail")
+        if self.fail and self.fail_at == "prepare":
+            raise self.error or RuntimeError("FakeMailSender configured to fail in prepare()")
+        return request  # trivial passthrough -- the "prepared" object IS the request itself
+
+    async def send_prepared(self, prepared: MailSendRequest) -> SendResult:
+        if self.fail and self.fail_at == "send_prepared":
+            raise self.error or RuntimeError("FakeMailSender configured to fail")
         return SendResult(
             provider_message_id=f"msg-{len(self.calls)}",
             provider_thread_id=f"thr-{len(self.calls)}",
-            rfc_message_id=request.rfc_message_id,
+            rfc_message_id=prepared.rfc_message_id,
         )
 
 
@@ -89,7 +105,15 @@ def all_day_windows() -> list[MailSendWindow]:
 def make_mailbox(mailbox_id="mbx-1", status=MailboxStatus.CONNECTED) -> Mailbox:
     return Mailbox(
         mailbox_id=mailbox_id, provider=MailboxProvider.GOOGLE, email=f"{mailbox_id}@astronomic.com",
-        display_name=None, status=status, google_user_id=f"g-{mailbox_id}", connected_at=NOW, updated_at=NOW,
+        display_name=None, status=status, google_user_id=f"g-{mailbox_id}",
+        # Hardening pass: prepare_and_send_step()'s final safety cluster
+        # freshly re-verifies gmail.send is granted -- every mailbox used
+        # through the canonical execution path (including via
+        # process_one_due_step()'s delegation) needs it, matching
+        # tests/test_gmail_sender.py's/test_mail_execution_worker.py's
+        # own convention.
+        granted_scopes=["https://www.googleapis.com/auth/gmail.send"],
+        connected_at=NOW, updated_at=NOW,
     )
 
 
@@ -153,6 +177,40 @@ def suppression_store():
 @pytest.fixture
 def activity_log():
     return ActivityLogService(MemoryActivityEventStore())
+
+
+@pytest.fixture(autouse=True)
+def _canonical_path_preconditions(monkeypatch):
+    """Hardening pass: process_one_due_step() now delegates to
+    prepare_and_send_step() (the ONE canonical execution path -- see
+    that method's own docstring), so every test in this file that
+    expects a send to actually reach the sender now also passes through
+    the controlled-test allowlist gate and real unsubscribe composition,
+    neither of which this file's tests are about. Configure both here,
+    once, for every test:
+      - controlled_test_send_allowed() is monkeypatched to always return
+        True -- a deliberate, test-only bypass of a cross-cutting Phase C
+        policy gate (production's own fail-closed default in
+        app/config.py is completely untouched), matching how this
+        codebase already isolates other cross-cutting concerns in tests.
+        Not configured via matching allowlist VALUES because this file
+        exercises many different mailbox_ids/recipient emails across
+        ~700 lines -- a single monkeypatch is what actually stays
+        maintainable.
+      - unsubscribe composition preconditions (encryption key + public
+        origin) are set to real, fixed values -- these do NOT vary by
+        recipient, so, unlike the allowlist gate, configuring the
+        underlying settings (not monkeypatching the function) is both
+        simpler and exercises composition for real, matching
+        tests/test_mail_execution_worker.py's own established
+        convention."""
+    from cryptography.fernet import Fernet
+
+    monkeypatch.setattr("app.services.mail_sending_service.controlled_test_send_allowed", lambda *a, **k: True)
+    monkeypatch.setattr("app.services.mail_unsubscribe_composition.settings.public_backend_origin", "https://fake.test")
+    monkeypatch.setattr(
+        "app.services.unsubscribe_token.settings.unsubscribe_token_encryption_keys", Fernet.generate_key().decode()
+    )
 
 
 @pytest.fixture
@@ -628,7 +686,12 @@ async def test_stale_next_send_at_is_not_trusted_runtime_rechecks_window(svc, ca
     sender = FakeMailSender()
     outcome = await svc.process_one_due_step(row, sender=sender, claimed_by="w1", sequence_steps=[step1], windows=monday_only, timezone_name=TZ, now=saturday)
     assert outcome.blocked_reason == SendBlockReason.OUTSIDE_SEND_WINDOW
-    assert len(sender.calls) == 0
+    assert not outcome.sent
+    # sender.prepare() legitimately runs BEFORE the final safety cluster
+    # (which includes this fresh window recheck) -- see
+    # prepare_and_send_step()'s own docstring on why PREPARE work is not
+    # gated behind it. What matters is that no actual send happened and
+    # the row is safely back in QUEUED, never SENDING/SENT.
     released = await step_store.get("es1")
     assert released.status == MailEnrollmentStepStatus.QUEUED
     assert released.next_send_at.astimezone().weekday() != 5 or released.next_send_at > saturday

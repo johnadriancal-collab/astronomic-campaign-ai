@@ -71,6 +71,23 @@ class MailEnrollmentStepStore(ABC):
         prior read of the row is still current when this returns False."""
 
     @abstractmethod
+    async def persist_prepared_fields(self, enrollment_step_id: str, updated: MailEnrollmentStep) -> bool:
+        """Phase C: atomically applies `updated` (the full row) iff the
+        row's CURRENT status is still exactly CLAIMED -- a semantically
+        named, SAME-STATUS use of the exact try_transition() primitive
+        (`expected_status=CLAIMED`, `updated.status` also CLAIMED). Exists
+        so execution code can durably commit prepared, pre-provider fields
+        (most importantly `rfc_message_id` -- see MailSendRequest's
+        MANDATORY PHASE C INVARIANT in app/services/mail_sending_service.py)
+        WITHOUT yet crossing the CLAIMED->SENDING boundary, and without
+        scattering confusing same-status try_transition() calls through
+        execution code. Returns True iff the write applied; False means
+        the row moved out from under this attempt (e.g. a concurrent
+        reap_orphans() reset it to QUEUED for a stale claim) -- the caller
+        must abort this attempt cleanly, never assume its prepared fields
+        landed."""
+
+    @abstractmethod
     async def list_for_enrollment(self, enrollment_id: str) -> list[MailEnrollmentStep]:
         """Every step execution row for one enrollment, ordered by
         step_number ascending."""
@@ -184,6 +201,9 @@ class MemoryMailEnrollmentStepStore(MailEnrollmentStepStore):
             return False
         self._rows[enrollment_step_id] = updated
         return True
+
+    async def persist_prepared_fields(self, enrollment_step_id: str, updated: MailEnrollmentStep) -> bool:
+        return await self.try_transition(enrollment_step_id, MailEnrollmentStepStatus.CLAIMED, updated)
 
     async def list_for_enrollment(self, enrollment_id: str) -> list[MailEnrollmentStep]:
         matching = [r for r in self._rows.values() if r.enrollment_id == enrollment_id]

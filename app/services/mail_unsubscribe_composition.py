@@ -1,8 +1,16 @@
 """
-Reusable outbound-email composition pieces for Astronomic Mail Phase B3 --
-NOT wired into anything that could actually send. See this module's own
-safety note at the bottom, and tests/test_mail_unsubscribe_safety.py's
-static checks.
+Reusable outbound-email composition pieces for Astronomic Mail, built
+dormant in Phase B3 and wired into the execution layer in Phase C (see
+MailSendingService.prepare_and_send_step(), the ONE intended caller of
+compose_outbound_email() -- see this module's own safety note at the
+bottom, and tests/test_mail_unsubscribe_safety.py's static checks, which
+now enforce a NARROWER guarantee: this module stays execution-layer-
+owned, never imported by the Gmail-specific adapter (app/google/
+gmail_sender.py, app/google/gmail_api_client.py) directly. Being called
+from the execution layer does not, by itself, enable a real send --
+prepare_and_send_step() is itself gated by mail_sending_engine_enabled,
+the controlled-test allowlists, and the worker lease (see
+app/services/mail_execution_worker.py's own module docstring).
 
 Produces the plain-text unsubscribe footer and the RFC 8058
 List-Unsubscribe/List-Unsubscribe-Post header values a real outbound
@@ -95,9 +103,9 @@ def compose_outbound_email(*, snapshot_body: str, recipient_email: str, public_o
     )
 
 
-# SAFETY NOTE: this module is deliberately NEVER imported by
-# app/services/mail_sending_service.py, app/google/gmail_sender.py, or
-# any route under app/api/ -- see tests/test_mail_unsubscribe_safety.py.
-# It exists as a tested, ready-to-use composition step for whoever wires
-# a real send path together (Phase C/D), not as something already
-# reachable.
+# SAFETY NOTE (updated for Phase C): app/services/mail_sending_service.py
+# is now the ONE intended caller (MailSendingService.
+# prepare_and_send_step()) -- deliberately still NEVER imported by
+# app/google/gmail_sender.py, app/google/gmail_api_client.py, or any
+# route under app/api/ -- see tests/test_mail_unsubscribe_safety.py's
+# narrower, current enforcement of exactly that boundary.

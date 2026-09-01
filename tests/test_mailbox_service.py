@@ -1027,6 +1027,61 @@ async def test_other_refresh_failures_never_move_to_needs_reauth(connected_mailb
     assert unchanged.status == MailboxStatus.CONNECTED
 
 
+async def test_invalid_grant_logs_a_needs_reauth_activity_event():
+    """Phase C: when an activity_log is wired in, an invalid_grant must
+    produce a structural mailbox.needs_reauth event -- required so the
+    Phase C worker's recovery sweep and any future ops dashboard has a
+    durable record of every mailbox that dropped out. Must be skippable
+    (no activity_log) without breaking anything -- see the other test
+    below."""
+    from app.models.mailbox import MailboxCredential
+    from app.repositories.activity_event_store import MemoryActivityEventStore
+    from app.services.activity_log_service import ActivityLogService
+
+    oauth_client = FakeGoogleOAuthClient()
+    mailbox_store = MemoryMailboxStore()
+    credential_store = MemoryMailboxCredentialStore()
+    activity_log = ActivityLogService(MemoryActivityEventStore())
+    service = MailboxService(
+        mailbox_store=mailbox_store, credential_store=credential_store, oauth_client=oauth_client, activity_log=activity_log
+    )
+
+    mailbox = _make_connected_mailbox()
+    await mailbox_store.create(mailbox)
+    encrypted = encrypt_refresh_token_for_test("original-refresh-token")
+    await credential_store.create(
+        MailboxCredential(mailbox_id=mailbox.mailbox_id, encrypted_refresh_token=encrypted, created_at=mailbox.connected_at, updated_at=mailbox.connected_at)
+    )
+    oauth_client.refresh_outcome = "invalid_grant"
+
+    with pytest.raises(GoogleRefreshTokenInvalidError):
+        await service.refresh_mailbox_access_token(mailbox.mailbox_id)
+
+    events = await activity_log.store.list()
+    matching = [e for e in events if e.event_type == "mailbox.needs_reauth"]
+    assert len(matching) == 1
+    assert matching[0].entity_id == mailbox.mailbox_id
+    assert matching[0].entity_name == mailbox.email
+    # No token material of any kind ever reaches the summary.
+    assert "original-refresh-token" not in matching[0].summary
+
+
+async def test_invalid_grant_without_activity_log_still_moves_to_needs_reauth(connected_mailbox_service, oauth_client):
+    """activity_log stays fully optional -- every pre-Phase-C call site
+    that never passes it (e.g. the module-level `service` fixture, and
+    connected_mailbox_service itself) must keep working exactly as
+    before."""
+    service, mailbox = connected_mailbox_service
+    assert service.activity_log is None
+    oauth_client.refresh_outcome = "invalid_grant"
+
+    with pytest.raises(GoogleRefreshTokenInvalidError):
+        await service.refresh_mailbox_access_token(mailbox.mailbox_id)
+
+    updated = await service.mailbox_store.get(mailbox.mailbox_id)
+    assert updated.status == MailboxStatus.NEEDS_REAUTH
+
+
 # --- No secrets in logs/errors ------------------------------------------------
 
 

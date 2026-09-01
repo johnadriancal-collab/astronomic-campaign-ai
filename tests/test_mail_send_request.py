@@ -180,3 +180,36 @@ def test_mail_send_error_defaults_to_outcome_unknown():
 def test_a_bare_mail_send_error_instance_carries_the_conservative_default():
     err = MailSendError("something went wrong")
     assert err.certainty == SendOutcomeCertainty.OUTCOME_UNKNOWN
+
+
+def test_a_bare_mail_send_error_instance_defaults_retryable_to_false():
+    err = MailSendError("something went wrong")
+    assert err.retryable is False
+
+
+# --- list_unsubscribe_header / list_unsubscribe_post_header (Phase C) -----------
+
+
+def test_both_list_unsubscribe_headers_together_is_valid():
+    request = make_request(
+        list_unsubscribe_header="<https://astronomic.example/u/tok-1>",
+        list_unsubscribe_post_header="List-Unsubscribe=One-Click",
+    )
+    assert request.list_unsubscribe_header == "<https://astronomic.example/u/tok-1>"
+    assert request.list_unsubscribe_post_header == "List-Unsubscribe=One-Click"
+
+
+def test_neither_list_unsubscribe_header_is_valid():
+    request = make_request()
+    assert request.list_unsubscribe_header is None
+    assert request.list_unsubscribe_post_header is None
+
+
+def test_list_unsubscribe_header_without_post_header_is_rejected():
+    with pytest.raises(MailSendRequestValidationError):
+        make_request(list_unsubscribe_header="<https://astronomic.example/u/tok-1>")
+
+
+def test_list_unsubscribe_post_header_without_header_is_rejected():
+    with pytest.raises(MailSendRequestValidationError):
+        make_request(list_unsubscribe_post_header="List-Unsubscribe=One-Click")

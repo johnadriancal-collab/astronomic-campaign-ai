@@ -197,5 +197,33 @@ class Settings(BaseSettings):
     # worker is intentionally being turned on.
     mail_sending_engine_enabled: bool = False
 
+    # Astronomic Mail Phase C (Campaign Execution Worker) -- controlled-test
+    # safety gates, SEPARATE from mail_sending_engine_enabled above and
+    # deliberately fail-CLOSED in the opposite direction from every other
+    # setting in this file: most settings here are "None means the feature
+    # is off." These two are "None (or either one being None) means NO
+    # PROVIDER INVOCATION IS EVER PERMITTED, even with the engine enabled" --
+    # see MailSendingService's controlled-test gate check for the exact
+    # enforcement. Both must be explicitly configured, and BOTH must match
+    # (mailbox AND recipient), before Phase C's worker may ever cross the
+    # SENDING boundary for a real provider call. This exists specifically so
+    # that accidentally flipping mail_sending_engine_enabled=True can never,
+    # by itself, let a real campaign reach real contacts during the first
+    # disposable-mailbox controlled test.
+    #
+    # mail_sending_mailbox_allowlist: comma-separated mailbox_id values.
+    # Exact match only -- no wildcards, no domain-level allowance. An
+    # enrollment's assigned mailbox must be in this list or nothing sends.
+    #
+    # mail_sending_recipient_allowlist: comma-separated, NORMALIZED
+    # (lowercased/trimmed -- see app.models.crm.normalize_email) recipient
+    # email addresses. Exact match only, same reasoning -- deliberately NOT
+    # domain-level (e.g. no bare "@astronomic.com") for this first
+    # implementation: a small, explicit, reviewable list of the exact
+    # addresses the first controlled test targets is safer than anything
+    # that could match an address nobody actually intended to include.
+    mail_sending_mailbox_allowlist: str | None = None
+    mail_sending_recipient_allowlist: str | None = None
+
 
 settings = Settings()

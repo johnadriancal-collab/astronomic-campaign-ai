@@ -84,6 +84,65 @@ def test_mail_sending_service_never_calls_a_real_provider_client():
     assert not re.search(r"build\(\s*[\"']gmail[\"']", source, re.IGNORECASE)
 
 
+def test_process_one_due_step_delegates_to_the_canonical_path():
+    """One canonical execution path -- source-scan proof, not just
+    behavioral. process_one_due_step()'s own function body must contain a
+    call to self.prepare_and_send_step(, and must NOT itself call
+    sender.prepare(/sender.send(/sender.send_prepared( or
+    self.step_store.try_transition( -- if it did, that would mean a
+    second, independently-maintained execution algorithm had crept back
+    in, exactly what this test exists to catch. prepare_and_send_step()
+    itself, by contrast, MUST be the one place sender.prepare()/
+    send_prepared() are actually called from."""
+    import ast
+
+    source = Path("app/services/mail_sending_service.py").read_text()
+    tree = ast.parse(source)
+    functions = {
+        node.name: ast.get_source_segment(source, node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef) and node.name in ("process_one_due_step", "prepare_and_send_step")
+    }
+    assert set(functions) == {"process_one_due_step", "prepare_and_send_step"}
+
+    delegator_body = functions["process_one_due_step"]
+    assert "self.prepare_and_send_step(" in delegator_body
+    for forbidden in ("sender.prepare(", "sender.send(", "sender.send_prepared(", "self.step_store.try_transition("):
+        assert forbidden not in delegator_body, f"process_one_due_step() must not itself call {forbidden!r}"
+
+    canonical_body = functions["prepare_and_send_step"]
+    assert "sender.prepare(" in canonical_body
+    assert "sender.send_prepared(" in canonical_body
+
+
+def test_no_other_method_in_mail_sending_service_calls_the_sender():
+    """Structural proof there is no ALTERNATE production path capable of
+    bypassing Phase C's safety checks: an actual CALL to sender.prepare(/
+    send(/send_prepared( -- an AST Call node, not merely prose mentioning
+    those names in a docstring/comment -- must appear ONLY inside
+    prepare_and_send_step()'s own body (process_one_due_step() reaches
+    the sender exclusively by delegating to it -- see the test above) --
+    never in any other method on MailSendingService."""
+    import ast
+
+    source = Path("app/services/mail_sending_service.py").read_text()
+    tree = ast.parse(source)
+    offenders = []
+    for func in ast.walk(tree):
+        if not (isinstance(func, ast.AsyncFunctionDef) and func.name != "prepare_and_send_step"):
+            continue
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in ("prepare", "send", "send_prepared")
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "sender"
+            ):
+                offenders.append(func.name)
+    assert offenders == [], f"found sender calls outside prepare_and_send_step() in: {offenders}"
+
+
 def test_mail_api_has_no_send_queue_dispatch_or_worker_route():
     """/activate, /pause, /resume ARE legitimate routes now (see
     app/api/mail.py's module docstring) -- this checks for everything that

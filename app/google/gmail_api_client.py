@@ -115,9 +115,16 @@ class GmailAuthRequiredError(GmailSendError):
     GoogleRefreshTokenInvalidError may do that (see MailboxService.
     refresh_mailbox_access_token()'s docstring, and the B1 architecture
     decision this preserves). DEFINITELY_NOT_SENT: a real 401 response
-    means Gmail rejected the request before ever processing it."""
+    means Gmail rejected the request before ever processing it.
+    RETRYABLE (Phase C): a 401 immediately after a fresh refresh is
+    anomalous but still provably not-sent -- safe for the general
+    retryable-DEFINITELY_NOT_SENT mechanism to requeue rather than a
+    special in-attempt retry (see the Phase C design report's explicit
+    reasoning for why a second, special-cased retry path was rejected in
+    favor of reusing the one general mechanism)."""
 
     certainty = SendOutcomeCertainty.DEFINITELY_NOT_SENT
+    retryable = True
 
 
 class GmailPermissionError(GmailSendError):
@@ -125,17 +132,20 @@ class GmailPermissionError(GmailSendError):
     (e.g. the stored grant does not actually carry gmail.send). Per
     Gmail API's own error semantics this is never a transient condition,
     unlike 429/5xx below. DEFINITELY_NOT_SENT: a real 403 response means
-    Gmail rejected the request before ever processing it."""
+    Gmail rejected the request before ever processing it. NOT retryable
+    (default) -- a missing scope/permission does not fix itself on
+    retry; this goes straight to FAILED."""
 
     certainty = SendOutcomeCertainty.DEFINITELY_NOT_SENT
 
 
 class GmailRateLimitedError(GmailSendError):
-    """429 -- transient, retryable (by a future Phase C retry policy;
-    this client itself never retries). DEFINITELY_NOT_SENT: rate-limit
-    rejection happens before Gmail processes the request body at all."""
+    """429 -- transient. DEFINITELY_NOT_SENT: rate-limit rejection
+    happens before Gmail processes the request body at all. RETRYABLE:
+    the canonical case a retry-with-backoff policy exists for."""
 
     certainty = SendOutcomeCertainty.DEFINITELY_NOT_SENT
+    retryable = True
 
 
 class GmailTemporaryProviderError(GmailSendError):
@@ -151,7 +161,8 @@ class GmailPermanentRejectionError(GmailSendError):
     request shape itself (malformed raw MIME, invalid recipient, etc.).
     Retrying the identical request would fail identically.
     DEFINITELY_NOT_SENT: a real 4xx response means Gmail rejected the
-    request before ever creating a message from it."""
+    request before ever creating a message from it. NOT retryable
+    (default) -- an identical request would be rejected identically."""
 
     certainty = SendOutcomeCertainty.DEFINITELY_NOT_SENT
 
@@ -162,9 +173,10 @@ class GmailConnectionNeverEstablishedError(GmailSendError):
     (no connection available from the pool in time) -- see this module's
     docstring for exactly which httpx exceptions map here and why.
     DEFINITELY_NOT_SENT: no HTTP request bytes could possibly have
-    reached Gmail."""
+    reached Gmail. RETRYABLE: a transient network condition."""
 
     certainty = SendOutcomeCertainty.DEFINITELY_NOT_SENT
+    retryable = True
 
 
 class GmailRequestOutcomeUnknownError(GmailSendError):

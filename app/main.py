@@ -41,7 +41,7 @@ every later stage loads the plan already stored on the Campaign.
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 
 from app.api.activity import router as activity_router
@@ -91,7 +91,10 @@ from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppression
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
 from app.repositories.sqlite_mailbox_send_policy_store import SQLiteMailboxSendPolicyStore
 from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
+from app.repositories.sqlite_worker_lease_store import SQLiteWorkerLeaseStore
 from app.session_auth_middleware import enforce_session_auth
+from app.google.gmail_api_client import GmailApiClient
+from app.google.gmail_sender import GmailSender
 from app.google.oauth_client import GoogleOAuthClient
 from app.luma.client import LumaClient
 from app.services.activity_log_service import ActivityLogService
@@ -114,9 +117,11 @@ from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mailbox_service import MailboxService
+from app.services.worker_lease_service import WorkerLeaseService
 
 
 @asynccontextmanager
@@ -154,6 +159,7 @@ async def lifespan(app: FastAPI):
     luma_registration_store = SQLiteLumaRegistrationStore(settings.database_path)
     luma_question_mapping_store = SQLiteLumaQuestionMappingStore(settings.database_path)
     luma_backfill_checkpoint_store = SQLiteLumaBackfillCheckpointStore(settings.database_path)
+    worker_lease_store = SQLiteWorkerLeaseStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
     await campaign_lead_store.connect()
@@ -184,6 +190,7 @@ async def lifespan(app: FastAPI):
     await luma_registration_store.connect()
     await luma_question_mapping_store.connect()
     await luma_backfill_checkpoint_store.connect()
+    await worker_lease_store.connect()
 
     activity_log_service = ActivityLogService(store=activity_event_store)
     app.state.activity_log_service = activity_log_service
@@ -294,7 +301,32 @@ async def lifespan(app: FastAPI):
         mailbox_store=mailbox_store,
         credential_store=mailbox_credential_store,
         oauth_client=GoogleOAuthClient(),
+        activity_log=activity_log_service,
     )
+
+    # Astronomic Mail Phase C (Campaign Execution Worker). Connects Phase
+    # A's execution model, B1's OAuth foundation, B2's Gmail sender, and
+    # B3's unsubscribe composition -- see app/services/
+    # mail_execution_worker.py's own module docstring for the full,
+    # multi-layered "still cannot send in THIS environment" chain
+    # (mail_sending_engine_enabled unset -> worker.start() never even
+    # polls; both controlled-test allowlists unset -> the one provider-
+    # bound check that could pass even if the engine were on still fails
+    # closed; the database lease -> only one process-instance can ever
+    # claim work at all). Constructing GmailSender here is itself
+    # harmless -- see MailSenderPort/GmailSender's own docstrings: a
+    # constructed-but-never-successfully-invoked sender sends nothing.
+    worker_lease_service = WorkerLeaseService(store=worker_lease_store)
+    gmail_sender = GmailSender(mailbox_service=app.state.mailbox_service, gmail_api_client=GmailApiClient())
+    mail_execution_worker = MailExecutionWorker(
+        mail_sending_service=mail_sending_service,
+        mail_campaign_service=app.state.mail_campaign_service,
+        lease_service=worker_lease_service,
+        sender=gmail_sender,
+        activity_log=activity_log_service,
+    )
+    app.state.mail_execution_worker = mail_execution_worker
+    mail_execution_worker.start()
 
     # Internal Hub login -- a single shared account, no signup/roles/teams
     # (see app/services/auth_service.py's module docstring). AUTH_EMAIL/
@@ -356,6 +388,10 @@ async def lifespan(app: FastAPI):
     )
 
     yield
+    # Worker stop MUST happen before any store closes -- see
+    # MailExecutionWorker.stop()'s own docstring on why (no coroutine may
+    # still be mid-write when a connection closes underneath it).
+    await mail_execution_worker.stop()
     await campaign_store.close()
     await lead_store.close()
     await campaign_lead_store.close()
@@ -386,6 +422,7 @@ async def lifespan(app: FastAPI):
     await luma_registration_store.close()
     await luma_question_mapping_store.close()
     await luma_backfill_checkpoint_store.close()
+    await worker_lease_store.close()
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
@@ -451,5 +488,16 @@ async def home():
 
 
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(request: Request):
+    """`status` stays "ok" (HTTP 200) regardless of the worker's own
+    state -- a disabled or non-leader Phase C worker is a NORMAL,
+    expected condition in most deployments (e.g. every non-leader replica
+    if Railway is ever misconfigured with more than one), never a reason
+    for Railway's own healthcheck to restart an otherwise-healthy web
+    service. `mail_worker` is purely informational -- see
+    MailExecutionWorker.liveness_snapshot()'s own docstring."""
+    worker = getattr(request.app.state, "mail_execution_worker", None)
+    body = {"status": "ok"}
+    if worker is not None:
+        body["mail_worker"] = worker.liveness_snapshot()
+    return body

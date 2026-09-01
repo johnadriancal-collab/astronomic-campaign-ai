@@ -280,6 +280,65 @@ class MailEnrollmentStatus(str, Enum):
     FAILED = "failed"
 
 
+class MailEnrollmentPauseReason(str, Enum):
+    """Why a PAUSED MailEnrollment is paused -- see that field's own
+    docstring on MailEnrollment for why this exists at all (distinguishing
+    automatically-recoverable pauses from ones that aren't, and further
+    distinguishing WHICH automatic-recovery signal -- if any -- applies).
+    Adding a further reason later is still a one-line change, not a
+    redesign.
+
+    MAILBOX_UNAVAILABLE: the enrollment's sticky assigned_mailbox_id is no
+      longer selected/CONNECTED/scoped-for-sending (NEEDS_REAUTH,
+      DISCONNECTED, removed from the campaign's Channels, or missing the
+      gmail.send grant) -- see MailSendingService.prepare_and_send_step()'s
+      mailbox-availability checks (both the mid-flow one and the final,
+      fresh pre-SENDING recheck). Auto-resumed ONLY by
+      MailSendingService.resume_mailbox_paused_enrollments(): a CONCRETE,
+      directly-observable state transition (the SAME mailbox_id, never
+      reassigned, becoming usable again) makes this safe to lift
+      automatically.
+
+    PREPARE_CONFIG_BLOCKED: message preparation (unsubscribe composition)
+      could not complete because a known, deterministic operator
+      configuration precondition is currently missing (the unsubscribe
+      token encryption key, or the public backend origin). Auto-resumed
+      ONLY by MailSendingService.resume_prepare_config_blocked_
+      enrollments() -- and only when BOTH of those settings currently
+      read as configured (a cheap, local, no-network presence check --
+      see that function's own docstring). Unlike MAILBOX_UNAVAILABLE,
+      this is a GLOBAL application setting, not a per-mailbox one, so the
+      sweep resumes every such enrollment together once the prerequisite
+      is satisfied -- but critically, it does NOT resume ANY of them
+      while the prerequisite remains unsatisfied, unlike the pre-
+      hardening-pass behavior this reason replaces.
+
+    PREPARE_TRANSIENT_EXHAUSTED: a PREPARE-phase failure believed
+      transient (e.g. a token-endpoint network blip) recurred past its
+      bounded retry budget (see MailSendingService.
+      PREPARE_TRANSIENT_MAX_ATTEMPTS and MailEnrollmentStep.
+      prepare_failure_count). Deliberately has NO automatic recovery
+      path: there is no cheap, safe, generic signal that proves a
+      transient condition has genuinely stopped recurring, and blindly
+      granting a fresh retry budget on every periodic sweep would just
+      turn "bounded" into "unbounded, one exhaustion cycle at a time" --
+      exactly the bug this reason exists to prevent. Recoverable ONLY via
+      MailSendingService.resolve_prepare_blocked_step() -- an explicit,
+      authenticated action; see that method's own docstring.
+
+    PREPARE_UNCLASSIFIED_BLOCKED: a PREPARE-phase failure that didn't
+      match any recognized category. Treated exactly as conservatively
+      as PREPARE_TRANSIENT_EXHAUSTED for the same reason: with no
+      specific signal to check, periodic blind resume is not safe.
+      Recoverable ONLY via MailSendingService.resolve_prepare_blocked_
+      step(), same as PREPARE_TRANSIENT_EXHAUSTED."""
+
+    MAILBOX_UNAVAILABLE = "mailbox_unavailable"
+    PREPARE_CONFIG_BLOCKED = "prepare_config_blocked"
+    PREPARE_TRANSIENT_EXHAUSTED = "prepare_transient_exhausted"
+    PREPARE_UNCLASSIFIED_BLOCKED = "prepare_unclassified_blocked"
+
+
 class MailEnrollment(BaseModel):
     """
     One row per (mail_campaign_id, crm_contact_id) -- created ONLY by
@@ -311,7 +370,19 @@ class MailEnrollment(BaseModel):
     disconnected/needs_reauth/unselected from the campaign's Channels,
     this enrollment moves to PAUSED instead -- see that status's own
     docstring.
-    """
+
+    `paused_reason` (Phase C addition): WHY this enrollment is currently
+    PAUSED, if it is -- None whenever status != PAUSED. Added specifically
+    so an automatic recovery sweep (MailSendingService.
+    resume_mailbox_paused_enrollments()) can resume ONLY the enrollments it
+    actually knows how to safely resume (today: exactly
+    MAILBOX_UNAVAILABLE, whose same sticky assigned_mailbox_id becoming
+    CONNECTED again is a fully understood, safe-to-automate recovery) and
+    never touch a PAUSED enrollment for any OTHER (including future,
+    not-yet-invented) reason. Without this field, "all PAUSED enrollments"
+    would be indistinguishable from "PAUSED enrollments it's safe to
+    auto-resume" -- a real correctness gap, not a hypothetical one, since
+    a future pause reason could easily need a human decision instead."""
 
     enrollment_id: str
     mail_campaign_id: str
@@ -321,6 +392,7 @@ class MailEnrollment(BaseModel):
     enrolled_at: datetime
     created_at: datetime
     assigned_mailbox_id: str | None = None
+    paused_reason: MailEnrollmentPauseReason | None = None
 
 
 # --- Per-step execution (Phase A durable execution model) -------------------
@@ -365,10 +437,14 @@ class MailEnrollmentStepStatus(str, Enum):
     SKIPPED_SUPPRESSED: terminal; always reached from CLAIMED, never from
       SENDING -- live suppression is one of the pre-send runtime checks,
       resolved strictly before the provider-call boundary.
-    FAILED: terminal; a confirmed, definitive provider rejection, or
+    FAILED: terminal; a confirmed, definitive provider rejection,
       transient-failure retries exhausted (see the retry policy's own
       constants for why these are deliberately NOT hardcoded product
-      numbers yet).
+      numbers yet), OR a PREPARE-phase failure proven permanently invalid
+      BEFORE any provider call was ever made (e.g. a recipient address
+      that cannot support an unsubscribe token, or a MIME header
+      injection attempt) -- reached directly from CLAIMED in that case,
+      never from SENDING, and never via UNKNOWN.
     UNKNOWN: the row was in SENDING and the outcome could not be confirmed.
       Never auto-resolved by anything in this codebase -- requires manual
       reconciliation (a human, or future Phase-C+ tooling that can query
@@ -466,6 +542,22 @@ class MailEnrollmentStep(BaseModel):
     # message content -- same "structural only" discipline as the Activity
     # Log (see ActivityLogService's module docstring).
     last_error: str | None = None
+
+    # Phase C addition -- counts CONSECUTIVE transient PREPARE-phase
+    # failures (never a provider/SENDING attempt -- see attempt_count
+    # above, whose meaning this deliberately does NOT redefine or share).
+    # Incremented by MailSendingService's transient-prepare-failure
+    # handling. Once it reaches PREPARE_TRANSIENT_MAX_ATTEMPTS, the
+    # enrollment is PAUSED(PREPARE_TRANSIENT_EXHAUSTED) and this counter
+    # is deliberately NEVER reset automatically -- not by reap_orphans()
+    # (a crash mid-prepare must not silently rearm the budget), and not
+    # by any periodic sweep either (see that pause reason's own
+    # docstring for why unbounded automatic resets would defeat the
+    # entire point of a BOUNDED retry budget). Reset to 0 ONLY as an
+    # explicit consequence of MailSendingService.
+    # resolve_prepare_blocked_step() -- a human-triggered recovery
+    # action, never a background one.
+    prepare_failure_count: int = 0
 
     # Worker claim lock -- see MailEnrollmentStepStatus.CLAIMED's docstring.
     claimed_by: str | None = None

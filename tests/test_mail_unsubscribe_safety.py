@@ -49,14 +49,18 @@ def test_no_parameterized_unsubscribe_path_was_added():
     assert not any("{" in p for p in PUBLIC_PATHS)
 
 
-def test_mail_unsubscribe_module_is_never_imported_by_gmail_sender_or_execution_engine():
-    """The reusable composition pieces (app/services/
-    mail_unsubscribe_composition.py) must remain unwired -- nothing under
-    app/google/ or app/services/mail_sending_service.py may import
-    anything unsubscribe-shaped."""
+def test_mail_unsubscribe_module_is_never_imported_by_the_gmail_adapter():
+    """UPDATED for Phase C: app/services/mail_sending_service.py (the
+    execution layer) is now the INTENDED, approved caller of
+    compose_outbound_email() -- see that function's own docstring and
+    MailSendingService.prepare_and_send_step(), which is the whole point
+    of wiring B3 in. What must STILL remain true: composition stays
+    execution-layer-owned, never Gmail-adapter-owned -- neither
+    gmail_sender.py nor gmail_api_client.py may import anything
+    unsubscribe-shaped; they only ever receive already-composed header
+    values as plain fields on MailSendRequest."""
     forbidden = ("mail_unsubscribe_composition", "unsubscribe_token", "mail_unsubscribe")
     watched = [
-        Path("app/services/mail_sending_service.py"),
         Path("app/google/gmail_sender.py"),
         Path("app/google/gmail_api_client.py"),
     ]

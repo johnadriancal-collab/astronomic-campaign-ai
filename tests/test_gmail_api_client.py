@@ -258,6 +258,36 @@ async def test_uncategorized_gmail_send_error_defaults_conservatively_to_outcome
     assert GmailSendError.certainty == SendOutcomeCertainty.OUTCOME_UNKNOWN
 
 
+# --- .retryable classification (Phase C) ----------------------------------------
+
+
+@pytest.mark.parametrize("name", ["GmailAuthRequiredError", "GmailRateLimitedError", "GmailConnectionNeverEstablishedError"])
+async def test_transient_definitely_not_sent_errors_are_retryable(name):
+    """401 (a lapsed access token, distinct from invalid_grant -- see
+    GmailAuthRequiredError's own docstring), 429, and a connection that
+    never reached Gmail at all are all safe to requeue: no Gmail-side
+    state could have been created."""
+    from app.google import gmail_api_client as mod
+
+    cls = getattr(mod, name)
+    assert cls.retryable is True
+
+
+@pytest.mark.parametrize("name", ["GmailPermissionError", "GmailPermanentRejectionError"])
+async def test_permanent_definitely_not_sent_errors_are_not_retryable(name):
+    """A missing scope or a permanently-rejected request will fail again
+    identically on retry -- must default to the conservative,
+    non-retryable base value, never require an explicit opt-out."""
+    from app.google import gmail_api_client as mod
+
+    cls = getattr(mod, name)
+    assert cls.retryable is False
+
+
+async def test_mail_send_error_base_class_defaults_retryable_to_false():
+    assert MailSendError.retryable is False
+
+
 async def test_access_token_and_raw_message_never_appear_in_a_raised_error_message(monkeypatch):
     _patch_transport(monkeypatch, lambda r: httpx.Response(401, json={"error": {"status": "UNAUTHENTICATED"}}))
     with pytest.raises(GmailAuthRequiredError) as exc_info:

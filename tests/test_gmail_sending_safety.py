@@ -1,15 +1,26 @@
 """
 Static sending-safety checks for Astronomic Mail Phase B2 (Gmail Sender
-Foundation). B2 adds a REAL, capable Gmail provider implementation for the
-first time in this codebase (app/google/gmail_sender.py,
+Foundation) and Phase C (Campaign Execution Worker). B2 added a REAL,
+capable Gmail provider implementation (app/google/gmail_sender.py,
 app/google/gmail_api_client.py, app/google/gmail_mime.py) -- these tests
 exist specifically to distinguish "a dormant, fully-tested provider
-implementation exists" (true after B2, and fine -- see GmailSender's own
-module docstring) from "something can actually reach it and send a real
-email" (must remain false everywhere outside a direct, deliberate test
-call). The primary guarantee is still architectural (no route/worker/
-scheduler wires a real sender to anything); these are a backstop, same
-role tests/test_mailbox_sending_safety.py plays for Phase 2/B1.
+implementation exists" (true, and fine -- see GmailSender's own module
+docstring) from "something can actually reach it and send a real email"
+(must remain false in production TODAY -- mail_sending_engine_enabled is
+False, and even if it weren't, both controlled-test allowlists are
+unset -- see app/config.py's own docstrings and tests/
+test_mail_execution_worker.py / tests/test_prepare_and_send_step.py for
+the tests that actually enforce THAT guarantee now).
+
+UPDATED for Phase C: app/main.py is now the ONE intended, approved place
+that constructs a GmailSender -- Phase C's whole purpose is wiring B2's
+sender into the execution worker (see app/services/
+mail_execution_worker.py's own module docstring for the full chain that
+keeps this safe regardless). The guarantee this file still enforces is
+narrower but just as real: NO ROUTE (app/api/*.py) and NO dependency
+wiring (app/dependencies.py) may reference GmailSender/GmailApiClient
+directly -- only the lifespan wiring in app/main.py may, and only to
+construct the one sender instance handed to the worker.
 
 Not marked asyncio -- plain sync checks, kept in their own file so
 tests/test_gmail_sender.py's module-level `pytestmark = pytest.mark.asyncio`
@@ -20,25 +31,43 @@ import re
 from pathlib import Path
 
 
-def test_gmail_sender_is_never_imported_by_app_wiring_or_api_routes():
-    """app/main.py (app startup wiring), app/dependencies.py, and every
-    module under app/api/ must never reference GmailSender/GmailApiClient
-    -- nothing constructs a real sender and nothing exposes one through a
-    route."""
+def test_gmail_sender_is_never_imported_by_api_routes_or_dependency_wiring():
+    """app/dependencies.py and every module under app/api/ must never
+    reference GmailSender/GmailApiClient -- no route constructs one or
+    exposes one directly. app/main.py is EXEMPT (see this module's own
+    docstring) -- checked separately below."""
     forbidden = ("gmail_sender", "gmail_api_client", "GmailSender", "GmailApiClient")
-    watched = [Path("app/main.py"), Path("app/dependencies.py"), *sorted(Path("app/api").glob("*.py"))]
+    watched = [Path("app/dependencies.py"), *sorted(Path("app/api").glob("*.py"))]
     for path in watched:
         source = path.read_text()
         for token in forbidden:
-            assert token not in source, f"found {token!r} in {path} -- Gmail sender must remain unwired in B2"
+            assert token not in source, f"found {token!r} in {path} -- Gmail sender must never be reachable via a route"
 
 
-def test_no_background_worker_or_scheduler_module_exists():
-    """Phase B2 explicitly does not add a worker/scheduler -- no module
-    anywhere under app/ may be named like one yet (app/services/
-    mail_scheduler.py is pure schedule-window MATH, not a background
-    loop -- explicitly excluded here, not a false negative)."""
-    forbidden_names = {"worker.py", "scheduler_loop.py", "send_worker.py", "background_worker.py", "mail_worker.py"}
+def test_gmail_sender_construction_in_main_is_handed_only_to_the_execution_worker():
+    """app/main.py IS allowed to import/construct GmailSender (Phase C's
+    intended wiring point) -- but the ONLY thing the constructed instance
+    may be passed to is MailExecutionWorker's `sender=` argument, never a
+    route dependency override or anything else. A cheap heuristic (not a
+    full AST data-flow analysis): the constructed variable name must
+    appear as MailExecutionWorker's `sender=` argument, and no
+    app.include_router-adjacent route wiring may reference it."""
+    source = Path("app/main.py").read_text()
+    assert "GmailSender(" in source, "expected app/main.py to construct GmailSender (Phase C wiring)"
+    assert re.search(r"sender=\w*gmail_sender\w*", source, re.IGNORECASE), (
+        "expected the constructed GmailSender to be passed as MailExecutionWorker's sender= argument"
+    )
+
+
+def test_no_second_ad_hoc_worker_or_scheduler_module_exists():
+    """Phase C added exactly ONE reviewed, deliberately-named worker
+    module -- app/services/mail_execution_worker.py (NOT in this
+    forbidden set, by design). This guards against a SECOND, ad-hoc
+    worker/scheduler appearing under a generic name outside of a
+    reviewed change (app/services/mail_scheduler.py is pure schedule-
+    window MATH, not a background loop -- explicitly excluded here, not
+    a false negative)."""
+    forbidden_names = {"worker.py", "scheduler_loop.py", "send_worker.py", "background_worker.py"}
     existing = {p.name for p in Path("app").rglob("*.py")}
     assert not (forbidden_names & existing), existing & forbidden_names
 
