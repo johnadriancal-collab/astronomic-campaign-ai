@@ -1,5 +1,5 @@
 """
-Astronomic Mail -- Phase 1 (Foundation) models.
+Astronomic Mail -- Phase A (Durable Execution Model) models.
 
 Astronomic Mail is a NEW, standalone outbound-email feature living entirely
 inside the CRM. It is deliberately independent from the existing Apollo-
@@ -7,48 +7,38 @@ oriented `Campaign`/`Lead`/`CampaignLead`/`EmailSequence`/`EmailMessage`
 system (app/models/campaign.py, app/models/lead.py,
 app/models/email_sequence.py, app/models/email_message.py) -- that system
 configures and mirrors real Apollo sequences; Astronomic Mail never touches
-Apollo, never touches Google, and (in this phase) has no sending capability
-of any kind. Every new name here is prefixed `Mail*` specifically to avoid
-any confusion with the existing `Campaign` word.
+Apollo, never touches Google Gmail, and STILL has no sending capability of
+any kind (see below). Every new name here is prefixed `Mail*` specifically
+to avoid any confusion with the existing `Campaign` word.
 
-Phase 1 scope, deliberately narrow:
-  - MailCampaign: a draft/ready/archived container referencing an existing
-    CrmContactList by `list_id` (never a copy of its contacts).
-  - MailSequenceStep: campaign-owned email steps, small whitelisted
-    {{variables}} only, no template engine.
-  - MailEnrollment: an explicit, one-time audience snapshot taken ONLY when
-    a campaign transitions DRAFT -> READY (see mail_campaign_service.py's
-    mark_ready() docstring for exactly when/why). Never a live view of list
-    membership.
-  - MailSuppression: a first-class, email-keyed suppression list -- the
-    real enforcement mechanism for "never contact this address again",
-    independent of CrmContact.email_status (which stays a free-text,
-    ITF-only convention, untouched by this file).
+Phase A adds a durable execution model on top of Phase 1's configuration
+shell (MailCampaign/MailSequenceStep/MailEnrollment/MailSuppression,
+unchanged in spirit, extended below) and Phase 2's mailbox connection
+(app/models/mailbox.py):
+  - MailCampaignStatus gains ACTIVE/PAUSED/COMPLETED -- see that enum's own
+    docstring for the full state machine and exactly what each status does
+    and does not permit.
+  - MailEnrollmentStatus gains ACTIVE/COMPLETED/PAUSED/FAILED, and
+    MailEnrollment gains `assigned_mailbox_id` -- the sticky sender chosen
+    once execution genuinely begins (see MailSendingService).
+  - MailEnrollmentStep (new): one durable row per (enrollment, sequence
+    step) actually being executed -- see its own docstring for the full
+    state machine, the content-snapshot strategy, and the provider-call
+    uncertainty boundary this exists specifically to make safe.
+  - MailboxSendPolicy (app/models/mailbox.py): per-mailbox sending-safety
+    configuration (daily cap, minimum pacing) -- kept separate from
+    MailCampaign.daily_lead_start_limit, which is a DIFFERENT concept (see
+    that field's own docstring for why the two must never be collapsed).
 
-Deliberately NOT modeled yet (see this phase's architecture report for why):
-  - MailboxConfig / Mailbox -- no real mailbox exists until Phase 2 (OAuth).
-    Nothing in Phase 1's actual UI needs a persisted mailbox row; the
-    Mailboxes page is a static placeholder with no backend model at all.
-  - MailSendJob / MailMessage -- no scheduler, no worker, no Gmail call
-    exists yet, and their eventual shape depends on real Gmail integration
-    testing (idempotency keys, deterministic Message-ID handling, claim/
-    lock columns) that hasn't happened. Building these tables now would be
-    unused production schema whose shape is likely to change once that
-    testing starts -- exactly what this phase avoids.
-  - `assigned_mailbox_id`/`current_step`/`next_send_at` on MailEnrollment --
-    all three are meaningless without a real Mailbox row or a scheduler to
-    advance them; adding a nullable column later, when they're actually
-    needed, is a trivial, non-breaking addition (SQLite stores each row as
-    a JSON blob here -- see the repository layer -- so no migration is
-    required either).
-
-Phase 1 contains NO code path capable of Gmail send, SMTP send, background
-scheduling, or campaign activation. `MailCampaignStatus` intentionally does
-NOT include ACTIVE/PAUSED/COMPLETED as enum members at all in this phase --
-not merely "unreachable through the API" but structurally absent, so
-`MailCampaignStatus("active")` itself raises. Adding those members later is
-a one-line Python enum change with no schema migration (status is stored as
-plain text).
+Phase A still contains NO code path capable of Gmail send, SMTP send, or any
+real message delivery -- MailSenderPort (app/services/mail_sending_service.py)
+is an abstract contract with NO implementation anywhere in this app; nothing
+in app/main.py's wiring constructs one. There is also still no background
+worker, no Railway worker process, and no OAuth scope beyond `openid email
+profile` (see app/models/mailbox.py). Activating a campaign
+(MailCampaignService.activate_campaign()) makes execution *allowed*, not
+*happening* -- reaching ACTIVE, by itself, cannot send anything, since
+nothing anywhere polls for or acts on a QUEUED MailEnrollmentStep row yet.
 """
 
 import re
@@ -60,8 +50,39 @@ from pydantic import BaseModel, Field
 
 
 class MailCampaignStatus(str, Enum):
+    """
+    DRAFT -> READY -> ACTIVE <-> PAUSED -> COMPLETED, with ARCHIVED reachable
+    from any non-archived status (terminal, no un-archive -- unchanged from
+    before this phase). See MailCampaignService.activate_campaign()'s
+    docstring for the full state machine and exactly what each status means:
+
+      READY:     configuration validated + audience snapshotted. Does NOT
+                 mean execution is allowed -- this is a deliberate,
+                 permanent distinction, not a temporary Phase A gap. A
+                 READY campaign never sends anything, by construction, same
+                 as DRAFT.
+      ACTIVE:    execution is allowed. The ONLY way to reach this is the
+                 explicit activate_campaign() transition -- mark_ready()
+                 itself never changes status past READY, and nothing here
+                 auto-activates a campaign.
+      PAUSED:    execution temporarily halted (manual pause, or an assigned
+                 mailbox becoming unavailable -- see MailEnrollmentStatus.
+                 PAUSED). Configuration remains just as locked as ACTIVE --
+                 pausing execution is not the same as unlocking
+                 configuration; see activate_campaign()'s docstring for why
+                 there is no PAUSED/ACTIVE -> DRAFT path in this phase.
+      COMPLETED: every enrollment reached its own terminal state. A system
+                 transition (nothing here sets it directly via an API call
+                 in Phase A -- see MailSendingService.
+                 maybe_complete_campaign()), reserved for once a real
+                 worker exists to reach it.
+    """
+
     DRAFT = "draft"
     READY = "ready"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    COMPLETED = "completed"
     ARCHIVED = "archived"
 
 
@@ -119,11 +140,21 @@ class MailCampaign(BaseModel):
         sending exists") -- it never changes `status` and never enables
         any send. MailCampaignStatus still has no ACTIVE member at all.
       - `daily_lead_start_limit` caps how many NEW leads may begin the
-        sequence per day, once a future engine exists to enforce it. This
-        is deliberately a DIFFERENT concept from a future per-mailbox daily
-        send-volume limit (see MailCampaignReview.daily_capacity_estimate)
-        -- one caps new starts, the other will cap total sends; they must
-        never be collapsed into a single field.
+        sequence per campaign per day -- specifically, how many Step 1
+        messages may successfully SEND per campaign-local calendar day (see
+        MailSendingService's runtime safety checks). Follow-up steps
+        (Step 2+) never consume this limit, no matter how many send on a
+        given day. This is deliberately a DIFFERENT concept from
+        MailboxSendPolicy.daily_send_limit (app/models/mailbox.py) -- a
+        per-MAILBOX cap on ALL messages that mailbox sends, Step 1 and
+        follow-ups alike, across every campaign using it, on a UTC calendar
+        day. One protects a campaign's pacing of new starts; the other
+        protects a single Gmail account's sending reputation regardless of
+        which campaign(s) route through it. They must never be collapsed
+        into a single field, and a campaign activating with a generous
+        `daily_lead_start_limit` can still be fully throttled by a
+        stricter mailbox-level `daily_send_limit` -- both apply
+        independently.
     """
 
     mail_campaign_id: str
@@ -209,13 +240,44 @@ def find_unknown_mail_template_variables(text: str) -> list[str]:
 
 
 class MailEnrollmentStatus(str, Enum):
-    """Deliberately just these two in Phase 1 -- ACTIVE/COMPLETED/STOPPED/
-    BOUNCED are all meaningless without a scheduler/worker (nothing ever
-    advances a step, nothing ever sends, nothing ever bounces). Adding them
-    in a later phase is a one-line enum change, no migration."""
+    """
+    PENDING: snapshotted, not yet begun executing (the campaign hasn't been
+      activated yet, or was already suppressed at snapshot time -- see
+      below). The only status a brand-new enrollment can start in.
+    ACTIVE: currently progressing through the sequence -- set the moment
+      MailCampaignService.activate_campaign() creates this enrollment's
+      Step 1 MailEnrollmentStep row (PENDING enrollments only; an
+      already-SUPPRESSED one is never touched).
+    PAUSED: execution blocked for this ONE enrollment specifically (its
+      assigned mailbox became disconnected/needs_reauth/no longer selected
+      for the campaign) -- never silently reassigned to a different sender;
+      see MailEnrollment.assigned_mailbox_id's own docstring. A
+      campaign-wide pause is a SEPARATE thing (MailCampaignStatus.PAUSED)
+      and does not, by itself, change any individual enrollment's status.
+    COMPLETED: every MailEnrollmentStep row for this enrollment reached a
+      terminal status (SENT/SKIPPED_SUPPRESSED/FAILED) AND there is no
+      further MailSequenceStep left to materialize -- see
+      MailSendingService.record_send_success()'s docstring for exactly how
+      this is determined; it is never inferred merely from "every
+      currently-materialized row is terminal" (a step further along the
+      sequence may not have been created yet, since Step N+1's row is only
+      created once Step N sends -- see MailEnrollmentStep's own docstring).
+    SUPPRESSED: this recipient's email is (or became) suppressed -- checked
+      both at mark_ready() snapshot time (the original Phase 1 behavior,
+      unchanged) AND live, immediately before every send attempt, once a
+      real worker exists (Phase C). Terminal -- no further step is ever
+      materialized once set.
+    FAILED: reserved for a genuinely unrecoverable enrollment (not wired to
+      anything automatic in Phase A -- kept in the enum now so adding real
+      logic that sets it later is a one-line change, not an enum migration).
+    """
 
     PENDING = "pending"
+    ACTIVE = "active"
+    PAUSED = "paused"
+    COMPLETED = "completed"
     SUPPRESSED = "suppressed"
+    FAILED = "failed"
 
 
 class MailEnrollment(BaseModel):
@@ -234,8 +296,21 @@ class MailEnrollment(BaseModel):
 
     `status` starts SUPPRESSED (not PENDING) if the contact's email was
     already on MailSuppression at snapshot time -- an honest reflection of
-    reality, not an exclusion from the row's existence. No sending logic
-    reads this status in Phase 1; it exists purely for review/audit.
+    reality, not an exclusion from the row's existence. See
+    MailEnrollmentStatus's own docstring for the full state machine
+    (PENDING -> ACTIVE -> COMPLETED, with PAUSED/SUPPRESSED as the two
+    reasons execution can stop early).
+
+    `assigned_mailbox_id` is the STICKY sender for this enrollment's entire
+    sequence -- assigned LAZILY, once, the first time this enrollment's
+    Step 1 execution is actually claimed for sending (never at mark_ready()
+    snapshot time, and never at campaign activation time either -- see
+    MailSendingService.assign_mailbox_if_needed()). Every later step for
+    this same enrollment reuses it unconditionally, for real thread/sender
+    continuity. Never silently reassigned: if this mailbox later becomes
+    disconnected/needs_reauth/unselected from the campaign's Channels,
+    this enrollment moves to PAUSED instead -- see that status's own
+    docstring.
     """
 
     enrollment_id: str
@@ -245,6 +320,159 @@ class MailEnrollment(BaseModel):
     status: MailEnrollmentStatus
     enrolled_at: datetime
     created_at: datetime
+    assigned_mailbox_id: str | None = None
+
+
+# --- Per-step execution (Phase A durable execution model) -------------------
+
+
+class MailEnrollmentStepStatus(str, Enum):
+    """
+    PENDING -> QUEUED -> CLAIMED -> SENDING -> SENT
+                            |          |
+                            v          v
+                        (released)  UNKNOWN
+                       QUEUED/
+                  SKIPPED_SUPPRESSED/
+                  (enrollment PAUSED)
+
+    PENDING: row exists, not yet eligible (waiting on the previous step's
+      delay to elapse) or eligible but not yet resolved to a legal send
+      window.
+    QUEUED: eligible, `next_send_at` resolved (may be due now or in the
+      future). The only status a future worker's poll query targets
+      (`WHERE status='queued' AND next_send_at <= now()`).
+    CLAIMED: a worker atomically won this row (conditional UPDATE,
+      `WHERE status='queued'`, `rowcount==1` to confirm) and is running
+      MailSendingService's runtime safety checks. NO provider call has
+      been made in this state -- every check failure here is fully
+      reversible: back to QUEUED (window/pacing/limit not satisfied yet,
+      `next_send_at` pushed forward), to SKIPPED_SUPPRESSED (live
+      suppression hit), or the ENROLLMENT (not this row) moves to PAUSED
+      (assigned mailbox unavailable). A row found stuck in CLAIMED past a
+      short timeout is safe to reset to QUEUED automatically -- see
+      MailSendingService.reap_orphans()'s docstring -- because we know
+      with certainty no provider call happened yet.
+    SENDING: every runtime check passed; the worker has committed a
+      generated `rfc_message_id` (the idempotency marker) and is about to
+      call, or is calling, the send provider. THIS IS THE PROVIDER-CALL
+      UNCERTAINTY BOUNDARY -- a crash, timeout, or ambiguous error anywhere
+      in this state means we can no longer prove the message wasn't sent.
+      A row found stuck in SENDING past a timeout is NEVER auto-resolved --
+      it moves to UNKNOWN, not back to QUEUED (see reap_orphans()).
+    SENT: confirmed success (the provider returned message/thread ids).
+      Terminal, success.
+    SKIPPED_SUPPRESSED: terminal; always reached from CLAIMED, never from
+      SENDING -- live suppression is one of the pre-send runtime checks,
+      resolved strictly before the provider-call boundary.
+    FAILED: terminal; a confirmed, definitive provider rejection, or
+      transient-failure retries exhausted (see the retry policy's own
+      constants for why these are deliberately NOT hardcoded product
+      numbers yet).
+    UNKNOWN: the row was in SENDING and the outcome could not be confirmed.
+      Never auto-resolved by anything in this codebase -- requires manual
+      reconciliation (a human, or future Phase-C+ tooling that can query
+      the provider directly) before it can move to SENT (verified sent,
+      backfill the identifiers) or back to QUEUED (verified NOT sent, safe
+      to retry). Duplicate cold emails are worse than a temporarily stuck
+      send -- see MailSendingService's module docstring.
+    """
+
+    PENDING = "pending"
+    QUEUED = "queued"
+    CLAIMED = "claimed"
+    SENDING = "sending"
+    SENT = "sent"
+    SKIPPED_SUPPRESSED = "skipped_suppressed"
+    FAILED = "failed"
+    UNKNOWN = "unknown"
+
+
+class MailEnrollmentStep(BaseModel):
+    """
+    One durable row per (enrollment, sequence step) actually being
+    executed -- NOT pre-created for every step of every enrollment at
+    Mark Ready. Materialization is LAZY:
+      - Step 1's row is created for every currently-PENDING enrollment at
+        the exact moment MailCampaignService.activate_campaign() succeeds
+        (every active enrollment definitely needs exactly one Step 1
+        attempt -- no speculation to avoid there).
+      - Step N+1's row is created ONLY once Step N's row reaches SENT --
+        see MailSendingService.record_send_success()'s docstring for the
+        exact "is there a next MailSequenceStep, and if so materialize it;
+        if not, this enrollment may now be COMPLETED" logic. A lead
+        suppressed/paused/campaign-archived partway through the sequence
+        never gets rows created for steps it will now never reach.
+
+    CONTENT SNAPSHOT: `subject`/`body`/`delay_days`/`reply_in_thread` are
+    copied from the originating MailSequenceStep at the exact moment this
+    row is created, and are the AUTHORITATIVE content for this specific
+    send from then on -- nothing ever re-reads the live MailSequenceStep
+    once this row exists. `step_id`/`step_number` are kept too, purely for
+    reference/display/joins, never for re-reading content. This is
+    deliberate defense-in-depth, not a workaround for a bug that exists
+    today: MailSequenceStep is DRAFT-only editable, the only path back to
+    DRAFT is unlock_campaign() (only reachable from READY, never from
+    ACTIVE/PAUSED in this phase), and unlock_campaign() cascade-deletes
+    every MailEnrollmentStep row -- so a *live* row's underlying step is
+    provably immutable for that row's entire life under today's state
+    machine alone. Snapshotting means that guarantee doesn't have to keep
+    holding forever across future, unrelated lifecycle changes (e.g. a
+    hypothetical future "edit an active campaign" feature) for this record
+    to stay correct -- an execution record must never silently start
+    reading a step body that has moved out from under it.
+
+    See MailEnrollmentStepStatus for the full state machine and the
+    provider-call uncertainty boundary. `mailbox_id` here is a per-message
+    COPY of MailEnrollment.assigned_mailbox_id at send time (that field is
+    the sticky, authoritative assignment; this one is a durable record of
+    who actually sent THIS specific message, in case the enrollment-level
+    field's meaning ever needs to diverge from historical fact later).
+
+    UNIQUE(enrollment_id, step_id) -- defense-in-depth backstop (the
+    lazy-materialization logic above already guarantees at most one row per
+    pair by construction), matching this codebase's established pattern of
+    enforcing at the DB layer what the service layer already computes
+    correctly (see e.g. MailSequenceStep's UNIQUE(mail_campaign_id,
+    step_number)).
+    """
+
+    enrollment_step_id: str
+    mail_campaign_id: str
+    enrollment_id: str
+    crm_contact_id: str
+    step_id: str
+    step_number: int
+
+    # --- content snapshot, frozen at row-creation time -- see docstring ---
+    subject: str
+    body: str
+    delay_days: int
+    reply_in_thread: bool
+
+    status: MailEnrollmentStepStatus = MailEnrollmentStepStatus.PENDING
+    eligible_at: datetime | None = None
+    next_send_at: datetime | None = None
+    sent_at: datetime | None = None
+
+    mailbox_id: str | None = None
+    gmail_message_id: str | None = None
+    gmail_thread_id: str | None = None
+    rfc_message_id: str | None = None
+
+    attempt_count: int = 0
+    last_attempt_at: datetime | None = None
+    # Sanitized (error class/code), never the raw provider payload or any
+    # message content -- same "structural only" discipline as the Activity
+    # Log (see ActivityLogService's module docstring).
+    last_error: str | None = None
+
+    # Worker claim lock -- see MailEnrollmentStepStatus.CLAIMED's docstring.
+    claimed_by: str | None = None
+    claimed_at: datetime | None = None
+
+    created_at: datetime
+    updated_at: datetime
 
 
 # --- Suppression -------------------------------------------------------------

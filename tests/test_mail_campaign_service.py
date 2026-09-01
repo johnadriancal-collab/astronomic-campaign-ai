@@ -15,13 +15,16 @@ from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
 from app.repositories.mail_sequence_step_store import (
     DuplicateMailSequenceStepNumberError,
     MemoryMailSequenceStepStore,
 )
+from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicyStore
 from app.repositories.mailbox_store import MemoryMailboxStore
+from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import (
@@ -37,9 +40,23 @@ from app.services.mail_campaign_service import (
     MailCampaignNotFound,
     MailCampaignNotReadyError,
     MailCampaignService,
+    MailSendingEngineDisabledError,
 )
+from app.services.mail_sending_service import MailSendingService
+from app.services import mail_campaign_service as mail_campaign_service_module
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def mail_sending_engine_enabled(monkeypatch):
+    """Every activate_campaign()/resume_campaign() test in this file
+    exercises the state machine itself, not the deployment-wide safety gate
+    (see MailSendingEngineDisabledError / settings.mail_sending_engine_enabled
+    in app/config.py) -- that gate has its own dedicated test below
+    (test_activate_refused_when_sending_engine_disabled) which explicitly
+    overrides this back to False."""
+    monkeypatch.setattr(mail_campaign_service_module.settings, "mail_sending_engine_enabled", True)
 
 
 @pytest.fixture
@@ -68,16 +85,40 @@ def window_store():
 
 
 @pytest.fixture
-def service(crm, activity_log, mailbox_store, channel_store, window_store):
+def enrollment_step_store():
+    return MemoryMailEnrollmentStepStore()
+
+
+@pytest.fixture
+def suppression_store():
+    return MemoryMailSuppressionStore()
+
+
+@pytest.fixture
+def service(crm, activity_log, mailbox_store, channel_store, window_store, enrollment_step_store, suppression_store):
+    campaign_store = MemoryMailCampaignStore()
+    enrollment_store = MemoryMailEnrollmentStore()
+    sending_service = MailSendingService(
+        campaign_store=campaign_store,
+        enrollment_store=enrollment_store,
+        step_store=enrollment_step_store,
+        mailbox_store=mailbox_store,
+        channel_store=channel_store,
+        policy_store=MemoryMailboxSendPolicyStore(),
+        suppression_store=suppression_store,
+        activity_log=activity_log,
+    )
     return MailCampaignService(
-        campaign_store=MemoryMailCampaignStore(),
+        campaign_store=campaign_store,
         step_store=MemoryMailSequenceStepStore(),
-        enrollment_store=MemoryMailEnrollmentStore(),
+        enrollment_store=enrollment_store,
         crm_service=crm,
         activity_log=activity_log,
         mailbox_store=mailbox_store,
         channel_store=channel_store,
         window_store=window_store,
+        enrollment_step_store=enrollment_step_store,
+        sending_service=sending_service,
     )
 
 
@@ -327,15 +368,15 @@ async def test_update_ignores_disallowed_patch_keys_including_status(service):
     assert updated.mail_campaign_id == campaign.mail_campaign_id  # untouched
 
 
-async def test_active_is_not_even_a_valid_enum_value():
-    """Structurally, not just behaviorally, unreachable -- see
-    MailCampaignStatus's docstring."""
-    with pytest.raises(ValueError):
-        MailCampaignStatus("active")
-    with pytest.raises(ValueError):
-        MailCampaignStatus("paused")
-    with pytest.raises(ValueError):
-        MailCampaignStatus("completed")
+async def test_active_paused_completed_are_real_enum_values_now():
+    """Phase A addition -- ACTIVE/PAUSED/COMPLETED are real, valid
+    MailCampaignStatus members (see that enum's docstring), reachable only
+    via activate_campaign()/pause_campaign()/resume_campaign() and the
+    system-driven completion path -- never via create_campaign() or
+    update_campaign()."""
+    assert MailCampaignStatus("active") == MailCampaignStatus.ACTIVE
+    assert MailCampaignStatus("paused") == MailCampaignStatus.PAUSED
+    assert MailCampaignStatus("completed") == MailCampaignStatus.COMPLETED
 
 
 async def test_archive_from_draft(service, activity_log):
@@ -369,13 +410,234 @@ async def test_update_archived_campaign_is_rejected(service):
         await service.update_campaign(campaign.mail_campaign_id, {"name": "New name"})
 
 
-async def test_impossible_active_transition_no_method_exists(service):
-    """There is no activate()/pause()/complete() method on this service at
-    all -- confirmed by introspection rather than trying to call one."""
-    assert not hasattr(service, "activate_campaign")
-    assert not hasattr(service, "pause_campaign")
+async def test_activate_and_pause_exist_but_no_send_capable_method_ever_will(service):
+    """Phase A addition -- activate_campaign()/pause_campaign()/
+    resume_campaign() are now real, legitimate lifecycle methods (see their
+    own docstrings). What remains permanently absent is anything that could
+    ever DISPATCH a message: no launch_campaign()/send_campaign(), and
+    (confirmed elsewhere, see test_mail_sending_service.py) no concrete
+    MailSenderPort implementation exists anywhere under app/."""
+    assert hasattr(service, "activate_campaign")
+    assert hasattr(service, "pause_campaign")
+    assert hasattr(service, "resume_campaign")
     assert not hasattr(service, "launch_campaign")
     assert not hasattr(service, "send_campaign")
+
+
+# --- Phase A: activate / pause / resume -----------------------------------
+
+
+async def test_activate_requires_ready(service):
+    campaign = await service.create_campaign("Draft")
+    with pytest.raises(MailCampaignInvalidTransitionError):
+        await service.activate_campaign(campaign.mail_campaign_id)
+
+
+async def test_activate_refused_when_sending_engine_disabled(service, crm, monkeypatch):
+    """The deployment-wide gate (settings.mail_sending_engine_enabled,
+    default False) refuses activation regardless of how ready/valid the
+    campaign itself is -- checked FIRST, before even the READY status
+    check, so this fires even for a campaign that isn't READY at all."""
+    monkeypatch.setattr(mail_campaign_service_module.settings, "mail_sending_engine_enabled", False)
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    with pytest.raises(MailSendingEngineDisabledError):
+        await service.activate_campaign(ready.mail_campaign_id)
+    unchanged = await service.get_campaign(ready.mail_campaign_id)
+    assert unchanged.status == MailCampaignStatus.READY
+
+
+async def test_resume_refused_when_sending_engine_disabled(service, crm, monkeypatch):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    await service.pause_campaign(ready.mail_campaign_id)
+
+    monkeypatch.setattr(mail_campaign_service_module.settings, "mail_sending_engine_enabled", False)
+    with pytest.raises(MailSendingEngineDisabledError):
+        await service.resume_campaign(ready.mail_campaign_id)
+    still_paused = await service.get_campaign(ready.mail_campaign_id)
+    assert still_paused.status == MailCampaignStatus.PAUSED
+
+
+async def test_pause_is_never_gated_by_the_sending_engine_flag(service, crm, monkeypatch):
+    """Pausing is always allowed regardless of the flag -- it only ever
+    makes execution safer, never activates anything."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+
+    monkeypatch.setattr(mail_campaign_service_module.settings, "mail_sending_engine_enabled", False)
+    paused = await service.pause_campaign(ready.mail_campaign_id)
+    assert paused.status == MailCampaignStatus.PAUSED
+
+
+async def test_activate_a_valid_ready_campaign_succeeds(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    activated = await service.activate_campaign(ready.mail_campaign_id)
+    assert activated.status == MailCampaignStatus.ACTIVE
+
+
+async def test_activate_creates_exactly_one_step1_execution_per_eligible_enrollment(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm, n_contacts=3)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+
+    rows = await service.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
+    assert len(rows) == 3
+    assert all(r.step_number == 1 for r in rows)
+
+    enrollments = await service.enrollment_store.list_for_campaign(campaign.mail_campaign_id)
+    assert all(e.status == MailEnrollmentStatus.ACTIVE for e in enrollments)
+
+
+async def test_repeated_activation_cannot_duplicate_step1_rows(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm, n_contacts=2)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    # A second call on an already-ACTIVE campaign is rejected as an invalid
+    # transition (READY-only) -- but even a hypothetical re-entrant call
+    # into the same activation logic (exercised directly here) must not
+    # duplicate rows, since create_step1_execution() is idempotent and no
+    # PENDING enrollment remains to loop over.
+    with pytest.raises(MailCampaignInvalidTransitionError):
+        await service.activate_campaign(ready.mail_campaign_id)
+    rows = await service.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
+    assert len(rows) == 2
+
+
+async def test_activate_rejected_with_zero_partial_mutation_when_channels_lost(service, crm):
+    """A READY campaign that loses all its connected Channels since Mark
+    Ready must have activation rejected -- and nothing partially written:
+    campaign stays READY, no MailEnrollmentStep row is created, no
+    enrollment status changes."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    # Disconnect the only selected mailbox (Channels selection unchanged,
+    # but no longer usable) -- exactly the drift activate_campaign() must
+    # re-detect since READY doesn't re-validate this on its own.
+    mailbox_ids = await service.list_channel_mailboxes(ready.mail_campaign_id)
+    for mailbox in mailbox_ids:
+        await service.mailbox_store.save(mailbox.model_copy(update={"status": MailboxStatus.DISCONNECTED}))
+
+    with pytest.raises(MailCampaignNotReadyError):
+        await service.activate_campaign(ready.mail_campaign_id)
+
+    unchanged = await service.get_campaign(ready.mail_campaign_id)
+    assert unchanged.status == MailCampaignStatus.READY
+    rows = await service.enrollment_step_store.list_for_campaign(ready.mail_campaign_id)
+    assert rows == []
+    enrollments = await service.enrollment_store.list_for_campaign(ready.mail_campaign_id)
+    assert all(e.status == MailEnrollmentStatus.PENDING for e in enrollments)
+
+
+async def test_pause_requires_active(service):
+    campaign = await service.create_campaign("Draft")
+    with pytest.raises(MailCampaignInvalidTransitionError):
+        await service.pause_campaign(campaign.mail_campaign_id)
+
+
+async def test_pause_then_resume_round_trip(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+
+    paused = await service.pause_campaign(ready.mail_campaign_id)
+    assert paused.status == MailCampaignStatus.PAUSED
+
+    resumed = await service.resume_campaign(ready.mail_campaign_id)
+    assert resumed.status == MailCampaignStatus.ACTIVE
+
+
+async def test_pause_does_not_touch_enrollment_or_step_rows(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    before = await service.enrollment_step_store.list_for_campaign(ready.mail_campaign_id)
+
+    await service.pause_campaign(ready.mail_campaign_id)
+
+    after = await service.enrollment_step_store.list_for_campaign(ready.mail_campaign_id)
+    assert [r.status for r in before] == [r.status for r in after]
+
+
+async def test_resume_requires_paused(service):
+    campaign = await service.create_campaign("Draft")
+    with pytest.raises(MailCampaignInvalidTransitionError):
+        await service.resume_campaign(campaign.mail_campaign_id)
+
+
+async def test_resume_rejected_when_no_connected_mailbox_remains(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    await service.pause_campaign(ready.mail_campaign_id)
+
+    mailbox_ids = await service.list_channel_mailboxes(ready.mail_campaign_id)
+    for mailbox in mailbox_ids:
+        await service.mailbox_store.save(mailbox.model_copy(update={"status": MailboxStatus.DISCONNECTED}))
+
+    with pytest.raises(MailCampaignNotReadyError):
+        await service.resume_campaign(ready.mail_campaign_id)
+    still_paused = await service.get_campaign(ready.mail_campaign_id)
+    assert still_paused.status == MailCampaignStatus.PAUSED
+
+
+# --- Phase A: Channels locked once ACTIVE/PAUSED/COMPLETED ------------------
+
+
+async def test_set_channel_mailboxes_locked_once_active(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    with pytest.raises(MailCampaignChannelsFrozenError):
+        await service.set_channel_mailboxes(ready.mail_campaign_id, [])
+
+
+async def test_set_channel_mailboxes_locked_once_paused(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    await service.pause_campaign(ready.mail_campaign_id)
+    with pytest.raises(MailCampaignChannelsFrozenError):
+        await service.set_channel_mailboxes(ready.mail_campaign_id, [])
+
+
+async def test_set_channel_mailboxes_still_editable_at_ready(service, crm):
+    """Unchanged shipped behavior -- READY alone (never activated) keeps
+    Channels editable, only ACTIVE/PAUSED/COMPLETED/ARCHIVED freeze it."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    result = await service.set_channel_mailboxes(ready.mail_campaign_id, [])
+    assert result == []
+
+
+# --- Phase A: unlock cascade -------------------------------------------------
+
+
+async def test_unlock_cascade_deletes_enrollment_step_rows_too(service, crm, enrollment_step_store):
+    """Defense-in-depth: unlock_campaign() (READY-only, and there is no path
+    from ACTIVE/PAUSED back to READY in this phase) must also cascade-delete
+    any MailEnrollmentStep rows, not just MailEnrollment rows."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    enrollments = await service.enrollment_store.list_for_campaign(ready.mail_campaign_id)
+    now = enrollments[0].enrolled_at
+    from app.models.mail import MailEnrollmentStep, MailEnrollmentStepStatus
+
+    await enrollment_step_store.create(
+        MailEnrollmentStep(
+            enrollment_step_id="manual-es1", mail_campaign_id=ready.mail_campaign_id,
+            enrollment_id=enrollments[0].enrollment_id, crm_contact_id=enrollments[0].crm_contact_id,
+            step_id="s1", step_number=1, subject="x", body="x", delay_days=0, reply_in_thread=True,
+            status=MailEnrollmentStepStatus.QUEUED, created_at=now, updated_at=now,
+        )
+    )
+    await service.unlock_campaign(ready.mail_campaign_id)
+    remaining = await enrollment_step_store.list_for_campaign(ready.mail_campaign_id)
+    assert remaining == []
 
 
 # --- Sequence steps -----------------------------------------------------

@@ -82,11 +82,13 @@ from app.repositories.sqlite_luma_question_mapping_store import SQLiteLumaQuesti
 from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrationStore
 from app.repositories.sqlite_mail_campaign_mailbox_store import SQLiteMailCampaignMailboxStore
 from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
+from app.repositories.sqlite_mail_enrollment_step_store import SQLiteMailEnrollmentStepStore
 from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
 from app.repositories.sqlite_mail_send_window_store import SQLiteMailSendWindowStore
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
+from app.repositories.sqlite_mailbox_send_policy_store import SQLiteMailboxSendPolicyStore
 from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
 from app.session_auth_middleware import enforce_session_auth
 from app.google.oauth_client import GoogleOAuthClient
@@ -111,6 +113,7 @@ from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mailbox_service import MailboxService
 
@@ -141,6 +144,8 @@ async def lifespan(app: FastAPI):
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
     mail_campaign_mailbox_store = SQLiteMailCampaignMailboxStore(settings.database_path)
     mail_send_window_store = SQLiteMailSendWindowStore(settings.database_path)
+    mail_enrollment_step_store = SQLiteMailEnrollmentStepStore(settings.database_path)
+    mailbox_send_policy_store = SQLiteMailboxSendPolicyStore(settings.database_path)
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
     auth_session_store = SQLiteAuthSessionStore(settings.database_path)
@@ -169,6 +174,8 @@ async def lifespan(app: FastAPI):
     await mail_suppression_store.connect()
     await mail_campaign_mailbox_store.connect()
     await mail_send_window_store.connect()
+    await mail_enrollment_step_store.connect()
+    await mailbox_send_policy_store.connect()
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
     await auth_session_store.connect()
@@ -247,6 +254,22 @@ async def lifespan(app: FastAPI):
         store=mail_suppression_store,
         activity_log=activity_log_service,
     )
+    # Phase A (durable execution model). Still no Gmail/OAuth/SMTP/worker
+    # capability anywhere in this wiring -- MailSendingService's
+    # MailSenderPort has zero concrete implementation under app/ (see that
+    # module's docstring); nothing here ever calls process_one_due_step()
+    # on a schedule.
+    mail_sending_service = MailSendingService(
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        step_store=mail_enrollment_step_store,
+        mailbox_store=mailbox_store,
+        channel_store=mail_campaign_mailbox_store,
+        policy_store=mailbox_send_policy_store,
+        suppression_store=mail_suppression_store,
+        activity_log=activity_log_service,
+    )
+    app.state.mail_sending_service = mail_sending_service
     app.state.mail_campaign_service = MailCampaignService(
         campaign_store=mail_campaign_store,
         step_store=mail_sequence_step_store,
@@ -256,6 +279,8 @@ async def lifespan(app: FastAPI):
         mailbox_store=mailbox_store,
         channel_store=mail_campaign_mailbox_store,
         window_store=mail_send_window_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        sending_service=mail_sending_service,
     )
 
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). CSRF
@@ -351,6 +376,8 @@ async def lifespan(app: FastAPI):
     await mail_suppression_store.close()
     await mail_campaign_mailbox_store.close()
     await mail_send_window_store.close()
+    await mail_enrollment_step_store.close()
+    await mailbox_send_policy_store.close()
     await mailbox_store.close()
     await mailbox_credential_store.close()
     await auth_session_store.close()

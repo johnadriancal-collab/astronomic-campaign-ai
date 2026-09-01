@@ -30,6 +30,7 @@ from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mailbox_service import MailboxService
 
@@ -76,6 +77,10 @@ async def get_email_intake_service(request: Request) -> EmailIntakeService:
 
 async def get_mail_campaign_service(request: Request) -> MailCampaignService:
     return request.app.state.mail_campaign_service
+
+
+async def get_mail_sending_service(request: Request) -> MailSendingService:
+    return request.app.state.mail_sending_service
 
 
 async def get_mail_suppression_service(request: Request) -> MailSuppressionService:

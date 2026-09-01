@@ -145,5 +145,22 @@ class Settings(BaseSettings):
     luma_api_key: str | None = None
     luma_webhook_secret: str | None = None
 
+    # Astronomic Mail Phase A (durable execution model) -- see
+    # app/services/mail_sending_service.py's module docstring. Defaults to
+    # False (fails CLOSED, matching cookie_secure's precedent above, not
+    # auth_email/itf_webhook_token's "None until configured" shape, since
+    # this one genuinely needs an explicit BOOLEAN choice rather than a
+    # credential). Gates ONLY MailCampaignService.activate_campaign() --
+    # the state machine, every other lifecycle method, and the full
+    # execution/safety service remain fully testable regardless of this
+    # setting; only the one transition that could put a REAL production
+    # campaign into ACTIVE is affected. This exists because /activate is a
+    # real, callable route the instant this backend deploys, but no
+    # worker/sender exists yet to safely act on an ACTIVE campaign (Phase
+    # C/D) -- "the frontend doesn't show the button" is not a safety
+    # boundary on its own; this is. Flip to True only when Phase C's
+    # worker is intentionally being turned on.
+    mail_sending_engine_enabled: bool = False
+
 
 settings = Settings()

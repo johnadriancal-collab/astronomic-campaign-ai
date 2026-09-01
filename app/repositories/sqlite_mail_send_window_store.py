@@ -12,12 +12,11 @@ set completely intact rather than partially replaced (same guarantee as
 sqlite_mail_campaign_mailbox_store.py's Channels replace).
 """
 
-from pathlib import Path
-
 import aiosqlite
 
 from app.models.mail import MailSendWindow
 from app.repositories.mail_send_window_store import MailSendWindowStore
+from app.repositories.sqlite_connection import open_sqlite_connection
 from app.repositories.sqlite_txn import sqlite_write
 
 CREATE_TABLE_SQL = """
@@ -41,10 +40,7 @@ class SQLiteMailSendWindowStore(MailSendWindowStore):
         self._conn: aiosqlite.Connection | None = None
 
     async def connect(self) -> None:
-        Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = await aiosqlite.connect(self._db_path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn = await open_sqlite_connection(self._db_path)
         await self._conn.execute(CREATE_TABLE_SQL)
         await self._conn.execute(CREATE_INDEX_SQL)
         await self._conn.commit()

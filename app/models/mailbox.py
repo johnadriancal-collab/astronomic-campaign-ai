@@ -81,3 +81,58 @@ class MailboxCredential(BaseModel):
     encrypted_refresh_token: str
     created_at: datetime
     updated_at: datetime
+
+
+class MailboxSendPolicy(BaseModel):
+    """
+    Phase A -- per-mailbox sending-SAFETY configuration, deliberately
+    separate from MailCampaign.daily_lead_start_limit (see that field's own
+    docstring for exactly why the two must never be collapsed: this one
+    protects a single Gmail account's sending reputation across every
+    campaign that uses it; that one paces one campaign's new starts).
+
+    1:1 with Mailbox by `mailbox_id`, but a row's ABSENCE is a fully valid,
+    expected state -- NOT an error and NOT something requiring a
+    backfill/migration write for any already-connected mailbox. Both
+    `daily_send_limit` and `min_seconds_between_sends` are nullable, and
+    null means "defer to the current system-wide default constant" (see
+    MailSendingService.DEFAULT_MAILBOX_DAILY_SEND_LIMIT/
+    DEFAULT_MAILBOX_MIN_SECONDS_BETWEEN_SENDS) -- the exact same fallback
+    as when no row exists at all. This is deliberate: it separates "the
+    capability to configure a limit" from "what the limit's number
+    currently is," so a system-wide default can be tuned in one place
+    without ever needing to touch every mailbox's row, and so existing
+    mailbox connections (e.g. an already-connected mailbox from before this
+    phase) need zero mutation to be correctly, safely governed by whatever
+    the current default is.
+
+    `daily_send_limit`: the maximum total messages (Step 1 AND every
+    follow-up, across every campaign using this mailbox) this mailbox may
+    send in one UTC calendar day -- see MailSendingService's runtime safety
+    checks for the exact enforcement query and why the day boundary is
+    UTC-fixed rather than tied to any one campaign's timezone (a mailbox
+    can serve multiple campaigns with different timezones at once, so no
+    single campaign's local midnight is the correct boundary for a
+    mailbox-level safety limit).
+
+    `min_seconds_between_sends`: the minimum pacing floor between two
+    consecutive sends FROM THIS MAILBOX, across every campaign -- exists so
+    a burst of simultaneously-due messages (e.g. 100 messages all due at a
+    schedule window's opening moment) cannot become 100 near-simultaneous
+    provider calls; see MailSendingService's runtime safety checks for the
+    exact enforcement (comparing against this mailbox's own most recent
+    SENT timestamp, across every enrollment/campaign, not just the one
+    currently being processed).
+
+    New mailbox connections MAY create a row (system-default-valued) at
+    connect time if that turns out to keep the wiring simpler, but
+    execution correctness must never depend on a row existing -- see
+    MailSendingService.resolve_mailbox_send_policy()'s "missing row ==
+    null-override row" equivalence, and its own test coverage.
+    """
+
+    mailbox_id: str
+    daily_send_limit: int | None = None
+    min_seconds_between_sends: int | None = None
+    created_at: datetime
+    updated_at: datetime

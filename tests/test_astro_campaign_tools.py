@@ -24,16 +24,19 @@ from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
 from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
+from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicyStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_campaign_tools import ASTRO_CAMPAIGN_TOOL_DEFINITIONS, CAMPAIGN_LIST_LIMIT, AstroCampaignTools
 from app.services.campaign_service import CampaignService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 
 pytestmark = pytest.mark.asyncio
@@ -82,15 +85,30 @@ async def tools():
         list_member_store=MemoryCrmContactListMemberStore(),
         activity_log=activity_log,
     )
+    mailbox_store = MemoryMailboxStore()
+    channel_store = MemoryMailCampaignMailboxStore()
+    enrollment_step_store = MemoryMailEnrollmentStepStore()
+    sending_service = MailSendingService(
+        campaign_store=mail_campaign_store,
+        enrollment_store=enrollment_store,
+        step_store=enrollment_step_store,
+        mailbox_store=mailbox_store,
+        channel_store=channel_store,
+        policy_store=MemoryMailboxSendPolicyStore(),
+        suppression_store=suppression_store,
+        activity_log=activity_log,
+    )
     mail_campaign_service = MailCampaignService(
         campaign_store=mail_campaign_store,
         step_store=step_store,
         enrollment_store=enrollment_store,
         crm_service=crm_service,
         activity_log=activity_log,
-        mailbox_store=MemoryMailboxStore(),
-        channel_store=MemoryMailCampaignMailboxStore(),
+        mailbox_store=mailbox_store,
+        channel_store=channel_store,
         window_store=MemoryMailSendWindowStore(),
+        enrollment_step_store=enrollment_step_store,
+        sending_service=sending_service,
     )
     mail_suppression_service = MailSuppressionService(store=suppression_store, activity_log=activity_log)
 

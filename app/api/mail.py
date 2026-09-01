@@ -1,14 +1,19 @@
 """
-Astronomic Mail routes -- Phase 1 (Foundation) only.
+Astronomic Mail routes -- Phase 1 (Foundation) plus Phase A's durable
+execution lifecycle.
 
-IMPORTANT, and load-bearing for this phase's safety guarantee: there is NO
-route here (and none anywhere else in this app) capable of activating a
-campaign into a sending state, dispatching a Gmail/SMTP call, or starting
-any background job. The only state transitions exposed are
-draft->ready, ready->draft (unlock), and (draft|ready)->archived -- see
-MailCampaignService's module docstring for the full state machine. This is
-not a UI-level restriction: no service method, and therefore no route,
-exists that could reach an active-sending state even if called directly.
+IMPORTANT, and still load-bearing: there is NO route here (and none
+anywhere else in this app) capable of dispatching a real Gmail/SMTP call
+or starting any background worker. /activate DOES move a campaign into
+MailCampaignStatus.ACTIVE and materializes Step 1 execution rows (see
+MailCampaignService.activate_campaign()) -- but "ACTIVE" here means
+"eligible for a future worker to act on," never "a message was sent."
+MailSendingService.process_one_due_step() (the one thing that could ever
+reach a real send) is never called from anywhere in this file, or from
+anywhere else in this app -- reaching it requires a background worker,
+which does not exist in this phase. Also deliberately absent from this
+file: any route to drive process_one_due_step()/reap_orphans() directly
+(no /send, /queue, /dispatch, /worker/run) -- those remain Phase C's job.
 """
 
 from typing import Any
@@ -43,6 +48,7 @@ from app.services.mail_campaign_service import (
     MailCampaignNotFound,
     MailCampaignNotReadyError,
     MailCampaignService,
+    MailSendingEngineDisabledError,
     MailSequenceStepNotFound,
 )
 from app.services.mail_suppression_service import (
@@ -178,6 +184,60 @@ async def archive_campaign(mail_campaign_id: str, service: MailCampaignService =
         raise HTTPException(status_code=404, detail=str(e))
     except MailCampaignInvalidTransitionError as e:
         raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/campaigns/{mail_campaign_id}/activate", response_model=MailCampaign)
+async def activate_campaign(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+    """READY -> ACTIVE. Backend only in this phase -- deliberately not
+    exposed anywhere in the production frontend yet (see
+    MailCampaignService.activate_campaign()'s docstring); nothing calls
+    this route today except tests. 422 lists every readiness problem found
+    (same shape as POST .../ready) if the campaign's execution-critical
+    state has drifted since it became READY. 503 if
+    mail_sending_engine_enabled is False (the default) -- see that
+    setting's docstring in app/config.py; same convention as
+    AuthNotConfiguredError/EmailIntakeWebhook's "unconfigured/disabled ->
+    503" pattern elsewhere in this API."""
+    try:
+        return await service.activate_campaign(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignInvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MailSendingEngineDisabledError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except MailCampaignNotReadyError as e:
+        raise HTTPException(status_code=422, detail="; ".join(e.reasons))
+
+
+@router.post("/campaigns/{mail_campaign_id}/pause", response_model=MailCampaign)
+async def pause_campaign(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+    """ACTIVE -> PAUSED. Backend only -- see activate_campaign()'s note
+    above."""
+    try:
+        return await service.pause_campaign(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignInvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@router.post("/campaigns/{mail_campaign_id}/resume", response_model=MailCampaign)
+async def resume_campaign(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+    """PAUSED -> ACTIVE. Backend only -- see activate_campaign()'s note
+    above. 422 if this campaign's selected mailboxes are no longer
+    CONNECTED (see MailCampaignService.resume_campaign()'s docstring). 503
+    if mail_sending_engine_enabled is False -- same gate as activate()."""
+    try:
+        return await service.resume_campaign(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignInvalidTransitionError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except MailSendingEngineDisabledError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+    except MailCampaignNotReadyError as e:
+        raise HTTPException(status_code=422, detail="; ".join(e.reasons))
 
 
 @router.get("/campaigns/{mail_campaign_id}/review", response_model=MailCampaignReview)

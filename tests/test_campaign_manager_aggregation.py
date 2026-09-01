@@ -30,15 +30,19 @@ from app.repositories.email_sequence_step_store import MemoryEmailSequenceStepSt
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
+from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
+from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicyStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.campaign_service import CampaignService
 from app.services.crm_service import CrmService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_sending_service import MailSendingService
 
 
 def make_apollo_campaign(campaign_id: str, created_at: str, **overrides) -> Campaign:
@@ -71,15 +75,33 @@ def test_client():
         campaign_store=apollo_store, store=sequence_store, step_store=MemoryEmailSequenceStepStore(), apollo=fake_apollo
     )
 
+    mail_campaign_store = MemoryMailCampaignStore()
+    mail_enrollment_store = MemoryMailEnrollmentStore()
+    mail_enrollment_step_store = MemoryMailEnrollmentStepStore()
+    mail_mailbox_store = MemoryMailboxStore()
+    mail_channel_store = MemoryMailCampaignMailboxStore()
+    mail_activity_log = ActivityLogService(MemoryActivityEventStore())
+    mail_sending_service = MailSendingService(
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        step_store=mail_enrollment_step_store,
+        mailbox_store=mail_mailbox_store,
+        channel_store=mail_channel_store,
+        policy_store=MemoryMailboxSendPolicyStore(),
+        suppression_store=MemoryMailSuppressionStore(),
+        activity_log=mail_activity_log,
+    )
     mail_service = MailCampaignService(
-        campaign_store=MemoryMailCampaignStore(),
+        campaign_store=mail_campaign_store,
         step_store=MemoryMailSequenceStepStore(),
-        enrollment_store=MemoryMailEnrollmentStore(),
+        enrollment_store=mail_enrollment_store,
         crm_service=CrmService(),
-        activity_log=ActivityLogService(MemoryActivityEventStore()),
-        mailbox_store=MemoryMailboxStore(),
-        channel_store=MemoryMailCampaignMailboxStore(),
+        activity_log=mail_activity_log,
+        mailbox_store=mail_mailbox_store,
+        channel_store=mail_channel_store,
         window_store=MemoryMailSendWindowStore(),
+        enrollment_step_store=mail_enrollment_step_store,
+        sending_service=mail_sending_service,
     )
 
     app = FastAPI()

@@ -32,6 +32,7 @@ import uuid
 from datetime import datetime, time, timezone
 from typing import Any
 
+from app.config import settings
 from app.models.activity import ActivityCategory, ActivitySource
 from app.models.crm import normalize_email
 from app.models.mail import (
@@ -54,6 +55,7 @@ from app.models.mail import (
 from app.models.mailbox import Mailbox, MailboxStatus
 from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignNotFoundError, MailCampaignStore
+from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
 from app.repositories.mail_send_window_store import MailSendWindowStore
 from app.repositories.mail_sequence_step_store import (
@@ -64,6 +66,7 @@ from app.repositories.mail_sequence_step_store import (
 from app.repositories.mailbox_store import MailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmContactListNotFound, CrmService
+from app.services.mail_sending_service import MailSendingService
 
 # Practically "everything in the list" -- CrmService.get_list_contacts()
 # paginates in-memory with no hard cap, so a large page_size in one call is
@@ -116,6 +119,26 @@ class MailCampaignNotReadyError(Exception):
         super().__init__(f"MailCampaign {mail_campaign_id} is not ready: {'; '.join(reasons)}")
 
 
+class MailSendingEngineDisabledError(Exception):
+    """Raised by activate_campaign() when settings.mail_sending_engine_enabled
+    is False (the default) -- see that setting's own docstring in
+    app/config.py. Distinct from MailCampaignNotReadyError (a real
+    readiness problem with THIS campaign) and from
+    MailCampaignInvalidTransitionError (wrong status) -- this means the
+    engine itself is not turned on for this deployment at all, regardless
+    of how ready or valid any campaign is. Mirrors AuthNotConfiguredError's
+    exact "service-layer raises, API layer maps to 503" convention (see
+    app/services/auth_service.py)."""
+
+    def __init__(self, mail_campaign_id: str):
+        self.mail_campaign_id = mail_campaign_id
+        super().__init__(
+            "The Astronomic Mail sending engine is not enabled on this deployment "
+            "(mail_sending_engine_enabled=False) -- activation is refused regardless "
+            "of this campaign's own readiness."
+        )
+
+
 class InvalidMailTemplateVariableError(ValueError):
     def __init__(self, unknown_variables: list[str]):
         self.unknown_variables = unknown_variables
@@ -149,18 +172,26 @@ class MailboxChannelNotFoundError(Exception):
 
 
 class MailCampaignChannelsFrozenError(Exception):
-    """Raised by set_channel_mailboxes() for an ARCHIVED campaign. Channels
-    are read-only once archived (unlike DRAFT/READY, both of which remain
-    editable -- see that method's docstring) -- there is no un-archive
-    transition in this phase, so an archived campaign's sender selection is
-    permanently frozen at whatever it was when archived. GET (
+    """Raised by set_channel_mailboxes() for an ACTIVE, PAUSED, COMPLETED, or
+    ARCHIVED campaign. Channels remain editable at DRAFT and READY (see that
+    method's docstring) -- but once a campaign has ever gone ACTIVE, its
+    durable execution rows (MailEnrollmentStep.mailbox_id, MailEnrollment.
+    assigned_mailbox_id) already reference specific, sticky mailbox
+    assignments made from THIS selection; changing the selection out from
+    under live/completed execution history would either silently invalidate
+    those assignments or require a reassignment policy this phase
+    deliberately doesn't build (see MailEnrollment.assigned_mailbox_id's
+    "never silently reassigned" docstring). PAUSED and COMPLETED are frozen
+    for the same reason as ACTIVE (pausing execution is not the same as
+    unlocking configuration -- see MailCampaignStatus's docstring); ARCHIVED
+    is additionally terminal (no un-archive transition exists). GET (
     list_channel_mailboxes) is never affected by this -- it always remains
-    available so the UI can keep displaying an archived campaign's
+    available so the UI can keep displaying any campaign's current or
     historical selection."""
 
     def __init__(self, mail_campaign_id: str):
         self.mail_campaign_id = mail_campaign_id
-        super().__init__(f"MailCampaign {mail_campaign_id} is archived -- Channels are read-only.")
+        super().__init__(f"MailCampaign {mail_campaign_id} is not in a status where Channels can be changed.")
 
 
 class MailboxChannelNotUsableError(Exception):
@@ -348,6 +379,8 @@ class MailCampaignService:
         mailbox_store: MailboxStore,
         channel_store: MailCampaignMailboxStore,
         window_store: MailSendWindowStore,
+        enrollment_step_store: MailEnrollmentStepStore,
+        sending_service: MailSendingService,
     ):
         self.campaign_store = campaign_store
         self.step_store = step_store
@@ -357,6 +390,8 @@ class MailCampaignService:
         self.activity_log = activity_log
         self.mailbox_store = mailbox_store
         self.channel_store = channel_store
+        self.enrollment_step_store = enrollment_step_store
+        self.sending_service = sending_service
 
     async def _require_campaign(self, mail_campaign_id: str) -> MailCampaign:
         campaign = await self.campaign_store.get(mail_campaign_id)
@@ -686,18 +721,21 @@ class MailCampaignService:
         otherwise) -- there's no reason to let someone knowingly assign a
         campaign to a sender that can't currently send.
 
-        Callable on DRAFT and READY (MailCampaignChannelsFrozenError on
-        ARCHIVED) -- unlike audience/sequence/schedule, mailbox assignment
-        isn't part of the mark_ready() snapshot, so there's nothing here for
-        a READY campaign's lock to protect; this is deliberate, so a READY
-        campaign whose only usable mailbox becomes disconnected can be fixed
-        by selecting a new one without an unlock/re-snapshot round trip.
-        ARCHIVED is different: it's a terminal, no-un-archive status (see
-        MailCampaignStatus's docstring), so its sender selection is frozen
-        at whatever it was when archived, same as every other archived
-        field."""
+        Callable on DRAFT and READY only (MailCampaignChannelsFrozenError on
+        ACTIVE/PAUSED/COMPLETED/ARCHIVED -- see that exception's docstring
+        for why execution locks this beyond just the terminal ARCHIVED
+        case). Unlike audience/sequence/schedule, mailbox assignment isn't
+        part of the mark_ready() snapshot, so there's nothing at READY for
+        a lock to protect; this is deliberate, so a READY campaign whose
+        only usable mailbox becomes disconnected can be fixed by selecting
+        a new one without an unlock/re-snapshot round trip."""
         campaign = await self._require_campaign(mail_campaign_id)
-        if campaign.status == MailCampaignStatus.ARCHIVED:
+        if campaign.status in (
+            MailCampaignStatus.ACTIVE,
+            MailCampaignStatus.PAUSED,
+            MailCampaignStatus.COMPLETED,
+            MailCampaignStatus.ARCHIVED,
+        ):
             raise MailCampaignChannelsFrozenError(mail_campaign_id)
 
         deduped = list(dict.fromkeys(mailbox_ids))
@@ -1021,15 +1059,23 @@ class MailCampaignService:
         return updated
 
     async def unlock_campaign(self, mail_campaign_id: str) -> MailCampaign:
-        """READY -> DRAFT. Deletes every MailEnrollment row for this
-        campaign FIRST (the snapshot is only ever valid while READY; once
-        unlocked, the audience/sequence/schedule can change, making the old
-        snapshot meaningless) -- a subsequent mark_ready() re-snapshots
-        fresh against whatever the list looks like at that point."""
+        """READY -> DRAFT. Deletes every MailEnrollment AND MailEnrollmentStep
+        row for this campaign FIRST (the snapshot -- and any execution rows
+        that could only ever have been created from an ACTIVE campaign this
+        one never was, since there is no ACTIVE->DRAFT path in this phase --
+        are only ever valid while READY; once unlocked, the audience/
+        sequence/schedule can change, making the old snapshot meaningless)
+        -- a subsequent mark_ready() re-snapshots fresh against whatever the
+        list looks like at that point. In practice a READY campaign has
+        never been ACTIVE (unlock only exists from READY, and there is no
+        way back to READY from ACTIVE/PAUSED/COMPLETED), so the
+        MailEnrollmentStep delete is defense-in-depth, not a case expected
+        to ever find rows -- deleting nothing is a harmless no-op."""
         campaign = await self._require_campaign(mail_campaign_id)
         if campaign.status != MailCampaignStatus.READY:
             raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "unlock")
 
+        await self.enrollment_step_store.delete_for_campaign(mail_campaign_id)
         await self.enrollment_store.delete_for_campaign(mail_campaign_id)
         updated = campaign.model_copy(
             update={"status": MailCampaignStatus.DRAFT, "ready_at": None, "updated_at": datetime.now(timezone.utc)}
@@ -1046,10 +1092,249 @@ class MailCampaignService:
         )
         return updated
 
+    async def activate_campaign(self, mail_campaign_id: str) -> MailCampaign:
+        """READY -> ACTIVE. The ONLY way execution is ever allowed to begin
+        -- nothing else in this codebase sets ACTIVE.
+
+        READY cannot be blindly trusted as still executable: Channels can
+        still change while READY (see set_channel_mailboxes()'s docstring),
+        so this re-runs the EXACT SAME readiness validation mark_ready()
+        used (_compute_readiness_warnings(), called with freshly re-fetched
+        data, not whatever was true when this campaign became READY).
+        Raises MailCampaignNotReadyError (same exception mark_ready() uses,
+        listing every problem found) if anything now fails -- the campaign
+        remains READY, no MailEnrollmentStep row is created, no enrollment
+        status changes, nothing is written at all.
+
+        FORMAL PREPARE -> COMMIT CONTRACT (a deliberate, adopted design --
+        not a workaround standing in for a transaction this codebase
+        doesn't have). There is no cross-store transaction anywhere here
+        (see sqlite_txn.py's docstring), and a production audit confirmed
+        that adding one solely for this operation would be disproportionate.
+        The requirement this method actually guarantees instead:
+
+            A campaign must never become ACTIVE until every applicable
+            enrollment (every one NOT already SUPPRESSED at snapshot time)
+            has been transitioned to ACTIVE with exactly one Step 1
+            MailEnrollmentStep row materialized.
+
+        This is safe specifically because partial preparation while the
+        campaign remains READY is HARMLESS: nothing can ever act on a
+        materialized-but-uncommitted Step 1 row while status != ACTIVE --
+        MailSendingService.process_one_due_step()'s first check is exactly
+        that. So the method is structured as two explicit phases:
+
+          PREPARE (_prepare_activation()): campaign remains READY
+          throughout. Every currently-PENDING enrollment is processed
+          idempotently -- Step 1 materialized (create_step1_execution(),
+          itself idempotent by the same contract mark_ready()'s own
+          snapshot loop relies on), enrollment flipped to ACTIVE. A
+          failure partway through (raised exception) leaves some
+          enrollments prepared and others not, and simply propagates --
+          the campaign is NEVER touched by this phase.
+
+          COMMIT (only reached if PREPARE's loop returns without raising):
+          performs an EXPLICIT, freshly-re-queried completeness check
+          (_find_incomplete_activation()) -- deliberately NOT inferred
+          from "the PREPARE loop above didn't raise." If it finds any
+          enrollment that should be ACTIVE-with-a-Step-1-row but isn't,
+          this method returns the campaign UNCHANGED (still READY) rather
+          than transitioning -- the only way that can legitimately happen
+          is a bug elsewhere, since a successful PREPARE loop always
+          leaves every applicable enrollment complete, but the check exists
+          so that invariant is verified, not merely assumed. Only once the
+          check finds nothing incomplete does the campaign transition
+          READY -> ACTIVE.
+
+        Resumability, not atomicity: a repeated activate_campaign() call
+        (whether after a PREPARE failure, or even on an already-fully-
+        activated campaign) simply resumes PREPARE (a no-op loop once
+        nothing is PENDING) and re-runs the SAME completeness check before
+        COMMIT -- there is deliberately only one code path for "first
+        successful activation" and "retry after partial failure," not two.
+
+        Checked FIRST, before even fetching the campaign: settings.
+        mail_sending_engine_enabled must be True, or this raises
+        MailSendingEngineDisabledError regardless of this campaign's own
+        status/readiness -- see that setting's docstring in app/config.py
+        for why this deployment-wide gate exists independent of the
+        frontend simply not exposing the button.
+        """
+        if not settings.mail_sending_engine_enabled:
+            raise MailSendingEngineDisabledError(mail_campaign_id)
+
+        campaign = await self._require_campaign(mail_campaign_id)
+        if campaign.status != MailCampaignStatus.READY:
+            raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "activate")
+
+        source_list_exists = False
+        if campaign.source_list_id:
+            try:
+                await self.crm_service.get_contact_list(campaign.source_list_id)
+                source_list_exists = True
+            except CrmContactListNotFound:
+                source_list_exists = False
+
+        steps = await self.step_store.list_for_campaign(mail_campaign_id)
+        has_connected_mailbox = await self._has_connected_selected_mailbox(mail_campaign_id)
+        resolved_windows, _schedule_source = await self._resolve_schedule(mail_campaign_id, campaign)
+
+        reasons = _compute_readiness_warnings(
+            campaign, source_list_exists, len(steps), has_connected_mailbox, resolved_windows
+        )
+        if reasons:
+            raise MailCampaignNotReadyError(mail_campaign_id, reasons)
+
+        assert campaign.timezone is not None  # guaranteed by the readiness check above
+        step1 = next(s for s in steps if s.step_number == 1)  # guaranteed to exist: step_count > 0 checked above
+        now = datetime.now(timezone.utc)
+
+        # --- PREPARE ---
+        activated = await self._prepare_activation(mail_campaign_id, step1, resolved_windows, campaign.timezone, now)
+
+        # --- COMMIT: explicit completeness verification ---
+        incomplete = await self._find_incomplete_activation(mail_campaign_id, step1)
+        if incomplete:
+            # PREPARE is not (yet) complete -- refuse to commit. Returning
+            # the still-READY campaign (never raising here) is what makes
+            # a repeated activate_campaign() call the normal, expected way
+            # to finish, rather than treating this as an error condition.
+            return campaign
+
+        updated = campaign.model_copy(update={"status": MailCampaignStatus.ACTIVE, "updated_at": now})
+        await self.campaign_store.save(updated)
+        await self.activity_log.record(
+            event_type="mail_campaign.activated",
+            category=ActivityCategory.MAIL,
+            source=ActivitySource.MAIL_SYSTEM,
+            summary=f'Mail Campaign "{updated.name}" was activated ({activated} lead{"s" if activated != 1 else ""} started).',
+            entity_type="mail_campaign",
+            entity_id=updated.mail_campaign_id,
+            entity_name=updated.name,
+            metadata={"activated": activated},
+        )
+        return updated
+
+    async def _prepare_activation(
+        self, mail_campaign_id: str, step1: MailSequenceStep, windows: list[MailSendWindow], timezone_name: str, now: datetime
+    ) -> int:
+        """PREPARE phase of activate_campaign() -- see that method's own
+        docstring for the full PREPARE/COMMIT contract. Every currently-
+        PENDING enrollment is processed idempotently; the campaign's own
+        status is never touched here. Returns how many enrollments this
+        specific call newly activated (for the activity log summary --
+        0 on a pure retry/no-op call)."""
+        enrollments = await self.enrollment_store.list_for_campaign(mail_campaign_id)
+        activated = 0
+        for enrollment in enrollments:
+            if enrollment.status != MailEnrollmentStatus.PENDING:
+                continue
+            await self.sending_service.create_step1_execution(
+                enrollment=enrollment, step1=step1, windows=windows, timezone_name=timezone_name, now=now
+            )
+            await self.enrollment_store.save(enrollment.model_copy(update={"status": MailEnrollmentStatus.ACTIVE}))
+            activated += 1
+        return activated
+
+    async def _find_incomplete_activation(self, mail_campaign_id: str, step1: MailSequenceStep) -> list[str]:
+        """COMMIT-gate of activate_campaign() -- an explicit, freshly-
+        re-queried verification of the activation invariant, never
+        inferred from "the PREPARE loop above didn't raise." Returns the
+        enrollment_ids of every enrollment that is NOT SUPPRESSED (i.e. is
+        "applicable") but does not YET satisfy "ACTIVE with exactly one
+        Step 1 MailEnrollmentStep row" -- empty means PREPARE is fully
+        complete and COMMIT may proceed. Re-reads both stores directly
+        rather than reusing anything the PREPARE loop computed, so a
+        future change to that loop's logic can never silently violate this
+        invariant without this check catching it."""
+        enrollments = await self.enrollment_store.list_for_campaign(mail_campaign_id)
+        incomplete: list[str] = []
+        for enrollment in enrollments:
+            if enrollment.status == MailEnrollmentStatus.SUPPRESSED:
+                continue  # never applicable -- correctly excluded at mark_ready() snapshot time
+            if enrollment.status != MailEnrollmentStatus.ACTIVE:
+                incomplete.append(enrollment.enrollment_id)
+                continue
+            row = await self.enrollment_step_store.get_by_enrollment_and_step(enrollment.enrollment_id, step1.step_id)
+            if row is None:
+                incomplete.append(enrollment.enrollment_id)
+        return incomplete
+
+    async def pause_campaign(self, mail_campaign_id: str) -> MailCampaign:
+        """ACTIVE -> PAUSED. Stops NEW claims from this campaign (every
+        MailSendingService.process_one_due_step() call checks campaign
+        status first) without touching a single MailEnrollment or
+        MailEnrollmentStep row -- pausing execution is not the same as
+        unlocking configuration (see MailCampaignStatus.PAUSED's docstring):
+        Channels/Steps/Schedule remain exactly as locked as they were at
+        ACTIVE (set_channel_mailboxes() locks on PAUSED too)."""
+        campaign = await self._require_campaign(mail_campaign_id)
+        if campaign.status != MailCampaignStatus.ACTIVE:
+            raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "pause")
+
+        now = datetime.now(timezone.utc)
+        updated = campaign.model_copy(update={"status": MailCampaignStatus.PAUSED, "updated_at": now})
+        await self.campaign_store.save(updated)
+        await self.activity_log.record(
+            event_type="mail_campaign.paused",
+            category=ActivityCategory.MAIL,
+            source=ActivitySource.MAIL_SYSTEM,
+            summary=f'Mail Campaign "{updated.name}" was paused.',
+            entity_type="mail_campaign",
+            entity_id=updated.mail_campaign_id,
+            entity_name=updated.name,
+        )
+        return updated
+
+    async def resume_campaign(self, mail_campaign_id: str) -> MailCampaign:
+        """PAUSED -> ACTIVE. Unlike activate_campaign(), this does NOT
+        re-run the full readiness checklist -- audience/steps/schedule
+        cannot have changed while PAUSED (everything but Channels is locked
+        from READY onward, and Channels themselves are ALSO locked once
+        PAUSED -- see set_channel_mailboxes()). The one thing that CAN
+        genuinely change independent of any locked edit is a mailbox's own
+        live status (e.g. it becomes disconnected at the mailbox level), so
+        this re-checks only that: at least one of this campaign's selected
+        mailboxes must currently be CONNECTED, or resume is refused
+        (MailCampaignNotReadyError, campaign stays PAUSED, nothing written).
+
+        Gated by settings.mail_sending_engine_enabled, same as
+        activate_campaign() -- this also produces an ACTIVE campaign, so
+        the same deployment-wide safety gate applies here too (see that
+        setting's docstring in app/config.py)."""
+        if not settings.mail_sending_engine_enabled:
+            raise MailSendingEngineDisabledError(mail_campaign_id)
+
+        campaign = await self._require_campaign(mail_campaign_id)
+        if campaign.status != MailCampaignStatus.PAUSED:
+            raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "resume")
+
+        if not await self._has_connected_selected_mailbox(mail_campaign_id):
+            raise MailCampaignNotReadyError(
+                mail_campaign_id, ["At least one connected sending inbox must be selected."]
+            )
+
+        now = datetime.now(timezone.utc)
+        updated = campaign.model_copy(update={"status": MailCampaignStatus.ACTIVE, "updated_at": now})
+        await self.campaign_store.save(updated)
+        await self.activity_log.record(
+            event_type="mail_campaign.resumed",
+            category=ActivityCategory.MAIL,
+            source=ActivitySource.MAIL_SYSTEM,
+            summary=f'Mail Campaign "{updated.name}" was resumed.',
+            entity_type="mail_campaign",
+            entity_id=updated.mail_campaign_id,
+            entity_name=updated.name,
+        )
+        return updated
+
     async def archive_campaign(self, mail_campaign_id: str) -> MailCampaign:
-        """DRAFT or READY -> ARCHIVED (terminal in this phase -- no
-        un-archive). Enrollment rows, if any, are left as-is -- harmless
-        historical record, never read by anything once archived."""
+        """Any non-ARCHIVED status -> ARCHIVED (terminal in this phase --
+        no un-archive). Enrollment/execution rows, if any, are left as-is
+        -- harmless historical record, never read by anything once
+        archived (MailSendingService.process_one_due_step()'s first check
+        is campaign.status == ACTIVE, which an archived campaign can never
+        satisfy again)."""
         campaign = await self._require_campaign(mail_campaign_id)
         if campaign.status == MailCampaignStatus.ARCHIVED:
             raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "archive")

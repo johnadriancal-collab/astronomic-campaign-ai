@@ -19,14 +19,17 @@ from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
 from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
+from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicyStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 
 
@@ -68,15 +71,31 @@ def window_store():
 
 @pytest.fixture
 def campaign_service(crm, mailbox_store, channel_store, window_store):
+    campaign_store = MemoryMailCampaignStore()
+    enrollment_store = MemoryMailEnrollmentStore()
+    enrollment_step_store = MemoryMailEnrollmentStepStore()
+    activity_log = ActivityLogService(MemoryActivityEventStore())
+    sending_service = MailSendingService(
+        campaign_store=campaign_store,
+        enrollment_store=enrollment_store,
+        step_store=enrollment_step_store,
+        mailbox_store=mailbox_store,
+        channel_store=channel_store,
+        policy_store=MemoryMailboxSendPolicyStore(),
+        suppression_store=MemoryMailSuppressionStore(),
+        activity_log=activity_log,
+    )
     return MailCampaignService(
-        campaign_store=MemoryMailCampaignStore(),
+        campaign_store=campaign_store,
         step_store=MemoryMailSequenceStepStore(),
-        enrollment_store=MemoryMailEnrollmentStore(),
+        enrollment_store=enrollment_store,
         crm_service=crm,
-        activity_log=ActivityLogService(MemoryActivityEventStore()),
+        activity_log=activity_log,
         mailbox_store=mailbox_store,
         channel_store=channel_store,
         window_store=window_store,
+        enrollment_step_store=enrollment_step_store,
+        sending_service=sending_service,
     )
 
 
@@ -216,16 +235,17 @@ def test_update_campaign_all_hours_toggle(client):
     assert off.json()["start_time"].startswith("09:00")
 
 
-def test_start_immediately_never_appears_alongside_an_active_status(client):
-    """No matter what start_immediately is set to, status stays draft --
-    there is no status value this campaign can reach that implies sending."""
+def test_start_immediately_never_itself_activates_a_campaign(client):
+    """`start_immediately` is a stored PREFERENCE only -- setting it never
+    itself moves a brand-new campaign past DRAFT. ACTIVE is real now (see
+    MailCampaignStatus's docstring), but the ONLY way to reach it is the
+    explicit POST .../activate transition (see
+    MailCampaignService.activate_campaign()) -- never a side effect of
+    creating or configuring a campaign."""
     resp = client.post("/mail/campaigns", json={"name": "Immediate", "start_immediately": True})
     body = resp.json()
     assert body["start_immediately"] is True
     assert body["status"] == "draft"
-    schema = client.get("/openapi.json").json()
-    status_enum = schema["components"]["schemas"]["MailCampaignStatus"]["enum"]
-    assert "active" not in status_enum
 
 
 def test_full_wizard_flow_through_ready_and_review(client, crm, mailbox_store, campaign_service):
@@ -1074,16 +1094,20 @@ def test_unsuppress_round_trip(client):
 # --- H. Launch safety: no route exists that can activate/send ------------
 
 
-def test_no_launch_activate_send_or_queue_route_exists(client):
+def test_no_launch_send_or_queue_route_exists(client):
     """Direct proof, not just an omission -- every plausible route name for
-    starting a send is probed and must be absent (404, since FastAPI has no
-    matching route) or otherwise never succeed."""
+    actually DISPATCHING a send is probed and must be absent (404, since
+    FastAPI has no matching route) or otherwise never succeed. /activate is
+    deliberately NOT in this list (see
+    test_activate_pause_resume_routes_exist_and_never_dispatch_a_send below)
+    -- it is now a legitimate Phase A lifecycle route, but one that is
+    incapable of ever sending a real message (see app/api/mail.py's module
+    docstring)."""
     campaign = client.post("/mail/campaigns", json={"name": "Safety Check"}).json()
     cid = campaign["mail_campaign_id"]
 
     forbidden_paths = [
         f"/mail/campaigns/{cid}/launch",
-        f"/mail/campaigns/{cid}/activate",
         f"/mail/campaigns/{cid}/start",
         f"/mail/campaigns/{cid}/send",
         f"/mail/campaigns/{cid}/send-now",
@@ -1098,14 +1122,60 @@ def test_no_launch_activate_send_or_queue_route_exists(client):
         assert resp.status_code == 404, f"expected 404 (no such route) for {path}, got {resp.status_code}"
 
 
-def test_mail_campaign_status_enum_never_exposes_active(client):
-    """The OpenAPI schema itself must never advertise 'active'/'paused'/
-    'completed' as a possible MailCampaign.status value -- confirms the
-    enum restriction is visible at the API contract level, not just in
-    Python."""
+def test_activate_pause_resume_routes_exist_and_never_dispatch_a_send(client, monkeypatch):
+    """/activate, /pause, /resume are legitimate Phase A lifecycle routes --
+    confirms they exist (not 404) and that calling them never produces
+    anything resembling a sent message (no gmail_message_id-shaped field
+    anywhere in the response, since MailCampaign has no such field at all).
+    The sending-engine gate is enabled here specifically so this test
+    reaches the underlying state-machine's OWN 409 -- see
+    test_activate_and_resume_are_503_when_sending_engine_disabled below for
+    the gate itself."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    campaign = client.post("/mail/campaigns", json={"name": "Lifecycle Routes"}).json()
+    cid = campaign["mail_campaign_id"]
+
+    # Not READY yet -- expect a real transition error (409), never 404.
+    resp = client.post(f"/mail/campaigns/{cid}/activate")
+    assert resp.status_code == 409
+    resp = client.post(f"/mail/campaigns/{cid}/pause")
+    assert resp.status_code == 409
+    resp = client.post(f"/mail/campaigns/{cid}/resume")
+    assert resp.status_code == 409
+
+
+def test_activate_and_resume_are_503_when_sending_engine_disabled(client, monkeypatch):
+    """settings.mail_sending_engine_enabled defaults to False -- /activate
+    and /resume must both return 503 (not 404, not 409) regardless of the
+    campaign's own status, and /pause must never be gated by this flag at
+    all (it only ever makes execution safer)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", False)
+    campaign = client.post("/mail/campaigns", json={"name": "Gated Routes"}).json()
+    cid = campaign["mail_campaign_id"]
+
+    resp = client.post(f"/mail/campaigns/{cid}/activate")
+    assert resp.status_code == 503
+    resp = client.post(f"/mail/campaigns/{cid}/resume")
+    assert resp.status_code == 503
+    # Pause is not gated -- a DRAFT campaign still correctly gets 409 (wrong
+    # status), never 503, proving pause itself never even checks the flag.
+    resp = client.post(f"/mail/campaigns/{cid}/pause")
+    assert resp.status_code == 409
+
+
+def test_mail_campaign_status_enum_is_exactly_the_phase_a_set(client):
+    """The OpenAPI schema advertises exactly the 6 Phase A statuses -- no
+    more (confirms nothing accidentally added a 7th) and no less (confirms
+    ACTIVE/PAUSED/COMPLETED are real, intentional additions, not silently
+    dropped by a schema-generation quirk). See MailCampaignStatus's
+    docstring for what each one means."""
     schema = client.get("/openapi.json").json()
     status_enum = schema["components"]["schemas"]["MailCampaignStatus"]["enum"]
-    assert set(status_enum) == {"draft", "ready", "archived"}
+    assert set(status_enum) == {"draft", "ready", "active", "paused", "completed", "archived"}
 
 
 # --- J. Isolation: unrelated systems are never touched by this router ----
