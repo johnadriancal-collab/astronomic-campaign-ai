@@ -43,8 +43,10 @@ test("the desktop split slightly favors Overview over Event History (3fr vs 2fr)
   assert.ok(OVERVIEW_EVENT_HISTORY_GRID_CLASS.includes("[3fr_2fr]"));
 });
 
-test("cards don't stretch to match each other's height on desktop", () => {
-  assert.ok(OVERVIEW_EVENT_HISTORY_GRID_CLASS.includes("lg:items-start"));
+test("cards stretch to equal height on desktop -- no items-start override at any breakpoint", () => {
+  // CSS Grid's own default (align-items: stretch) is what we rely on here;
+  // an explicit items-start anywhere would defeat equal-height stretching.
+  assert.ok(!OVERVIEW_EVENT_HISTORY_GRID_CLASS.includes("items-start"));
 });
 
 // --- Add to List always targets exactly this one contact ----------------

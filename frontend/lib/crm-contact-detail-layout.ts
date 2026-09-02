@@ -18,7 +18,15 @@ export const CRM_CONTACT_DETAIL_CONTAINER_CLASS = "mx-auto max-w-6xl px-6 py-10"
 // (not an even 1fr_1fr) slightly favors Overview, whose content -- a prose
 // summary plus wrapping highlight chips -- genuinely needs more room than
 // Event History's compact one-line-per-event list.
-export const OVERVIEW_EVENT_HISTORY_GRID_CLASS = "mb-6 grid grid-cols-1 gap-6 lg:grid-cols-[3fr_2fr] lg:items-start";
+//
+// No `items-start` (and none at any breakpoint): CSS Grid's own default,
+// `align-items: stretch`, is what we want here -- both Card elements
+// stretch to match the taller of the two on desktop, so a short Event
+// History (little/no content) doesn't leave the row visually uneven.
+// Below lg, each card is alone in its own single-column row, so stretch
+// vs. start makes no visual difference there -- natural content height is
+// preserved automatically, not because of any explicit override.
+export const OVERVIEW_EVENT_HISTORY_GRID_CLASS = "mb-6 grid grid-cols-1 gap-6 lg:grid-cols-[3fr_2fr]";
 
 // The "Add to List" action on the contact detail page always targets
 // exactly the one contact this page is showing -- never any other contact,
