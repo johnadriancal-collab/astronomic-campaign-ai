@@ -9,6 +9,7 @@ from app.models.crm import (
     CHECK_SIZE_OPTIONS,
     DEAL_STAGE_OPTIONS,
     DEMOGRAPHIC_PREFERENCE_OPTIONS,
+    INDUSTRY_OPTIONS,
     INVESTOR_MODE_OPTIONS,
     CrmContact,
     CrmCustomFieldDefinition,
@@ -20,6 +21,44 @@ from app.models.crm import (
 
 def test_investor_mode_options_match_the_real_form_exactly():
     assert INVESTOR_MODE_OPTIONS == ["Privately", "Institutionally", "Both"]
+
+
+# --- INDUSTRY_OPTIONS taxonomy -------------------------------------------
+#
+# investment_industry (the CRM custom field) is a genuinely open field --
+# its live CrmCustomFieldDefinition.options is deliberately empty, per its
+# own description ("New values are accepted automatically -- no fixed
+# option list"). INDUSTRY_OPTIONS is instead the CANONICAL vocabulary
+# enforced by CSV import (crm_classification_rules.py), email-intake
+# extraction/aliases, and Astro AI's natural-language parser -- all three
+# import this constant directly, so a change here propagates automatically.
+# frontend/lib/crm-thesis-options.ts maintains its OWN, independently
+# hardcoded copy (no shared source at build time) for the CRM's investor-
+# thesis editing form -- these two regression tests exist specifically so
+# an addition to one is never silently forgotten on the other.
+
+
+def test_industry_options_includes_crypto_and_professional_services():
+    """Added for Luma's new 'primary investment or industry areas of
+    focus' registration question -- both are genuinely new categories,
+    confirmed to have no existing near-duplicate in this list."""
+    assert "Crypto / Web3" in INDUSTRY_OPTIONS
+    assert "Professional / Business Services" in INDUSTRY_OPTIONS
+
+
+def test_industry_options_has_no_duplicates_case_insensitive():
+    lowered = [o.lower() for o in INDUSTRY_OPTIONS]
+    assert len(lowered) == len(set(lowered)), "INDUSTRY_OPTIONS must never contain a duplicate or near-duplicate entry"
+
+
+def test_industry_options_count_matches_frontend_copy():
+    """frontend/lib/crm-thesis-options.ts hardcodes its own copy of this
+    exact list (no shared source at build time -- see that file's own
+    comment). This is a coarse parity guard: it can't read the TypeScript
+    file directly, but pins the expected count here so a future addition
+    to one list that isn't mirrored to the other is at least flagged by a
+    mismatched count, prompting a check of both files."""
+    assert len(INDUSTRY_OPTIONS) == 30
 
 
 # --- derive_investor_mode() ---

@@ -173,12 +173,32 @@ def _filter_to_allowed_options(value: Any, field_def: CrmCustomFieldDefinition) 
     value is dropped (None) unless it's an exact allowed option. This is
     what makes an untranslated Luma label (e.g. "Fund Manager / General
     Partner", which has no CRM equivalent) safely skip instead of writing
-    an uncontrolled value -- no special-casing needed for it elsewhere."""
+    an uncontrolled value -- no special-casing needed for it elsewhere.
+
+    EMPTY `options` means "no fixed field-level restriction," not "reject
+    everything": a select-type custom field can be deliberately configured
+    open-ended (e.g. investment_industry -- "New values are accepted
+    automatically -- no fixed option list," per its own live description),
+    matching the identical convention crm_filter_service.py's own filter
+    validation already uses for the exact same "options == []" case
+    ("Open fields ... accept any string"). Confirmed 2026-09-02: no live
+    or code-defined select-type field currently relies on empty options
+    rejecting values -- investment_industry is the only one with empty
+    options today, and it wants the opposite. A mapping targeting a
+    genuinely open field like this is expected to do its own filtering via
+    a normalizer (see normalize_industry_focus_labels) if it wants to
+    restrict Luma's raw strings to a controlled vocabulary -- this
+    function's job is only to enforce a field's OWN configured options
+    when it has any, never to invent a restriction the field doesn't have."""
     if field_def.field_type == CustomFieldType.MULTI_SELECT:
+        if not field_def.options:
+            return value
         candidates = value if isinstance(value, list) else [value]
         allowed = [v for v in candidates if v in field_def.options]
         return allowed or None
     if field_def.field_type == CustomFieldType.SINGLE_SELECT:
+        if not field_def.options:
+            return value
         candidate = value[0] if isinstance(value, list) and value else value
         return candidate if candidate in field_def.options else None
     return value

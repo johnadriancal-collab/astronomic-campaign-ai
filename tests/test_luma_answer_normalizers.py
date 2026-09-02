@@ -9,6 +9,7 @@ from app.models.luma import LumaAnswerNormalizer
 from app.services.luma_answer_normalizers import (
     apply_normalizer,
     normalize_check_size_personal_bucket,
+    normalize_industry_focus_labels,
     normalize_investor_type_labels,
     normalize_linkedin_url,
 )
@@ -157,3 +158,63 @@ def test_untranslatable_labels_pass_through_unchanged_within_a_list():
 
 def test_apply_normalizer_investor_type_dispatches_correctly():
     assert apply_normalizer(LumaAnswerNormalizer.INVESTOR_TYPE_LABEL, ["Syndicate Lead"]) == ["I sponsor deals that I find"]
+
+
+# --- normalize_industry_focus_labels ---------------------------------------
+#
+# Unlike normalize_investor_type_labels, this one DOES drop unrecognized
+# values itself -- investment_industry's live CRM field has no options
+# list of its own to fall back on for filtering (it's deliberately open-
+# ended), so this normalizer is the only thing standing between an
+# arbitrary Luma string and the CRM field for this one question.
+
+
+def test_canonical_industry_values_pass_through_unchanged():
+    assert normalize_industry_focus_labels(["Cybersecurity"]) == ["Cybersecurity"]
+
+
+def test_both_new_canonical_industry_values_are_recognized():
+    result = normalize_industry_focus_labels(["Crypto / Web3", "Professional / Business Services"])
+    assert result == ["Crypto / Web3", "Professional / Business Services"]
+
+
+def test_multiple_canonical_values_are_all_preserved_in_order():
+    result = normalize_industry_focus_labels(["Aerospace & Defense", "Cybersecurity", "Crypto / Web3"])
+    assert result == ["Aerospace & Defense", "Cybersecurity", "Crypto / Web3"]
+
+
+def test_other_is_dropped():
+    assert normalize_industry_focus_labels(["Cybersecurity", "Other"]) == ["Cybersecurity"]
+
+
+def test_arbitrary_unrecognized_value_is_dropped_not_just_other():
+    result = normalize_industry_focus_labels(["Cybersecurity", "Underwater Basket Weaving"])
+    assert result == ["Cybersecurity"]
+
+
+def test_only_other_or_unrecognized_values_returns_none():
+    assert normalize_industry_focus_labels(["Other"]) is None
+    assert normalize_industry_focus_labels(["Underwater Basket Weaving"]) is None
+    assert normalize_industry_focus_labels(["Other", "Underwater Basket Weaving"]) is None
+
+
+def test_empty_list_returns_none():
+    assert normalize_industry_focus_labels([]) is None
+
+
+def test_a_bare_scalar_canonical_value_passes_through():
+    assert normalize_industry_focus_labels("Cybersecurity") == "Cybersecurity"
+
+
+def test_a_bare_scalar_unrecognized_value_returns_none():
+    assert normalize_industry_focus_labels("Other") is None
+    assert normalize_industry_focus_labels("Underwater Basket Weaving") is None
+
+
+def test_non_string_non_list_input_returns_none():
+    assert normalize_industry_focus_labels(None) is None
+    assert normalize_industry_focus_labels(42) is None
+
+
+def test_apply_normalizer_industry_focus_dispatches_correctly():
+    assert apply_normalizer(LumaAnswerNormalizer.INDUSTRY_FOCUS_LABEL, ["Cybersecurity", "Other"]) == ["Cybersecurity"]

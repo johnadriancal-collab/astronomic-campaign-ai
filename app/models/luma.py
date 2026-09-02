@@ -127,6 +127,7 @@ class LumaAnswerNormalizer(str, Enum):
     LINKEDIN_URL = "linkedin_url"
     INVESTOR_TYPE_LABEL = "investor_type_label"
     CHECK_SIZE_PERSONAL_BUCKET = "check_size_personal_bucket"
+    INDUSTRY_FOCUS_LABEL = "industry_focus_label"
 
 
 class LumaQuestionMapping(BaseModel):

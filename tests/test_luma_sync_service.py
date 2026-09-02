@@ -151,6 +151,42 @@ async def crm_service():
             updated_at=_now(),
         )
     )
+    # Matches live production exactly: investment_industry is deliberately
+    # OPEN-ENDED (empty options -- a tag-style field, never a fixed
+    # picklist, per its own live description "New values are accepted
+    # automatically -- no fixed option list"). _filter_to_allowed_options()
+    # now treats empty options as "no fixed field-level restriction" (see
+    # that function's own docstring), so canonical-vs-arbitrary filtering
+    # for Luma's Industry Focus question happens entirely in
+    # normalize_industry_focus_labels(), not here.
+    await custom_field_store.create(
+        CrmCustomFieldDefinition(
+            crm_custom_field_id=str(uuid.uuid4()),
+            field_key="investment_industry",
+            label="Investment Industry",
+            field_type=CustomFieldType.MULTI_SELECT,
+            options=[],
+            active=True,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+    )
+    # A second, SYNTHETIC open-ended multi_select field with no normalizer
+    # at all -- exists purely to prove the GENERIC empty-options-passthrough
+    # mechanism in isolation, decoupled from investment_industry's own
+    # normalizer. Not a real CRM field.
+    await custom_field_store.create(
+        CrmCustomFieldDefinition(
+            crm_custom_field_id=str(uuid.uuid4()),
+            field_key="open_ended_test_field",
+            label="Open Ended Test Field",
+            field_type=CustomFieldType.MULTI_SELECT,
+            options=[],
+            active=True,
+            created_at=_now(),
+            updated_at=_now(),
+        )
+    )
     return CrmService(custom_field_store=custom_field_store)
 
 
@@ -347,6 +383,266 @@ async def test_multi_select_custom_field_union_merges_rather_than_overwrites(lum
 
     assert result.contact.custom_fields["investor_type"] == ["Family Office", "Angel Investor"]
     assert result.contact_outcome == "enriched"
+
+
+# --- Generic empty-options semantics: open field vs. fixed field -----------
+#
+# investment_industry's live CrmCustomFieldDefinition.options is
+# deliberately empty (an intentionally open, tag-style field -- see the
+# crm_service fixture's own comment). _filter_to_allowed_options() now
+# treats empty options as "no fixed field-level restriction," matching the
+# identical convention crm_filter_service.py already uses. These two tests
+# prove that mechanism generically, decoupled from investment_industry's
+# own normalizer.
+
+
+async def test_open_ended_multi_select_field_with_empty_options_passes_values_through_unchanged(
+    luma_service, mapping_store
+):
+    await _seed_mapping(
+        mapping_store,
+        question_label="Open Ended Question",
+        question_type="multi-select",
+        target_field_key="custom:open_ended_test_field",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": "Open Ended Question",
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Literally Anything", "No Fixed List Here"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["open_ended_test_field"] == ["Literally Anything", "No Fixed List Here"]
+
+
+async def test_fixed_multi_select_field_with_populated_options_still_filters_unknown_values(
+    luma_service, mapping_store
+):
+    """investor_type has real, populated options -- confirms the pre-
+    existing filter-by-configured-options behavior is completely
+    unchanged for any field that actually has options."""
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type="multi-select", target_field_key="custom:investor_type"
+    )
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": "Investor Type",
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Angel Investor", "Fund Manager / General Partner"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investor_type"] == ["Angel Investor"]
+
+
+# --- Luma "primary investment or industry areas of focus" -> investment_industry ---
+#
+# investment_industry itself stays a genuinely open CRM field (no live
+# options list, matching product decision -- see the empty-options tests
+# above). Canonical-vs-arbitrary filtering for THIS question happens
+# entirely in normalize_industry_focus_labels() (LumaAnswerNormalizer.
+# INDUSTRY_FOCUS_LABEL): only exact INDUSTRY_OPTIONS members survive,
+# "Other" and any unrecognized Luma string are dropped before the value
+# ever reaches the (now-unrestricted) CRM field.
+
+LUMA_INDUSTRY_QUESTION_LABEL = "What are your primary investment or industry areas of focus?"
+
+
+async def _seed_industry_mapping(mapping_store):
+    return await _seed_mapping(
+        mapping_store,
+        question_label=LUMA_INDUSTRY_QUESTION_LABEL,
+        question_type="multi-select",
+        target_field_key="custom:investment_industry",
+        normalizer="industry_focus_label",
+    )
+
+
+async def test_industry_focus_multi_select_populates_investment_industry_on_a_new_contact(luma_service, mapping_store):
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Artificial Intelligence / Machine Learning"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investment_industry"] == ["Artificial Intelligence / Machine Learning"]
+
+
+async def test_industry_focus_multiple_selections_are_all_preserved(luma_service, mapping_store):
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Crypto / Web3", "Professional / Business Services", "Cybersecurity"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investment_industry"] == [
+        "Crypto / Web3",
+        "Professional / Business Services",
+        "Cybersecurity",
+    ]
+
+
+async def test_industry_focus_union_merges_with_existing_values_never_overwrites(luma_service, crm_service, mapping_store):
+    await _seed_industry_mapping(mapping_store)
+    existing = make_contact(email="alice@example.com", custom_fields={"investment_industry": ["Healthcare & HealthTech"]})
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Crypto / Web3"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investment_industry"] == ["Healthcare & HealthTech", "Crypto / Web3"]
+
+
+async def test_industry_focus_does_not_duplicate_an_already_present_value(luma_service, crm_service, mapping_store):
+    await _seed_industry_mapping(mapping_store)
+    existing = make_contact(email="alice@example.com", custom_fields={"investment_industry": ["Cybersecurity"]})
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Cybersecurity"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investment_industry"] == ["Cybersecurity"]
+    assert "custom:investment_industry" not in result.changed_field_keys  # no-op, value already present
+
+
+async def test_industry_focus_other_is_dropped_from_the_crm_field(luma_service, mapping_store):
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Cybersecurity", "Other"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investment_industry"] == ["Cybersecurity"]
+
+
+async def test_industry_focus_arbitrary_unrecognized_value_is_also_dropped_not_just_other(luma_service, mapping_store):
+    """Not just a literal "Other" special case -- ANY string that isn't an
+    exact INDUSTRY_OPTIONS member is dropped, since investment_industry's
+    live field has no options list of its own to fall back on for this."""
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Cybersecurity", "Underwater Basket Weaving"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["investment_industry"] == ["Cybersecurity"]
+
+
+async def test_industry_focus_only_other_selected_writes_nothing(luma_service, mapping_store):
+    """Confirms normalize_industry_focus_labels's "nothing valid survives
+    -> None -> write nothing" contract -- the normalizer's job now, since
+    the CRM field itself has no options list to filter against."""
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {"label": LUMA_INDUSTRY_QUESTION_LABEL, "question_id": "q-1", "question_type": "multi-select", "value": ["Other"]}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "investment_industry" not in result.contact.custom_fields
+
+
+async def test_industry_focus_other_is_still_preserved_in_the_raw_registration_answer(luma_service, mapping_store):
+    """The mapped CRM field drops "Other," but the raw Luma answer is never
+    lost -- see LumaRegistration.registration_answers's own docstring."""
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Cybersecurity", "Other"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.registration.registration_answers[0].value == ["Cybersecurity", "Other"]
+
+
+async def test_industry_focus_unanswered_question_does_not_touch_the_field(luma_service, mapping_store):
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(registration_answers=[])  # never answered this question
+
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "investment_industry" not in result.contact.custom_fields
+
+
+async def test_industry_focus_webhook_replay_is_idempotent(luma_service, mapping_store):
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Crypto / Web3", "Cybersecurity"],
+            }
+        ]
+    )
+    await luma_service.process_guest_event(make_event(), guest)
+    second_result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert second_result.contact.custom_fields["investment_industry"] == ["Crypto / Web3", "Cybersecurity"]
+    assert "custom:investment_industry" not in second_result.changed_field_keys  # unchanged on rerun -- no-op
 
 
 async def test_blank_luma_value_never_erases_an_existing_crm_value(luma_service, crm_service):

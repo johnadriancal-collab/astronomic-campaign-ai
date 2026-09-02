@@ -16,6 +16,7 @@ reaches the CRM field it was mapped to, rather than writing garbage.
 import re
 from typing import Any
 
+from app.models.crm import INDUSTRY_OPTIONS
 from app.models.luma import LumaAnswerNormalizer
 
 _LINKEDIN_PATH_PREFIXES = ("linkedin.com", "www.linkedin.com")
@@ -114,10 +115,43 @@ def normalize_check_size_personal_bucket(value: Any) -> list[str] | None:
     return _CHECK_SIZE_PERSONAL_BUCKET_TRANSLATIONS.get(value.strip().lower())
 
 
+def normalize_industry_focus_labels(value: Any) -> list[str] | str | None:
+    """
+    Filters Luma's "primary investment or industry areas of focus"
+    multi-select answer down to exact, canonical INDUSTRY_OPTIONS members
+    (app/models/crm.py) only -- "Other" and any unrecognized/uncontrolled
+    string are dropped HERE, never passed through.
+
+    This is a deliberate exception to this module's usual "translate known
+    labels, let the generic CRM option-allowlist filter drop the rest"
+    split (contrast normalize_investor_type_labels): investment_industry's
+    live CrmCustomFieldDefinition.options is deliberately empty (an
+    intentionally open, tag-style CRM field -- see
+    luma_sync_service._filter_to_allowed_options's own docstring for why
+    empty options means "no fixed field-level restriction" there, not
+    "reject everything"). That means the generic filter no longer
+    constrains THIS field at all, so this normalizer is the only thing
+    standing between an arbitrary Luma string and the CRM field for this
+    one question -- a plain set-membership filter, never a fuzzy/alias
+    translation, since the Luma question's own options were deliberately
+    updated to match INDUSTRY_OPTIONS's exact wording.
+
+    Returns None (skip, never write) if nothing valid survives -- e.g. the
+    guest selected only "Other" or only unrecognized values.
+    """
+    if isinstance(value, list):
+        kept = [v for v in value if isinstance(v, str) and v in INDUSTRY_OPTIONS]
+        return kept or None
+    if isinstance(value, str):
+        return value if value in INDUSTRY_OPTIONS else None
+    return None
+
+
 _NORMALIZERS = {
     LumaAnswerNormalizer.LINKEDIN_URL: normalize_linkedin_url,
     LumaAnswerNormalizer.INVESTOR_TYPE_LABEL: normalize_investor_type_labels,
     LumaAnswerNormalizer.CHECK_SIZE_PERSONAL_BUCKET: normalize_check_size_personal_bucket,
+    LumaAnswerNormalizer.INDUSTRY_FOCUS_LABEL: normalize_industry_focus_labels,
 }
 
 
