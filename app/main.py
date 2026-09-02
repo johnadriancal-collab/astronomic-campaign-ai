@@ -60,6 +60,7 @@ from app.api.mail import router as mail_router
 from app.api.mail_unsubscribe import router as mail_unsubscribe_router
 from app.api.mailboxes import router as mailboxes_router
 from app.api.sync import router as sync_router
+from app import access_log_filter
 from app.config import settings
 from app.repositories.sqlite_activity_event_store import SQLiteActivityEventStore
 from app.repositories.sqlite_auth_session_store import SQLiteAuthSessionStore
@@ -426,6 +427,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Astronomic Campaign AI", lifespan=lifespan)
+
+# Strips query strings from Uvicorn's own access-log lines (never touches
+# request handling -- see app/access_log_filter.py's own docstring for
+# the root cause this fixes: an OAuth callback's `code`/`state` query
+# params otherwise land verbatim in Railway's captured logs). Installed
+# here, at import time, which Uvicorn's CLI entry point guarantees runs
+# AFTER Uvicorn has already configured its own "uvicorn.access" logger
+# (Config.__init__ calls configure_logging() before the app string is
+# ever imported) -- so this always layers onto, never races, that setup.
+access_log_filter.install()
+
 app.middleware("http")(enforce_session_auth)
 app.include_router(auth_router)
 app.include_router(astro_ai_router)

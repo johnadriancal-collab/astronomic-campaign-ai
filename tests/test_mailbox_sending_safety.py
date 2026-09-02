@@ -102,3 +102,71 @@ def test_mailboxes_api_declares_only_the_five_approved_routes():
         ("get", "/google/callback"),
         ("post", "/{mailbox_id}/disconnect"),
     }
+
+
+# --- No OAuth logging call independently logs a secret/state/URL -----------
+# Complements app/access_log_filter.py's fix for Uvicorn's OWN access log
+# (a framework-level leak, not this application's own logging -- see that
+# module's docstring). This checks the OTHER, application-level half of
+# the same concern: that no `logger.*()` call in the OAuth-adjacent
+# modules independently interpolates an authorization code, an access/
+# refresh token, an OAuth `state` value, or a constructed request URL/
+# query string into its own message. AST-based (not a blanket substring
+# search across the whole file) specifically so this doesn't false-
+# positive on legitimate, harmless identifiers that merely CONTAIN one
+# of these words as a substring (e.g. `resp.status_code`,
+# `MailboxOAuthStateError`, `_consume_state()`) -- only a WHOLE
+# interpolated identifier/attribute access matching one of these names
+# is forbidden.
+
+
+def _logger_call_interpolated_expressions(path: str) -> list[str]:
+    """Every f-string expression (as unparsed source text) interpolated
+    into a `logger.<level>(...)` call anywhere in `path`."""
+    import ast
+
+    source = Path(path).read_text()
+    tree = ast.parse(source)
+    expressions: list[str] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "logger"
+        ):
+            continue
+        for arg in node.args:
+            if isinstance(arg, ast.JoinedStr):
+                for value in arg.values:
+                    if isinstance(value, ast.FormattedValue):
+                        expressions.append(ast.unparse(value.value))
+    return expressions
+
+
+def test_no_oauth_logging_call_interpolates_a_code_state_token_or_url():
+    forbidden_whole_identifiers = (
+        r"\bcode\b",
+        r"\bstate\b",
+        r"\baccess_token\b",
+        r"\brefresh_token\b",
+        r"\bquery_string\b",
+        r"\burl\b",
+        r"\brequest\b",
+    )
+    for path in ("app/services/mailbox_service.py", "app/google/oauth_client.py"):
+        for expr in _logger_call_interpolated_expressions(path):
+            for pattern in forbidden_whole_identifiers:
+                assert not re.search(pattern, expr), f"{path}: logger call interpolates {expr!r} (matches {pattern})"
+
+
+def test_no_oauth_logging_call_interpolates_more_than_a_short_identifier_or_enum_value():
+    """A second, structural layer on top of the name-based check above:
+    every interpolated expression across both modules is short (an id,
+    an enum's .value, a type name, an HTTP status code) -- none of them
+    is a call to str()/repr() against a whole request/response object,
+    which could smuggle a secret through under a name this test doesn't
+    already know to forbid."""
+    for path in ("app/services/mailbox_service.py", "app/google/oauth_client.py"):
+        for expr in _logger_call_interpolated_expressions(path):
+            assert len(expr) < 40, f"{path}: suspiciously long interpolated logger expression: {expr!r}"
