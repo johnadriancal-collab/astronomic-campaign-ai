@@ -14,6 +14,7 @@ import { MailCampaignChannelsTab } from "@/components/mail-campaign-channels-tab
 import { MailCampaignScheduleTab, type TabWindow } from "@/components/mail-campaign-schedule-tab";
 import { MailCampaignSettingsTab } from "@/components/mail-campaign-settings-tab";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
+import { campaignLockedBannerDescription, campaignLockedBannerTitle } from "@/lib/mail";
 import { findOverlappingPairs, isLocalWindowId, minutesFromTimeString, timeStringFromMinutes } from "@/lib/schedule";
 import type { StepSelection } from "@/lib/mail-campaign-steps";
 import { cn } from "@/lib/utils";
@@ -470,12 +471,8 @@ export default function MailCampaignDetailPage() {
       {!editable && (
         <Alert className="mb-4">
           <Lock className="h-4 w-4" />
-          <AlertTitle>{campaign.status === "ready" ? "Ready -- locked for editing" : "Archived"}</AlertTitle>
-          <AlertDescription>
-            {campaign.status === "ready"
-              ? "The audience was snapshotted when this campaign was marked ready. Unlock it to make changes -- this clears the snapshot so it can be re-created fresh."
-              : "This campaign is archived."}
-          </AlertDescription>
+          <AlertTitle>{campaignLockedBannerTitle(campaign.status)}</AlertTitle>
+          <AlertDescription>{campaignLockedBannerDescription(campaign.status)}</AlertDescription>
         </Alert>
       )}
 

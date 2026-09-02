@@ -4,9 +4,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import type { MailCampaign, MailCampaignReview, MailEnrollment } from "@/lib/api";
 
 // The command-center tab -- real planning/progress data only. No email
-// engagement percentages appear anywhere here: Astronomic Mail cannot send
-// yet, so there is nothing to have been opened, clicked, replied to,
-// bounced, or unsubscribed from. Showing five "Not available yet"
+// engagement percentages appear anywhere here: this dashboard has no open/
+// click/reply/bounce/unsubscribe tracking built yet, even though sending
+// itself now exists (Phase C). Showing five "Not available yet"
 // placeholders would be as much visual noise as fake 0% values, so this
 // tab omits that strip entirely rather than including it in either form --
 // see this feature's investigation report for the full reasoning.
@@ -100,10 +100,10 @@ export function MailCampaignDashboardTab({
       </Card>
 
       <Alert>
-        <AlertTitle>Sending will be enabled after mailbox setup</AlertTitle>
+        <AlertTitle>Marking Ready doesn&apos;t send anything</AlertTitle>
         <AlertDescription>
-          There is no Gmail connection and no send queue in this phase. Marking a campaign Ready only snapshots its
-          audience for review -- it never sends or schedules anything.
+          Marking a campaign Ready only snapshots its audience for review -- it never sends or schedules anything by
+          itself. Sending only begins once a campaign is explicitly activated.
         </AlertDescription>
       </Alert>
     </div>

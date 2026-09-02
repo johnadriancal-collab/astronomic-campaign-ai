@@ -7,6 +7,9 @@ import type { MailCampaignStatus, MailEnrollmentStatus, MailSuppressionReason } 
 export const MAIL_CAMPAIGN_STATUS_OPTIONS: { value: MailCampaignStatus; label: string }[] = [
   { value: "draft", label: "Draft" },
   { value: "ready", label: "Ready" },
+  { value: "active", label: "Active" },
+  { value: "paused", label: "Paused" },
+  { value: "completed", label: "Completed" },
   { value: "archived", label: "Archived" },
 ];
 
@@ -15,17 +18,66 @@ export function mailCampaignStatusLabel(status: MailCampaignStatus): string {
 }
 
 // Same "bold color for the state that matters" convention as
-// email-intake.ts's statusBadgeClass.
+// email-intake.ts's statusBadgeClass. "active" gets the one attention-
+// grabbing color (it's the state where sending is actually happening) --
+// every other non-draft status is a calm, muted badge.
 export function mailCampaignStatusBadgeClass(status: MailCampaignStatus): string {
   switch (status) {
     case "draft":
       return "bg-secondary text-muted-foreground";
     case "ready":
       return "bg-emerald-100 text-emerald-800";
+    case "active":
+      return "bg-blue-100 text-blue-800";
+    case "paused":
+      return "bg-amber-100 text-amber-800";
+    case "completed":
+      return "bg-secondary text-muted-foreground";
     case "archived":
       return "bg-secondary text-muted-foreground";
     default:
       return "bg-secondary text-muted-foreground";
+  }
+}
+
+// The campaign detail page's "locked" banner, shown for every non-draft
+// status (see page.tsx's `editable = status === "draft"`). Pulled out as
+// pure functions -- same split as every other label helper in this file --
+// specifically so each of the 5 non-draft statuses has its own real
+// title/description instead of a two-way ternary that silently mislabeled
+// every status past "ready" as "Archived" (see this file's own test for
+// the regression this guards against).
+export function campaignLockedBannerTitle(status: MailCampaignStatus): string {
+  switch (status) {
+    case "ready":
+      return "Ready -- locked for editing";
+    case "active":
+      return "Active -- locked while sending";
+    case "paused":
+      return "Paused -- locked while paused";
+    case "completed":
+      return "Completed";
+    case "archived":
+      return "Archived";
+    default:
+      return mailCampaignStatusLabel(status);
+  }
+}
+
+export function campaignLockedBannerDescription(status: MailCampaignStatus): string {
+  switch (status) {
+    case "ready":
+      return "The audience was snapshotted when this campaign was marked ready. Unlock it to make changes -- this clears the snapshot so it can be re-created fresh.";
+    case "active":
+      return "This campaign is actively sending. Audience, sequence, and schedule are locked while it executes.";
+    case "paused":
+      return "Sending is paused. Audience, sequence, and schedule remain locked while paused.";
+    case "completed":
+      return "This campaign has finished sending to its audience. It's locked; archive it once you're done reviewing results.";
+    case "archived":
+      return "This campaign is archived.";
+    default:
+      return "This campaign is locked for editing.";
   }
 }
 

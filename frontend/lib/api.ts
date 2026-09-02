@@ -1088,15 +1088,16 @@ export function listUnifiedCampaigns(): Promise<UnifiedCampaignSummary[]> {
   return request<UnifiedCampaignSummary[]>("/campaign-manager/campaigns");
 }
 
-// --- Astronomic Mail (Phase 1 -- Foundation, NO sending capability) -------
+// --- Astronomic Mail -------------------------------------------------------
 //
 // Deliberately independent from Campaign/CampaignStatus above (the Apollo-
 // oriented system) -- MailCampaign/MailCampaignStatus are their own types.
-// MailCampaignStatus intentionally has only 3 values in this phase; there
-// is no "active"/"paused"/"completed" to represent because nothing here
-// can send. See app/models/mail.py for the full rationale.
+// Mirrors app/models/mail.py's MailCampaignStatus exactly: DRAFT -> READY ->
+// ACTIVE <-> PAUSED -> COMPLETED, with ARCHIVED reachable as a terminal
+// state from any non-archived status. See that model for the full
+// lifecycle rationale.
 
-export type MailCampaignStatus = "draft" | "ready" | "archived";
+export type MailCampaignStatus = "draft" | "ready" | "active" | "paused" | "completed" | "archived";
 
 // Campaign Manager Integration Phase -- who can see/edit this campaign.
 // This app has no multi-user/workspace permission system anywhere (no

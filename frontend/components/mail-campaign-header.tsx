@@ -26,7 +26,7 @@ export function MailCampaignHeader({
     <div className="mb-6 flex items-start justify-between gap-4">
       <div>
         <h1 className="font-serif text-2xl font-medium tracking-tight">{campaign.name}</h1>
-        <p className="mt-1 text-xs text-muted-foreground">Astronomic Mail -- Phase 1 (no sending capability yet)</p>
+        <p className="mt-1 text-xs text-muted-foreground">Astronomic Mail</p>
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Badge variant="secondary" className={mailCampaignStatusBadgeClass(campaign.status)}>

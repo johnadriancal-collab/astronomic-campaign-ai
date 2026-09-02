@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   DEFAULT_FOLLOWUP_DELAY_DAYS,
   DEFAULT_SENDING_DAYS,
+  campaignLockedBannerDescription,
+  campaignLockedBannerTitle,
   canOrdinaryUnsuppress,
   formatDayCount,
   formatScheduleSummary,
@@ -21,15 +23,61 @@ import {
   toggleSendingDay,
 } from "./mail.ts";
 
-test("mailCampaignStatusLabel maps every Phase 1 status", () => {
+// All 6 real MailCampaignStatus values -- mirrors app/models/mail.py's
+// MailCampaignStatus exactly (DRAFT -> READY -> ACTIVE <-> PAUSED ->
+// COMPLETED, ARCHIVED terminal from any non-archived status).
+const ALL_MAIL_CAMPAIGN_STATUSES = ["draft", "ready", "active", "paused", "completed", "archived"] as const;
+
+test("mailCampaignStatusLabel maps every status", () => {
   assert.equal(mailCampaignStatusLabel("draft"), "Draft");
   assert.equal(mailCampaignStatusLabel("ready"), "Ready");
+  assert.equal(mailCampaignStatusLabel("active"), "Active");
+  assert.equal(mailCampaignStatusLabel("paused"), "Paused");
+  assert.equal(mailCampaignStatusLabel("completed"), "Completed");
   assert.equal(mailCampaignStatusLabel("archived"), "Archived");
 });
 
 test("mailCampaignStatusBadgeClass returns a non-empty class for every status", () => {
-  for (const status of ["draft", "ready", "archived"] as const) {
+  for (const status of ALL_MAIL_CAMPAIGN_STATUSES) {
     assert.ok(mailCampaignStatusBadgeClass(status).length > 0);
+  }
+});
+
+// --- Campaign detail page's "locked" banner (all non-draft statuses) ------
+//
+// Regression coverage for the bug where every status past "ready" (active,
+// paused, completed, archived) fell through a two-way ternary and rendered
+// the literal title "Archived" -- most visibly, a genuinely COMPLETED
+// campaign (one that had actually finished sending) showed an incorrect
+// "Archived" banner even though its status badge correctly read
+// "Completed" and it had never been archived.
+
+test("campaignLockedBannerTitle: each non-draft status gets its own real title", () => {
+  assert.equal(campaignLockedBannerTitle("ready"), "Ready -- locked for editing");
+  assert.equal(campaignLockedBannerTitle("active"), "Active -- locked while sending");
+  assert.equal(campaignLockedBannerTitle("paused"), "Paused -- locked while paused");
+  assert.equal(campaignLockedBannerTitle("completed"), "Completed");
+  assert.equal(campaignLockedBannerTitle("archived"), "Archived");
+});
+
+test("regression: COMPLETED must never render the Archived banner title", () => {
+  assert.notEqual(campaignLockedBannerTitle("completed"), "Archived");
+  assert.notEqual(campaignLockedBannerDescription("completed"), "This campaign is archived.");
+});
+
+test("regression: ACTIVE and PAUSED must never render the Archived banner title either", () => {
+  assert.notEqual(campaignLockedBannerTitle("active"), "Archived");
+  assert.notEqual(campaignLockedBannerTitle("paused"), "Archived");
+});
+
+test("campaignLockedBannerDescription: only the truly archived status says 'archived'", () => {
+  for (const status of ALL_MAIL_CAMPAIGN_STATUSES) {
+    if (status === "draft") continue;
+    const description = campaignLockedBannerDescription(status);
+    assert.ok(description.length > 0);
+    if (status !== "archived") {
+      assert.doesNotMatch(description.toLowerCase(), /\barchived\b/);
+    }
   }
 });
 
