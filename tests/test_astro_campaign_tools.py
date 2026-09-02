@@ -15,7 +15,7 @@ import pytest_asyncio
 
 from app.models.campaign import Campaign, CampaignPlan, CampaignStatus, Filters
 from app.models.email_sequence import EmailSequence, EmailSequenceStatus
-from app.models.mail import MailCampaign, MailCampaignStatus
+from app.models.mail import MailCampaign, MailCampaignStatus, MailEnrollmentStep, MailEnrollmentStepStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.campaign_store import MemoryCampaignStore
 from app.repositories.crm_contact_list_member_store import MemoryCrmContactListMemberStore
@@ -68,6 +68,25 @@ def make_mail_campaign(**overrides) -> MailCampaign:
     )
     defaults.update(overrides)
     return MailCampaign(**defaults)
+
+
+def make_step(mail_campaign_id: str, **overrides) -> MailEnrollmentStep:
+    defaults = dict(
+        enrollment_step_id=str(uuid.uuid4()),
+        mail_campaign_id=mail_campaign_id,
+        enrollment_id=str(uuid.uuid4()),
+        crm_contact_id=str(uuid.uuid4()),
+        step_id=str(uuid.uuid4()),
+        step_number=1,
+        subject="Hi {{first_name}}",
+        body="Hello",
+        delay_days=0,
+        reply_in_thread=False,
+        created_at=_now(),
+        updated_at=_now(),
+    )
+    defaults.update(overrides)
+    return MailEnrollmentStep(**defaults)
 
 
 @pytest_asyncio.fixture
@@ -251,6 +270,139 @@ async def test_get_mail_campaign_reports_theoretical_audience_clearly_labeled(to
     assert "theoretical" in audience["note"].lower()
     assert "not actual sends" in audience["note"].lower()
     assert audience["contacts_eligible"] == 0  # no source_list_id set
+
+
+# --- get_campaign: Astronomic Mail real execution data ---------------------
+#
+# Regression coverage for the exact scenario this fix exists for: a
+# campaign that genuinely completed a real Gmail send used to still be
+# described by Astro as "cannot send email yet," because the tool never
+# queried real MailEnrollmentStep data at all -- only the pre-send,
+# always-theoretical Review projection.
+
+
+async def test_draft_campaign_with_no_execution_rows_reports_truthful_zero_execution(tools):
+    """No fabricated activity -- a campaign that was never activated has
+    zero MailEnrollmentStep rows, and must report exactly that, not omit
+    the block or invent a number."""
+    result = await tools.dispatch("get_campaign", {"name": "Q3 Outreach"})
+    execution = result["campaign"]["execution"]
+    assert execution["total_steps"] == 0
+    assert execution["sent"] == 0
+    for status in MailEnrollmentStepStatus:
+        assert execution[status.value] == 0
+
+
+async def test_completed_campaign_with_one_sent_step_reports_actual_sent_count(tools):
+    """The exact scenario we hit in production: a COMPLETED campaign with
+    one real, persisted SENT step must report sent=1 from that real row --
+    never inferred from theoretical_total_sends."""
+    mail_campaigns = await tools.mail_campaign_service.list_campaigns()
+    campaign = mail_campaigns[0]
+    campaign.status = MailCampaignStatus.COMPLETED
+    await tools.mail_campaign_service.campaign_store.save(campaign)
+    await tools.mail_campaign_service.enrollment_step_store.create(
+        make_step(campaign.mail_campaign_id, status=MailEnrollmentStepStatus.SENT)
+    )
+
+    result = await tools.dispatch("get_campaign", {"name": "Q3 Outreach"})
+
+    assert result["campaign"]["status"] == "completed"
+    execution = result["campaign"]["execution"]
+    assert execution["total_steps"] == 1
+    assert execution["sent"] == 1
+    assert execution["failed"] == 0
+    # Independent of the theoretical block -- no source_list_id is set on
+    # this campaign, so theoretical_total_sends is 0 while the real sent
+    # count is 1. Proves "sent" is never derived from the theoretical
+    # numbers.
+    assert result["campaign"]["audience_theoretical"]["theoretical_total_sends"] == 0
+
+
+async def test_execution_counts_every_real_status_correctly(tools):
+    """FAILED/UNKNOWN/SKIPPED_SUPPRESSED (and every other status) must
+    each be counted under their own real MailEnrollmentStepStatus name,
+    not folded into "sent" or silently dropped."""
+    mail_campaigns = await tools.mail_campaign_service.list_campaigns()
+    campaign = mail_campaigns[0]
+    step_store = tools.mail_campaign_service.enrollment_step_store
+    await step_store.create(make_step(campaign.mail_campaign_id, status=MailEnrollmentStepStatus.SENT))
+    await step_store.create(make_step(campaign.mail_campaign_id, status=MailEnrollmentStepStatus.FAILED))
+    await step_store.create(make_step(campaign.mail_campaign_id, status=MailEnrollmentStepStatus.UNKNOWN))
+    await step_store.create(make_step(campaign.mail_campaign_id, status=MailEnrollmentStepStatus.SKIPPED_SUPPRESSED))
+    await step_store.create(make_step(campaign.mail_campaign_id, status=MailEnrollmentStepStatus.PENDING))
+
+    result = await tools.dispatch("get_campaign", {"name": "Q3 Outreach"})
+    execution = result["campaign"]["execution"]
+
+    assert execution["total_steps"] == 5
+    assert execution["sent"] == 1
+    assert execution["failed"] == 1
+    assert execution["unknown"] == 1
+    assert execution["skipped_suppressed"] == 1
+    assert execution["pending"] == 1
+    assert execution["queued"] == 0
+    assert execution["claimed"] == 0
+    assert execution["sending"] == 0
+
+
+async def test_execution_block_never_exposes_recipient_or_provider_details(tools):
+    """Aggregate counts only -- no recipient email, message content,
+    mailbox id, or provider message/thread id must ever appear in the
+    execution block, even though the underlying MailEnrollmentStep rows
+    carry that data internally."""
+    mail_campaigns = await tools.mail_campaign_service.list_campaigns()
+    campaign = mail_campaigns[0]
+    await tools.mail_campaign_service.enrollment_step_store.create(
+        make_step(
+            campaign.mail_campaign_id,
+            status=MailEnrollmentStepStatus.SENT,
+            mailbox_id="mbx-secret",
+            gmail_message_id="gmail-msg-123",
+            gmail_thread_id="gmail-thread-456",
+            rfc_message_id="abc123@example.com",
+        )
+    )
+
+    result = await tools.dispatch("get_campaign", {"name": "Q3 Outreach"})
+    execution = result["campaign"]["execution"]
+
+    serialized = str(execution)
+    for forbidden in ("mbx-secret", "gmail-msg-123", "gmail-thread-456", "abc123@example.com"):
+        assert forbidden not in serialized
+    assert set(execution.keys()) == {"note", "total_steps"} | {s.value for s in MailEnrollmentStepStatus}
+
+
+async def test_theoretical_and_execution_blocks_are_both_present_and_distinct(tools):
+    """The core distinction this fix exists to preserve: two separate
+    keys, never merged into one number."""
+    result = await tools.dispatch("get_campaign", {"name": "Q3 Outreach"})
+    campaign = result["campaign"]
+    assert "audience_theoretical" in campaign
+    assert "execution" in campaign
+    assert "theoretical" in campaign["audience_theoretical"]["note"].lower()
+    assert "real" in campaign["execution"]["note"].lower()
+    assert "never" in campaign["execution"]["note"].lower()  # "never derived from audience_theoretical"
+
+
+def test_tool_descriptions_no_longer_claim_astronomic_mail_cannot_send():
+    """Regression: the list_campaigns/get_campaign tool descriptions (and
+    the module docstring, checked via the source-scanning tests below)
+    used to assert categorically that Astronomic Mail "has no send/open/
+    click statistics at all (it cannot send email yet)" -- now stale."""
+    full_text = " ".join(t["description"] for t in ASTRO_CAMPAIGN_TOOL_DEFINITIONS).lower()
+    assert "cannot send email yet" not in full_text
+    assert "no sending capability" not in full_text
+    assert "can send real email" in full_text or "can send" in full_text
+    # Still true and must remain asserted: open/click/reply/bounce
+    # tracking genuinely doesn't exist for Astronomic Mail.
+    assert "open" in full_text and "click" in full_text and "reply" in full_text
+
+
+def test_module_docstring_no_longer_claims_no_sending_capability():
+    source = Path("app/services/astro_campaign_tools.py").read_text()
+    assert "has no sending capability at all yet" not in source
+    assert "CAN send real email today" in source
 
 
 async def test_mail_campaign_source_list_relationship_is_exposed(tools):

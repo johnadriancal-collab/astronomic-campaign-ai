@@ -18,13 +18,23 @@ below NEVER interprets a missing/never-synced EmailSequence as "zero
 activity": it explicitly reports whether a sequence exists, whether it's
 ever been synced, and the sync timestamp when it has.
 
-Astronomic Mail's MailCampaignReview gives contacts_eligible/
-theoretical_total_sends -- a THEORETICAL, planned-audience calculation
-(current CRM list membership x current suppression state x current step
-count), never a real send count, because Astronomic Mail has no sending
-capability at all yet. Every field this module returns for a Mail
-campaign is labeled accordingly (see the "audience_theoretical" key's own
-"note" field in _get_campaign below).
+Astronomic Mail CAN send real email today, through connected/authorized
+Gmail mailboxes (Phase C's execution worker + GmailSender), and a
+MailCampaign has a real execution lifecycle -- DRAFT -> READY -> ACTIVE
+<-> PAUSED -> COMPLETED, ARCHIVED terminal from any non-archived status
+(see app/models/mail.py's MailCampaignStatus). Two genuinely different
+kinds of Mail campaign numbers exist and must NEVER be merged or confused:
+
+  - audience_theoretical (from MailCampaignReview): a PLANNED-audience
+    calculation (current CRM list membership x current suppression state
+    x current step count) -- meaningful even on a still-editable Draft as
+    a live preview, never a record of anything that has actually
+    happened.
+  - execution (from real MailEnrollmentStep rows, see _mail_execution_summary
+    below): actual, persisted per-step outcomes -- a "sent" count here
+    means the provider (Gmail) actually returned success for that many
+    steps, not a projection. Zero/absent for a campaign that's never been
+    activated -- never inferred or backfilled from the theoretical numbers.
 
 No get_campaign_stats tool exists (per the approved architecture) --
 campaign statistics are folded into get_campaign's response, specifically
@@ -33,20 +43,26 @@ described above.
 
 Strictly read-only: this module only ever calls CampaignService.store.list
 (never .preview/.search/.build/.mark_ready/.activate/.pause),
-MailCampaignService.list_campaigns/.get_review (never .create_campaign/
-.update_campaign/.mark_ready/.unlock_campaign/.archive_campaign/
-.add_step/.update_step/.delete_step),
+MailCampaignService.list_campaigns/.get_review/.enrollment_step_store.list_for_campaign
+(never .create_campaign/.update_campaign/.mark_ready/.unlock_campaign/
+.archive_campaign/.add_step/.update_step/.delete_step, and never any
+enrollment_step_store method other than list_for_campaign -- in
+particular never .try_transition/.save/.persist_prepared_fields, which
+are the execution worker's own write path),
 MailSuppressionService.list_active_suppressed_emails (never .suppress/
 .unsuppress), and EmailSequenceStore.get_by_campaign_id (never .save/
 .create, and never any Apollo API client at all -- no sync is ever
-triggered from this file).
+triggered from this file). The execution block below is deliberately
+aggregate-only (status counts) -- it never surfaces a recipient email,
+message content, provider message/thread id, or any other per-row detail
+through Astro.
 """
 
 from loguru import logger
 
 from app.models.campaign import Campaign
 from app.models.campaign_manager import APOLLO_STATUS_BUCKET, MAIL_STATUS_BUCKET, CampaignStatusBucket, SendingMethod
-from app.models.mail import MailCampaign
+from app.models.mail import MailCampaign, MailEnrollmentStep, MailEnrollmentStepStatus
 from app.repositories.email_sequence_store import EmailSequenceStore
 from app.services.campaign_service import CampaignService
 from app.services.mail_campaign_service import MailCampaignService
@@ -60,10 +76,13 @@ ASTRO_CAMPAIGN_TOOL_DEFINITIONS: list[dict] = [
         "name": "list_campaigns",
         "description": (
             "List campaigns across BOTH sending systems -- Apollo and Astronomic Mail. These are "
-            "different systems with different data: Astronomic Mail has no send/open/click "
-            "statistics at all (it cannot send email yet); Apollo has real statistics ONLY for "
-            "campaigns whose sequence has been manually synced. Returns the true total, capped "
-            "at 50. Optionally filter by status_bucket or sending_method."
+            "different systems with different data: Astronomic Mail CAN send real email through "
+            "connected Gmail mailboxes and has real execution statuses (active/paused/completed), "
+            "but this list view has no open/click/reply/bounce tracking for it -- use get_campaign "
+            "for a specific campaign's real 'execution' (actual, persisted) vs 'audience_theoretical' "
+            "(planned-only) numbers. Apollo has real send/open/click statistics ONLY for campaigns "
+            "whose sequence has been manually synced. Returns the true total, capped at 50. "
+            "Optionally filter by status_bucket or sending_method."
         ),
         "input_schema": {
             "type": "object",
@@ -88,11 +107,19 @@ ASTRO_CAMPAIGN_TOOL_DEFINITIONS: list[dict] = [
             "no sequence has been deployed yet, has synced=false (never interpret this as zero "
             "activity) if deployed but never synced, or has real unique_scheduled/delivered/"
             "opened/clicked/replied/bounced counts plus last_synced_at if it has been synced. "
-            "For an Astronomic Mail campaign, 'audience_theoretical' is a THEORETICAL planned-"
-            "audience estimate (current list membership x suppression x step count), never "
-            "actual sends -- always say so, never present it as real sending activity. Apollo "
-            "campaigns do not have a CRM list relationship (only Astronomic Mail does, via "
-            "source_list_id) -- their response never includes one; do not infer one."
+            "For an Astronomic Mail campaign, two separate, never-to-be-merged number groups are "
+            "returned: 'audience_theoretical' is a PLANNED-audience estimate (current list "
+            "membership x suppression x step count) -- always label it planned/theoretical, never "
+            "present it as sends that happened. 'execution' is real, persisted per-step outcome "
+            "counts (pending/queued/claimed/sending/sent/failed/skipped_suppressed/unknown) -- "
+            "'sent' here means Gmail confirmed the send operation succeeded for that many steps "
+            "-- it does NOT prove final recipient delivery (no bounce/delivery-event tracking "
+            "exists). It is zero or absent for a campaign that was never activated, and is NEVER derived from "
+            "theoretical_total_sends or contacts_eligible. Never claim open/click/reply/bounce "
+            "tracking for Astronomic Mail -- that capability doesn't exist regardless of a "
+            "campaign's execution status. Apollo campaigns do not have a CRM list relationship "
+            "(only Astronomic Mail does, via source_list_id) -- their response never includes "
+            "one; do not infer one."
         ),
         "input_schema": {
             "type": "object",
@@ -135,6 +162,19 @@ def _project_apollo_summary(campaign: Campaign) -> dict:
         "status_bucket": _apollo_bucket(campaign).value,
         "created_at": campaign.created_at.isoformat(),
     }
+
+
+def _mail_execution_summary(steps: list[MailEnrollmentStep]) -> dict:
+    """Real, persisted per-step outcome counts -- aggregate only, never a
+    recipient email, message content, or provider message/thread id (see
+    module docstring). Every MailEnrollmentStepStatus value always
+    appears, defaulting to 0, so a Draft/Ready campaign with zero
+    execution rows truthfully reports all-zero counts rather than
+    omitting the block or fabricating activity."""
+    counts = {status.value: 0 for status in MailEnrollmentStepStatus}
+    for step in steps:
+        counts[step.status.value] += 1
+    return {"total_steps": len(steps), **counts}
 
 
 def _project_mail_summary(campaign: MailCampaign) -> dict:
@@ -282,6 +322,7 @@ class AstroCampaignTools:
     async def _project_mail_detail(self, campaign: MailCampaign) -> dict:
         suppressed = await self.mail_suppression_service.list_active_suppressed_emails()
         review = await self.mail_campaign_service.get_review(campaign.mail_campaign_id, suppressed)
+        steps = await self.mail_campaign_service.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
         return {
             "status": "found",
             "sending_method": "astronomic_mail",
@@ -295,13 +336,22 @@ class AstroCampaignTools:
                 "source_list_name": review.source_list_name,
                 "audience_theoretical": {
                     "note": (
-                        "THEORETICAL planned audience, not actual sends -- Astronomic Mail has "
-                        "no sending capability yet."
+                        "THEORETICAL planned audience, not actual sends -- see 'execution' for "
+                        "real, persisted send outcomes."
                     ),
                     "total_contacts": review.total_contacts,
                     "contacts_eligible": review.contacts_eligible,
                     "sequence_step_count": review.sequence_step_count,
                     "theoretical_total_sends": review.theoretical_total_sends,
+                },
+                "execution": {
+                    "note": (
+                        "REAL, persisted per-step execution outcomes. 'sent' means Gmail "
+                        "confirmed the send operation succeeded. It does not prove final "
+                        "recipient delivery. Never derived from audience_theoretical. No open/"
+                        "click/reply/bounce tracking is currently exposed."
+                    ),
+                    **_mail_execution_summary(steps),
                 },
             },
         }

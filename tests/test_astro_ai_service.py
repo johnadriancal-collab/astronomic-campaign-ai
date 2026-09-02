@@ -162,6 +162,26 @@ async def test_system_prompt_tells_astro_not_to_claim_crm_access():
     assert "never claim" in lowered
 
 
+def test_hub_system_prompt_no_longer_claims_astronomic_mail_cannot_send():
+    """Regression: Astronomic Mail genuinely can send real email today
+    (Phase C -- connected/gmail.send-authorized mailboxes, a real
+    execution worker), but the Campaign Manager prompt bullet used to
+    tell Astro categorically that it "cannot send email yet" -- causing
+    Astro to repeat that stale claim even for a campaign that had
+    actually completed a real send. The theoretical-vs-actual
+    distinction must survive this fix, just phrased correctly: planned
+    numbers are never presented as sends that happened, and actual sends
+    are only ever reported from real execution data."""
+    lowered = HUB_SYSTEM_PROMPT_TEMPLATE.lower()
+    assert "cannot send email yet" not in lowered
+    assert "astronomic mail can send" in lowered or "can send real email" in lowered
+    assert "theoretical" in lowered
+    assert "execution" in lowered
+    # Astro's OWN tools remain read-only -- this claim is still accurate
+    # and must not be removed by this fix.
+    assert "no write, send, or campaign-building capability" in lowered
+
+
 async def test_only_user_and_assistant_roles_are_representable():
     """AstroChatRole has no "system" member at all -- there is no way to
     even construct a request that smuggles in a system-role message."""

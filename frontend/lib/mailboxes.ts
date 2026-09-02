@@ -5,10 +5,12 @@
 // `Mailbox` (the real, backend-connected type) lives in lib/api.ts -- this
 // module only formats/derives display values from it. Deliverability
 // Index, Campaigns, Emails Sent Today, and Queue have NO backing field on
-// Mailbox at all (no deliverability engine, no campaign<->mailbox
-// assignment model, no sending engine, no send queue exist yet) -- the
-// Emails page renders these as literal neutral values, not read off any
-// mailbox field, so there is nothing here to fabricate.
+// Mailbox at all -- a real sending engine and send queue now exist
+// backend-side (Phase C), but this Emails page table has no per-mailbox
+// stat wired to either yet (no deliverability engine, no campaign<->
+// mailbox assignment model exposed here). It renders these as literal
+// neutral values, not read off any mailbox field, so there is nothing
+// here to fabricate.
 
 import type { Mailbox, MailboxProvider, MailboxStatus } from "@/lib/api";
 

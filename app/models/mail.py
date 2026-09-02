@@ -7,9 +7,16 @@ oriented `Campaign`/`Lead`/`CampaignLead`/`EmailSequence`/`EmailMessage`
 system (app/models/campaign.py, app/models/lead.py,
 app/models/email_sequence.py, app/models/email_message.py) -- that system
 configures and mirrors real Apollo sequences; Astronomic Mail never touches
-Apollo, never touches Google Gmail, and STILL has no sending capability of
-any kind (see below). Every new name here is prefixed `Mail*` specifically
-to avoid any confusion with the existing `Campaign` word.
+Apollo. Every new name here is prefixed `Mail*` specifically to avoid any
+confusion with the existing `Campaign` word.
+
+Phase C (later than the rest of this docstring's Phase A narrative, see
+below) added a real execution worker and Gmail sender -- Astronomic Mail
+CAN send real email today through a connected/gmail.send-authorized
+mailbox once a campaign is activated. The rest of this docstring
+describes Phase A's own scope accurately as of when Phase A shipped; see
+app/services/mail_execution_worker.py and app/services/mail_sending_service.py
+for the current, real sending path.
 
 Phase A adds a durable execution model on top of Phase 1's configuration
 shell (MailCampaign/MailSequenceStep/MailEnrollment/MailSuppression,
@@ -30,15 +37,19 @@ unchanged in spirit, extended below) and Phase 2's mailbox connection
     MailCampaign.daily_lead_start_limit, which is a DIFFERENT concept (see
     that field's own docstring for why the two must never be collapsed).
 
-Phase A still contains NO code path capable of Gmail send, SMTP send, or any
-real message delivery -- MailSenderPort (app/services/mail_sending_service.py)
-is an abstract contract with NO implementation anywhere in this app; nothing
-in app/main.py's wiring constructs one. There is also still no background
-worker, no Railway worker process, and no OAuth scope beyond `openid email
-profile` (see app/models/mailbox.py). Activating a campaign
-(MailCampaignService.activate_campaign()) makes execution *allowed*, not
-*happening* -- reaching ACTIVE, by itself, cannot send anything, since
-nothing anywhere polls for or acts on a QUEUED MailEnrollmentStep row yet.
+At the time Phase A shipped, this app still contained no code path capable
+of Gmail send, SMTP send, or any real message delivery -- MailSenderPort
+(app/services/mail_sending_service.py) was an abstract contract with no
+implementation, no background worker existed, and no OAuth scope beyond
+`openid email profile` had been requested. Phase C later added a real
+implementation (GmailSender), a Railway worker process
+(MailExecutionWorker), and the `gmail.send` scope (requested per-mailbox
+via MailboxService.begin_gmail_send_upgrade(), see app/models/mailbox.py).
+Activating a campaign (MailCampaignService.activate_campaign()) now can
+lead to real sends: a QUEUED MailEnrollmentStep row is genuinely polled
+and processed by the worker, subject to the mailbox/recipient
+controlled-test allowlist gate (app/services/mail_sending_service.py's
+controlled_test_send_allowed()) while that gate remains configured.
 """
 
 import re

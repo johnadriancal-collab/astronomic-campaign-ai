@@ -1,15 +1,19 @@
 """
 Astronomic Mail -- Phase 2 (Google Workspace Mailbox Connection) models.
 
-Mailbox CONNECTION ONLY -- there is no sending capability anywhere in this
-module or anywhere else in this phase. Connecting a Google Workspace inbox
-does not enable Gmail send access: the OAuth scopes requested (see
-app/google/oauth_client.py) are `openid email profile` only --
-no `gmail.*` scope of any kind is ever requested. A future sending phase
-would need `https://www.googleapis.com/auth/gmail.send` (a Google
-"Sensitive" scope, requiring Google's OAuth verification/security
-assessment before general availability) and would need every already-
-connected mailbox to re-consent; nothing here does that.
+Mailbox CONNECTION model. The ORDINARY connect flow (`/google/start`,
+MailboxService.begin_google_oauth()) still only ever requests
+`openid email profile` (see app/google/oauth_client.py's base `SCOPES`) --
+connecting a mailbox by itself never grants Gmail send access. Real
+sending capability is a SEPARATE, explicit per-mailbox opt-in: Phase C's
+MailboxService.begin_gmail_send_upgrade() requests
+`https://www.googleapis.com/auth/gmail.send` (GMAIL_SEND_SCOPE, a Google
+"Sensitive" scope) for one already-connected mailbox at a time, and only
+a mailbox that has completed that upgrade can ever be selected as a
+step's assigned sender by MailSendingService. Whether a given mailbox has
+completed the upgrade is visible on `Mailbox.granted_scopes` below (the
+actual scope list Google's token response reported) -- callers check for
+GMAIL_SEND_SCOPE's presence there, not a separate boolean.
 
 Mailbox is the PUBLIC-safe model -- returned by every route in
 app/api/mailboxes.py. MailboxCredential is a SEPARATE, INTERNAL-ONLY model

@@ -263,11 +263,15 @@ async def lifespan(app: FastAPI):
         store=mail_suppression_store,
         activity_log=activity_log_service,
     )
-    # Phase A (durable execution model). Still no Gmail/OAuth/SMTP/worker
-    # capability anywhere in this wiring -- MailSendingService's
-    # MailSenderPort has zero concrete implementation under app/ (see that
-    # module's docstring); nothing here ever calls process_one_due_step()
-    # on a schedule.
+    # Phase A (durable execution model). At the time Phase A shipped, this
+    # MailSendingService had no concrete MailSenderPort and nothing called
+    # process_one_due_step() on a schedule. Phase C (further down in this
+    # same function) later wires a real GmailSender into this exact
+    # instance and starts a worker that does call it on a schedule -- see
+    # app/services/mail_execution_worker.py's own docstring for the
+    # multi-layered gating (mail_sending_engine_enabled, the controlled-
+    # test allowlists, the worker lease) that governs whether that
+    # schedule can ever actually reach Gmail in a given environment.
     mail_sending_service = MailSendingService(
         campaign_store=mail_campaign_store,
         enrollment_store=mail_enrollment_store,
