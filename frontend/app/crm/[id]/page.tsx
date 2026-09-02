@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { AddToListPanel } from "@/components/add-to-list-panel";
 import {
   ApiError,
   archiveCrmContact,
@@ -28,6 +29,11 @@ import {
 } from "@/lib/api";
 import { buildEventHistory } from "@/lib/contact-event-history";
 import { buildContactSummary } from "@/lib/contact-summary";
+import {
+  CRM_CONTACT_DETAIL_CONTAINER_CLASS,
+  OVERVIEW_EVENT_HISTORY_GRID_CLASS,
+  addToListSelectedIds,
+} from "@/lib/crm-contact-detail-layout";
 import {
   emailStatusFromSelectValue,
   emailStatusOptionLabel,
@@ -395,7 +401,7 @@ export default function CrmContactDetailPage() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
+      <div className={CRM_CONTACT_DETAIL_CONTAINER_CLASS}>
         <Alert variant="destructive">
           <AlertTriangle />
           <AlertTitle>Couldn&apos;t load contact</AlertTitle>
@@ -407,7 +413,7 @@ export default function CrmContactDetailPage() {
 
   if (!contact) {
     return (
-      <div className="mx-auto max-w-3xl space-y-4 px-6 py-10">
+      <div className={`${CRM_CONTACT_DETAIL_CONTAINER_CLASS} space-y-4`}>
         <Skeleton className="h-8 w-64" />
         <Skeleton className="h-64 w-full rounded-xl" />
       </div>
@@ -436,7 +442,7 @@ export default function CrmContactDetailPage() {
   const eventHistory = lumaRegistrations ? buildEventHistory(lumaRegistrations) : null;
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
+    <div className={CRM_CONTACT_DETAIL_CONTAINER_CLASS}>
       <button
         onClick={() => router.push("/crm")}
         className="mb-6 flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"
@@ -484,6 +490,7 @@ export default function CrmContactDetailPage() {
               </Button>
             )
           )}
+          <AddToListPanel selectedIds={addToListSelectedIds(contact)} />
           <Button variant="outline" size="sm" onClick={handleArchive} className="gap-1.5" disabled={contact.archived}>
             <Archive className="h-3.5 w-3.5" />
             Archive
@@ -505,7 +512,7 @@ export default function CrmContactDetailPage() {
       {saved && <p className="mb-4 text-sm text-muted-foreground">Saved.</p>}
       {suppressionError && <p className="mb-4 text-xs text-destructive">{suppressionError}</p>}
 
-      <div className="mb-6 space-y-6">
+      <div className={OVERVIEW_EVENT_HISTORY_GRID_CLASS}>
         <Card>
           <CardHeader>
             <CardTitle className="text-sm">Overview</CardTitle>
