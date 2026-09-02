@@ -169,6 +169,31 @@ DEMOGRAPHIC_PREFERENCE_OPTIONS = [
 
 INVESTOR_MODE_OPTIONS = ["Privately", "Institutionally", "Both"]
 
+# CRM UI dropdown for CrmContact.email_status -- derived from a full production
+# tally (2026-09-02, 2,727 contacts), NOT invented. "User Managed" (the single
+# largest bucket, ~46% of all contacts) is a deliberate product decision, not a
+# deliverability status: it means the email was uploaded/provided directly by a
+# CRM user and is treated as trusted/sendable. "Valid"/"valid" (279 legacy rows
+# combined, from the ITF pipeline and older CSV imports respectively) are
+# DELIBERATELY EXCLUDED from this list -- they are legacy values expected to
+# eventually normalize to "Verified", but that migration is out of scope here.
+# `email_status` itself stays a plain, unvalidated `str | None` field (see its
+# own declaration below) -- this list only drives the UI; nothing enforces it
+# server-side, matching INVESTOR_MODE_OPTIONS's own precedent. An existing
+# contact holding a value NOT in this list (a legacy value, or anything else)
+# must remain visible/preserved by any UI built against this list, never
+# silently blanked or overwritten just because it isn't one of these options.
+EMAIL_STATUS_OPTIONS = [
+    "User Managed",
+    "Verified",
+    "Unverified",
+    "Invalid",
+    "Unavailable",
+    "Email No Longer Verified",
+    "New Data Available",
+    "Extrapolated",
+]
+
 # 2026-08-07 Dietary Preferences design -- canonical multi-select vocabulary for Q24,
 # derived from taxonomy review, NOT from observed CSV frequency (no CSV has ever
 # populated this column). Distinctions deliberately preserved rather than merged:

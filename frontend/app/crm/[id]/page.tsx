@@ -28,6 +28,11 @@ import {
 } from "@/lib/api";
 import { buildEventHistory } from "@/lib/contact-event-history";
 import { buildContactSummary } from "@/lib/contact-summary";
+import {
+  emailStatusFromSelectValue,
+  emailStatusOptionLabel,
+  emailStatusSelectOptionValues,
+} from "@/lib/crm-field-options";
 import { DIETARY_PREFERENCE_OPTIONS, INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
 import { canOrdinaryUnsuppress, nextSuppressionAction, suppressionToggleLabel } from "@/lib/mail";
 import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
@@ -36,7 +41,6 @@ const CORE_TEXT_FIELDS: [keyof CrmContact, string][] = [
   ["first_name", "First name"],
   ["last_name", "Last name"],
   ["email", "Email"],
-  ["email_status", "Email status"],
   ["phone", "Phone"],
   ["linkedin_url", "LinkedIn URL"],
   ["title", "Title"],
@@ -61,6 +65,34 @@ function TextField({ label, value, onChange }: { label: string; value: string; o
     <div className="space-y-1">
       <label className="text-xs font-medium text-muted-foreground">{label}</label>
       <Input value={value} onChange={(e) => onChange(e.target.value)} />
+    </div>
+  );
+}
+
+// Single-select dropdown for email_status, replacing what used to be a free
+// text input -- see EMAIL_STATUS_OPTIONS's own comment for the canonical
+// list and why some real production values (e.g. "valid") are deliberately
+// excluded from it. A contact's EXISTING value that isn't one of the
+// canonical options (a legacy value, or literally anything else) is never
+// silently dropped: it's injected as its own extra, clearly-labeled option
+// so it stays visible and selected exactly as-is until the user explicitly
+// picks a real canonical value to replace it with -- merely opening/saving
+// the form must not change or clear it.
+function EmailStatusField({ value, onChange }: { value: string | null; onChange: (v: string | null) => void }) {
+  return (
+    <div className="space-y-1">
+      <label className="text-xs font-medium text-muted-foreground">Email status</label>
+      <select
+        value={value ?? ""}
+        onChange={(e) => onChange(emailStatusFromSelectValue(e.target.value))}
+        className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
+      >
+        {emailStatusSelectOptionValues(value).map((o) => (
+          <option key={o || "__blank__"} value={o}>
+            {emailStatusOptionLabel(o)}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
@@ -543,6 +575,7 @@ export default function CrmContactDetailPage() {
                 onChange={(v) => set(key, v as CrmContact[typeof key])}
               />
             ))}
+            <EmailStatusField value={contact.email_status} onChange={(v) => set("email_status", v)} />
             <div className="sm:col-span-2 space-y-1">
               <label className="text-xs font-medium text-muted-foreground">Technologies (one per line)</label>
               <Textarea

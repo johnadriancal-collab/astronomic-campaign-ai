@@ -9,6 +9,7 @@ from app.models.crm import (
     CHECK_SIZE_OPTIONS,
     DEAL_STAGE_OPTIONS,
     DEMOGRAPHIC_PREFERENCE_OPTIONS,
+    EMAIL_STATUS_OPTIONS,
     INDUSTRY_OPTIONS,
     INVESTOR_MODE_OPTIONS,
     CrmContact,
@@ -21,6 +22,51 @@ from app.models.crm import (
 
 def test_investor_mode_options_match_the_real_form_exactly():
     assert INVESTOR_MODE_OPTIONS == ["Privately", "Institutionally", "Both"]
+
+
+# --- EMAIL_STATUS_OPTIONS ---------------------------------------------------
+#
+# Derived from a full production tally (2026-09-02, 2,727 contacts), not
+# invented. "User Managed" is included deliberately (trusted/sendable,
+# not a deliverability status). "Valid"/"valid" are deliberately excluded
+# -- legacy values, not migrated as part of introducing this dropdown.
+# email_status itself stays a plain, unvalidated `str | None` field (see
+# CrmContact below) -- this list is UI-only, matching INVESTOR_MODE_OPTIONS's
+# own precedent of zero server-side enum enforcement.
+
+
+def test_email_status_options_match_the_product_decision_exactly():
+    assert EMAIL_STATUS_OPTIONS == [
+        "User Managed",
+        "Verified",
+        "Unverified",
+        "Invalid",
+        "Unavailable",
+        "Email No Longer Verified",
+        "New Data Available",
+        "Extrapolated",
+    ]
+
+
+def test_email_status_options_deliberately_excludes_legacy_valid_values():
+    assert "Valid" not in EMAIL_STATUS_OPTIONS
+    assert "valid" not in EMAIL_STATUS_OPTIONS
+
+
+def test_email_status_field_has_no_server_side_enum_enforcement():
+    """Deliberate absence, not an oversight -- confirms the smallest-safe-
+    change scope: this is a UI-only dropdown. CrmContact must still accept
+    an arbitrary string (a legacy value, or anything else) for email_status
+    without validation error, same as before this change."""
+    contact = CrmContact(crm_contact_id="c1", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc), email_status="valid")
+    assert contact.email_status == "valid"
+    contact_arbitrary = CrmContact(
+        crm_contact_id="c2",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        email_status="Anything At All, Not Even Close To A Real Option",
+    )
+    assert contact_arbitrary.email_status == "Anything At All, Not Even Close To A Real Option"
 
 
 # --- INDUSTRY_OPTIONS taxonomy -------------------------------------------
