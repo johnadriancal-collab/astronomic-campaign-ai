@@ -1071,7 +1071,15 @@ export function rejectEmailIntakeItem(intakeId: string): Promise<EmailIntakeItem
 
 export type SendingMethod = "apollo" | "astronomic_mail";
 
-export type CampaignStatusBucket = "draft" | "in_progress" | "ready" | "active" | "paused" | "failed" | "archived";
+export type CampaignStatusBucket =
+  | "draft"
+  | "in_progress"
+  | "ready"
+  | "active"
+  | "paused"
+  | "failed"
+  | "completed"
+  | "archived";
 
 export interface UnifiedCampaignSummary {
   id: string;

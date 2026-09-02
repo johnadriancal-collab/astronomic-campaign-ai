@@ -31,6 +31,7 @@ class CampaignStatusBucket(str, Enum):
     ACTIVE = "active"
     PAUSED = "paused"
     FAILED = "failed"
+    COMPLETED = "completed"
     ARCHIVED = "archived"
 
 
@@ -66,5 +67,14 @@ APOLLO_STATUS_BUCKET: dict[str, CampaignStatusBucket] = {
 MAIL_STATUS_BUCKET: dict[str, CampaignStatusBucket] = {
     "draft": CampaignStatusBucket.DRAFT,
     "ready": CampaignStatusBucket.READY,
+    "active": CampaignStatusBucket.ACTIVE,
+    "paused": CampaignStatusBucket.PAUSED,
+    # Deliberately its own bucket, distinct from ARCHIVED: COMPLETED means
+    # the campaign successfully finished execution; ARCHIVED means it was
+    # intentionally archived/retired. Conflating the two here would
+    # reintroduce, in this dashboard, the exact ambiguity the campaign
+    # detail page's locked-status banner was fixed to stop showing (see
+    # frontend/lib/mail.ts's campaignLockedBannerTitle()).
+    "completed": CampaignStatusBucket.COMPLETED,
     "archived": CampaignStatusBucket.ARCHIVED,
 }

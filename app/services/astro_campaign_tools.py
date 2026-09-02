@@ -71,7 +71,7 @@ ASTRO_CAMPAIGN_TOOL_DEFINITIONS: list[dict] = [
                 "status_bucket": {
                     "type": "string",
                     "enum": [b.value for b in CampaignStatusBucket],
-                    "description": "draft, in_progress, ready, active, paused, failed, or archived.",
+                    "description": "draft, in_progress, ready, active, paused, failed, completed, or archived.",
                 },
                 "sending_method": {"type": "string", "enum": [m.value for m in SendingMethod]},
                 "limit": {"type": "integer", "description": "Max campaigns to return. Capped at 50."},

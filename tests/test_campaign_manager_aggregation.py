@@ -23,6 +23,7 @@ from app.api.campaign_manager import router as campaign_manager_router
 from app.api.mail import router as mail_router
 from app.dependencies import get_campaign_service, get_email_sequence_sync_service, get_mail_campaign_service
 from app.models.campaign import Campaign, CampaignPlan, Filters
+from app.models.mail import MailCampaignStatus
 from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.campaign_store import MemoryCampaignStore
@@ -217,6 +218,63 @@ async def test_mail_campaign_ready_status_shows_eligible_count_not_fake_zero(tes
     assert body["raw_status"] == "ready"
     assert body["status_bucket"] == "ready"
     assert body["summary"] == "1 step · 0 contacts eligible"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", list(MailCampaignStatus))
+async def test_mail_campaign_every_real_status_buckets_without_500(test_client, status):
+    """Regression: MAIL_STATUS_BUCKET (app/models/campaign_manager.py) once
+    only had entries for draft/ready/archived. The first real Mail Campaign
+    to ever reach ACTIVE/PAUSED/COMPLETED in production raised an unhandled
+    KeyError here, 500ing the whole Campaign Manager dashboard for every
+    campaign, not just the one with the unmapped status -- _mail_summary()
+    is called from a single list comprehension (list_unified_campaigns),
+    so one bad status fails the entire response. This parametrizes over
+    every real MailCampaignStatus value directly (bypassing the full
+    activate/pause/complete/archive service flow, which is already covered
+    elsewhere) so a future status value with no bucket mapping fails this
+    test immediately instead of shipping to production silently."""
+    client, _apollo_store, mail_service, _agent, _apollo, _ranker = test_client
+
+    campaign = await mail_service.create_campaign("Status Bucket Coverage")
+    stored = await mail_service.campaign_store.get(campaign.mail_campaign_id)
+    stored.status = status
+    await mail_service.campaign_store.save(stored)
+
+    resp = client.get("/campaign-manager/campaigns")
+
+    assert resp.status_code == 200
+    body = resp.json()[0]
+    assert body["raw_status"] == status.value
+    assert body["status_bucket"] != ""  # every status maps to SOME real bucket, never a KeyError
+
+
+@pytest.mark.asyncio
+async def test_mail_campaign_completed_and_archived_bucket_distinctly(test_client):
+    """COMPLETED and ARCHIVED are semantically different (finished execution
+    vs. intentionally retired) and must map to distinct CampaignStatusBucket
+    values here, not be conflated the way the campaign detail page's locked-
+    status banner briefly was before that regression was fixed (see
+    frontend/lib/mail.ts's campaignLockedBannerTitle())."""
+    client, _apollo_store, mail_service, _agent, _apollo, _ranker = test_client
+
+    completed = await mail_service.create_campaign("Completed Campaign")
+    stored_completed = await mail_service.campaign_store.get(completed.mail_campaign_id)
+    stored_completed.status = MailCampaignStatus.COMPLETED
+    await mail_service.campaign_store.save(stored_completed)
+
+    archived = await mail_service.create_campaign("Archived Campaign")
+    stored_archived = await mail_service.campaign_store.get(archived.mail_campaign_id)
+    stored_archived.status = MailCampaignStatus.ARCHIVED
+    await mail_service.campaign_store.save(stored_archived)
+
+    resp = client.get("/campaign-manager/campaigns")
+    assert resp.status_code == 200
+    by_id = {item["id"]: item for item in resp.json()}
+
+    assert by_id[completed.mail_campaign_id]["status_bucket"] == "completed"
+    assert by_id[archived.mail_campaign_id]["status_bucket"] == "archived"
+    assert by_id[completed.mail_campaign_id]["status_bucket"] != by_id[archived.mail_campaign_id]["status_bucket"]
 
 
 @pytest.mark.asyncio
