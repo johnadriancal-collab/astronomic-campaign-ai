@@ -24,6 +24,7 @@ from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
@@ -128,6 +129,7 @@ async def tools():
         window_store=MemoryMailSendWindowStore(),
         enrollment_step_store=enrollment_step_store,
         sending_service=sending_service,
+        batch_store=MemoryMailEnrollmentBatchStore(),
     )
     mail_suppression_service = MailSuppressionService(store=suppression_store, activity_log=activity_log)
 

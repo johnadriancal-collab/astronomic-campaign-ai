@@ -147,8 +147,12 @@ _SERVICE_OPERATOR_RULES below), covering exactly:
     Pause (ACTIVE -> PAUSED -- the safer INVERSE of Activate, approved
     alongside it for the same reason: it can only ever stop new claims on
     an already-ACTIVE campaign, see the "Pause is Activate's safe inverse"
-    note below), and the review/enrollments/channels/schedule/steps reads
-    needed to verify that state.
+    note below), and the review/enrollments/channels/schedule/steps/
+    workload/batches reads needed to verify that state. Workload
+    (GET .../workload) and prospect-batch history (GET .../batches) are
+    read-only additions (Phase 2, 2026-09-03) -- the write side
+    (add_prospects(), a later stage) is not implemented yet and gets its
+    own rule when it exists, never granted preemptively.
   - Mailboxes: the bare GET /mailboxes list ONLY (to pick a mailbox id for
     channel selection) -- never mailbox OAuth connect/disconnect.
   - CRM contact lists: create/edit a list and add/remove its membership --
@@ -298,6 +302,11 @@ _SERVICE_OPERATOR_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/pause$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/review$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/enrollments$"),
+        # Workload / prospect batches (Phase 2, 2026-09-03) -- read-only for
+        # now; add_prospects() itself (a later stage) will add its own
+        # write rule when it exists.
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/workload$"),
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/batches$"),
         # Channels -- selecting an already-connected mailbox by id only.
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/channels$"),
         ("PUT", rf"^/mail/campaigns/{_ID_SEGMENT}/channels$"),

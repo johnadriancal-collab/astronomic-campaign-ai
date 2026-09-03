@@ -102,6 +102,20 @@ def test_review_and_enrollments_reads_are_in_scope():
     assert _in_scope("GET", "/mail/campaigns/c1/enrollments") is True
 
 
+def test_workload_and_batches_reads_are_in_scope():
+    assert _in_scope("GET", "/mail/campaigns/c1/workload") is True
+    assert _in_scope("GET", "/mail/campaigns/c1/batches") is True
+
+
+def test_workload_and_batches_are_read_only():
+    """add_prospects() (the write side) is a later stage -- not granted
+    preemptively. Any write method against these paths must stay out of
+    scope until that stage explicitly adds its own rule."""
+    for method in ("POST", "PATCH", "PUT", "DELETE"):
+        assert _in_scope(method, "/mail/campaigns/c1/workload") is False
+        assert _in_scope(method, "/mail/campaigns/c1/batches") is False
+
+
 def test_channels_read_and_write_are_in_scope():
     assert _in_scope("GET", "/mail/campaigns/c1/channels") is True
     assert _in_scope("PUT", "/mail/campaigns/c1/channels") is True
@@ -234,3 +248,30 @@ def test_auth_and_admin_configuration_routes_are_out_of_scope():
 def test_unrelated_top_level_surfaces_are_out_of_scope():
     assert _in_scope("GET", "/campaign") is False
     assert _in_scope("POST", "/sync/itf-contact") is False
+
+
+# --- Closed-set regression guard (Phase 2, 2026-09-03) ----------------------
+
+
+def test_operator_rule_count_has_not_grown_beyond_the_two_new_workload_batch_reads():
+    """A precise tripwire against accidental scope broadening: this exact
+    count (27) is Stage 2's expected total -- the pre-Stage-2 set of 25
+    campaign-lifecycle/channel/schedule/step/mailbox/CRM-list rules, plus
+    exactly the two new read-only rules this stage adds (workload,
+    batches). If this number ever changes without a corresponding,
+    deliberate update to this test, something was granted (or revoked)
+    that wasn't explicitly reviewed."""
+    from app.session_auth_middleware import _SERVICE_OPERATOR_RULES
+
+    assert len(_SERVICE_OPERATOR_RULES) == 27
+
+
+def test_no_write_method_is_granted_on_the_two_new_read_routes_via_any_other_rule():
+    """Defense in depth beyond test_workload_and_batches_are_read_only:
+    confirms no OTHER rule in the table (e.g. a broad campaign-level
+    write) accidentally also matches these two exact paths."""
+    from app.session_auth_middleware import _SERVICE_OPERATOR_RULES
+
+    for path in ("/mail/campaigns/c1/workload", "/mail/campaigns/c1/batches"):
+        matching_methods = {method for method, pattern in _SERVICE_OPERATOR_RULES if pattern.fullmatch(path)}
+        assert matching_methods == {"GET"}, f"{path} unexpectedly matches methods {matching_methods}"

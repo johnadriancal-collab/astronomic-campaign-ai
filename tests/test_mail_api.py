@@ -19,6 +19,7 @@ from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
@@ -96,6 +97,7 @@ def campaign_service(crm, mailbox_store, channel_store, window_store):
         window_store=window_store,
         enrollment_step_store=enrollment_step_store,
         sending_service=sending_service,
+        batch_store=MemoryMailEnrollmentBatchStore(),
     )
 
 
@@ -127,6 +129,39 @@ def test_create_and_get_campaign(client):
 
 def test_get_missing_campaign_returns_404(client):
     resp = client.get("/mail/campaigns/does-not-exist")
+    assert resp.status_code == 404
+
+
+# --- Workload / prospect batches (Phase 2, 2026-09-03) --------------------
+
+
+def test_get_workload_for_a_fresh_campaign_is_all_zero(client):
+    created = client.post("/mail/campaigns", json={"name": "Q1 Outreach"}).json()
+
+    resp = client.get(f"/mail/campaigns/{created['mail_campaign_id']}/workload")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["mail_campaign_id"] == created["mail_campaign_id"]
+    assert (body["total"], body["pending"], body["active"], body["paused"], body["completed"], body["suppressed"], body["failed"]) == (0, 0, 0, 0, 0, 0, 0)
+
+
+def test_get_workload_for_missing_campaign_returns_404(client):
+    resp = client.get("/mail/campaigns/does-not-exist/workload")
+    assert resp.status_code == 404
+
+
+def test_list_batches_for_a_fresh_campaign_is_empty(client):
+    created = client.post("/mail/campaigns", json={"name": "Q1 Outreach"}).json()
+
+    resp = client.get(f"/mail/campaigns/{created['mail_campaign_id']}/batches")
+
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_list_batches_for_missing_campaign_returns_404(client):
+    resp = client.get("/mail/campaigns/does-not-exist/batches")
     assert resp.status_code == 404
 
 

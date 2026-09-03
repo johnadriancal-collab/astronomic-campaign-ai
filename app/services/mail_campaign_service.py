@@ -42,7 +42,9 @@ from app.models.mail import (
     MailCampaignSchedule,
     MailCampaignSharing,
     MailCampaignStatus,
+    MailCampaignWorkload,
     MailEnrollment,
+    MailEnrollmentBatch,
     MailEnrollmentStatus,
     MailScheduleSource,
     MailScheduleValidationError,
@@ -55,6 +57,7 @@ from app.models.mail import (
 from app.models.mailbox import Mailbox, MailboxStatus
 from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignNotFoundError, MailCampaignStore
+from app.repositories.mail_enrollment_batch_store import MailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
 from app.repositories.mail_send_window_store import MailSendWindowStore
@@ -381,6 +384,7 @@ class MailCampaignService:
         window_store: MailSendWindowStore,
         enrollment_step_store: MailEnrollmentStepStore,
         sending_service: MailSendingService,
+        batch_store: MailEnrollmentBatchStore,
     ):
         self.campaign_store = campaign_store
         self.step_store = step_store
@@ -392,6 +396,7 @@ class MailCampaignService:
         self.channel_store = channel_store
         self.enrollment_step_store = enrollment_step_store
         self.sending_service = sending_service
+        self.batch_store = batch_store
 
     async def _require_campaign(self, mail_campaign_id: str) -> MailCampaign:
         campaign = await self.campaign_store.get(mail_campaign_id)
@@ -1370,6 +1375,42 @@ class MailCampaignService:
     async def list_enrollments(self, mail_campaign_id: str) -> list[MailEnrollment]:
         await self._require_campaign(mail_campaign_id)
         return await self.enrollment_store.list_for_campaign(mail_campaign_id)
+
+    # --- Workload / prospect batches (Phase 2, 2026-09-03) ----------------
+
+    async def get_workload(self, mail_campaign_id: str) -> MailCampaignWorkload:
+        """Enrollment-status counts for this campaign -- WORKLOAD, entirely
+        independent of the campaign's own lifecycle `status` (see
+        MailCampaignWorkload's own docstring). Pure read, computed fresh
+        from every enrollment currently on file; never cached. Callable at
+        any campaign status, including DRAFT (always zero, since
+        mark_ready() hasn't run yet) and legacy COMPLETED (its historical
+        counts, unchanged by this read)."""
+        await self._require_campaign(mail_campaign_id)
+        enrollments = await self.enrollment_store.list_for_campaign(mail_campaign_id)
+        counts = {status: 0 for status in MailEnrollmentStatus}
+        for enrollment in enrollments:
+            counts[enrollment.status] += 1
+        return MailCampaignWorkload(
+            mail_campaign_id=mail_campaign_id,
+            total=len(enrollments),
+            pending=counts[MailEnrollmentStatus.PENDING],
+            active=counts[MailEnrollmentStatus.ACTIVE],
+            paused=counts[MailEnrollmentStatus.PAUSED],
+            completed=counts[MailEnrollmentStatus.COMPLETED],
+            suppressed=counts[MailEnrollmentStatus.SUPPRESSED],
+            failed=counts[MailEnrollmentStatus.FAILED],
+        )
+
+    async def list_batches(self, mail_campaign_id: str) -> list[MailEnrollmentBatch]:
+        """Every prospect batch ever added to this campaign via
+        add_prospects() (a later Phase 2 stage -- not implemented yet),
+        newest first. Empty for every campaign that predates that feature,
+        or that has simply never had a batch added -- see
+        MailEnrollmentBatch's own docstring on why that's valid, permanent
+        state, not a gap to backfill."""
+        await self._require_campaign(mail_campaign_id)
+        return await self.batch_store.list_for_campaign(mail_campaign_id)
 
     # --- Review (pure, read-only) ----------------------------------------
 

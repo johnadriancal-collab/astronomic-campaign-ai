@@ -408,7 +408,17 @@ class MailEnrollment(BaseModel):
     not-yet-invented) reason. Without this field, "all PAUSED enrollments"
     would be indistinguishable from "PAUSED enrollments it's safe to
     auto-resume" -- a real correctness gap, not a hypothetical one, since
-    a future pause reason could easily need a human decision instead."""
+    a future pause reason could easily need a human decision instead.
+
+    `batch_id` (Phase 2, 2026-09-03): which MailEnrollmentBatch this row
+    came from, if any -- None for every enrollment created before this
+    field existed (mark_ready()'s original one-time snapshot, still the
+    ONLY way a campaign's very first cohort is created) and for any
+    enrollment created by a mark_ready() call going forward, which still
+    doesn't stamp a batch -- ONLY MailCampaignService.add_prospects()
+    (added prospects on an already-persistent campaign) does. A legacy row
+    with no batch_id is not an error or a gap to backfill -- see
+    MailEnrollmentBatch's own docstring for why no backfill is planned."""
 
     enrollment_id: str
     mail_campaign_id: str
@@ -419,6 +429,97 @@ class MailEnrollment(BaseModel):
     created_at: datetime
     assigned_mailbox_id: str | None = None
     paused_reason: MailEnrollmentPauseReason | None = None
+    batch_id: str | None = None
+
+
+# --- Prospect batches (Phase 2, 2026-09-03) ----------------------------------
+
+
+class MailEnrollmentBatchSource(str, Enum):
+    """WHERE a MailEnrollmentBatch's contacts came from."""
+
+    CRM_LIST = "crm_list"
+    CSV_UPLOAD = "csv_upload"
+
+
+class MailEnrollmentBatch(BaseModel):
+    """
+    Provenance record for one call to MailCampaignService.add_prospects()
+    -- a campaign is a PERSISTENT container (Phase 2): unlike the one-time
+    mark_ready() snapshot, prospects can be added to an already-ACTIVE or
+    PAUSED campaign (or a legacy COMPLETED one, reopening it -- see
+    add_prospects()'s own docstring) any number of times, and each such
+    call gets exactly one of these rows, immutable once created.
+
+    Mirrors CrmImportBatch's existing provenance shape deliberately (batch
+    id, source, counts) rather than inventing a new convention.
+
+    Count semantics (see add_prospects()'s docstring for the exact
+    algorithm that produces them):
+      submitted_count       = unique candidate contacts submitted to
+                               campaign enrollment AFTER resolving the
+                               source (list membership or CSV commit
+                               result) and deduplicating within the batch
+                               itself.
+      enrolled_count         = genuinely NEW MailEnrollment rows created
+                               by this call (enrollment_store.create()
+                               returned True).
+      already_enrolled_count = candidates skipped because this campaign
+                               already contained them -- at ANY status,
+                               including a long-COMPLETED enrollment; see
+                               add_prospects()'s dedup rules.
+      suppressed_count       = the SUBSET of enrolled_count (not an
+                               additional, separate population) whose
+                               email was already suppressed, so it entered
+                               directly as SUPPRESSED rather than PENDING
+                               -- same convention as mark_ready()'s own
+                               suppressed_at_enrollment counter. Always
+                               true: suppressed_count &lt;= enrolled_count,
+                               and enrolled_count + already_enrolled_count
+                               == submitted_count.
+
+    No backfill: every MailEnrollment created before this model existed
+    has batch_id=None and no corresponding MailEnrollmentBatch row --
+    deliberately left as valid, permanent legacy data (see
+    MailEnrollment.batch_id's own docstring)."""
+
+    batch_id: str
+    mail_campaign_id: str
+    source: MailEnrollmentBatchSource
+    source_list_id: str | None = None
+    source_import_batch_id: str | None = None
+    created_at: datetime
+    created_by_actor: str | None = None
+    submitted_count: int
+    enrolled_count: int
+    already_enrolled_count: int
+    suppressed_count: int
+
+
+class MailCampaignWorkload(BaseModel):
+    """A campaign's current enrollment-status counts -- WORKLOAD, tracked
+    completely independently of the campaign's own lifecycle `status`
+    field (see MailCampaignStatus's own docstring: an ACTIVE campaign with
+    zero pending/in-progress enrollments is still ACTIVE, never inferred
+    to be "done" from this). Computed live from MailEnrollmentStore on
+    every read -- never cached, never itself persisted.
+
+    Deliberately an explicit, stable field per MailEnrollmentStatus value
+    -- never an open-ended/dynamic {status: count} mapping -- so a
+    frontend consumer never has to understand enum evolution to render
+    this. `total` is always exactly the sum of the six status fields
+    (enforced by MailCampaignService.get_workload(), the only place this
+    is constructed); adding it explicitly rather than making callers sum
+    the six fields themselves."""
+
+    mail_campaign_id: str
+    total: int
+    pending: int
+    active: int
+    paused: int
+    completed: int
+    suppressed: int
+    failed: int
 
 
 # --- Per-step execution (Phase A durable execution model) -------------------

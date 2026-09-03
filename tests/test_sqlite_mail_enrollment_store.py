@@ -119,3 +119,32 @@ async def test_try_assign_mailbox_raises_not_found_style_result_for_missing_row(
     updated = _make_enrollment(assigned_mailbox_id="mbx-1")
     applied = await store.try_assign_mailbox("does-not-exist", updated)
     assert applied is False
+
+
+# --- batch_id backward compatibility (Phase 2, 2026-09-03) -----------------
+
+
+async def test_legacy_row_with_no_batch_id_key_deserializes_with_batch_id_none(store):
+    """A real pre-Phase-2 row -- written before MailEnrollment.batch_id
+    existed, so its persisted JSON blob has no `batch_id` key at all, not
+    even `null`. Inserted directly at the SQL layer (bypassing the store's
+    own create(), which would always serialize the CURRENT model shape) to
+    prove this exact historical byte pattern, not just "a None value round-
+    trips" (which model_copy()-based tests wouldn't actually exercise)."""
+    legacy_json = (
+        '{"enrollment_id":"e-legacy","mail_campaign_id":"c1","crm_contact_id":"contact-legacy",'
+        '"email_at_enrollment":"legacy@example.com","status":"active",'
+        '"enrolled_at":"2026-01-01T00:00:00Z","created_at":"2026-01-01T00:00:00Z",'
+        '"assigned_mailbox_id":null,"paused_reason":null}'
+    )
+    await store._connection.execute(
+        "INSERT INTO mail_enrollments (enrollment_id, mail_campaign_id, crm_contact_id, data) VALUES (?, ?, ?, ?)",
+        ("e-legacy", "c1", "contact-legacy", legacy_json),
+    )
+    await store._connection.commit()
+
+    loaded = await store.get("e-legacy")
+    assert loaded is not None
+    assert loaded.batch_id is None
+    assert loaded.enrollment_id == "e-legacy"
+    assert loaded.status == MailEnrollmentStatus.ACTIVE

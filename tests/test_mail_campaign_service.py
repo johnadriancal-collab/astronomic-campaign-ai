@@ -6,15 +6,23 @@ CrmService() (in-memory) provides the audience (CrmContactList/CrmContact)
 this service reads from.
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from app.models.mail import MailCampaignStatus, MailEnrollmentStatus, MailScheduleValidationError
+from app.models.mail import (
+    MailCampaignStatus,
+    MailEnrollment,
+    MailEnrollmentBatch,
+    MailEnrollmentBatchSource,
+    MailEnrollmentStatus,
+    MailScheduleValidationError,
+)
 from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
@@ -90,12 +98,17 @@ def enrollment_step_store():
 
 
 @pytest.fixture
+def batch_store():
+    return MemoryMailEnrollmentBatchStore()
+
+
+@pytest.fixture
 def suppression_store():
     return MemoryMailSuppressionStore()
 
 
 @pytest.fixture
-def service(crm, activity_log, mailbox_store, channel_store, window_store, enrollment_step_store, suppression_store):
+def service(crm, activity_log, mailbox_store, channel_store, window_store, enrollment_step_store, suppression_store, batch_store):
     campaign_store = MemoryMailCampaignStore()
     enrollment_store = MemoryMailEnrollmentStore()
     sending_service = MailSendingService(
@@ -119,6 +132,7 @@ def service(crm, activity_log, mailbox_store, channel_store, window_store, enrol
         window_store=window_store,
         enrollment_step_store=enrollment_step_store,
         sending_service=sending_service,
+        batch_store=batch_store,
     )
 
 
@@ -2114,3 +2128,91 @@ async def test_operator_identity_cannot_pause_a_ready_campaign_merely_by_being_a
 
     unchanged = await service.get_campaign(ready.mail_campaign_id)
     assert unchanged.status == MailCampaignStatus.READY
+
+
+# --- get_workload() / list_batches() (Phase 2, 2026-09-03) -----------------
+
+
+def _make_raw_enrollment(enrollment_id, campaign_id, status, batch_id=None) -> MailEnrollment:
+    now = datetime.now(timezone.utc)
+    return MailEnrollment(
+        enrollment_id=enrollment_id,
+        mail_campaign_id=campaign_id,
+        crm_contact_id=f"contact-{enrollment_id}",
+        email_at_enrollment=f"{enrollment_id}@example.com",
+        status=status,
+        enrolled_at=now,
+        created_at=now,
+        batch_id=batch_id,
+    )
+
+
+async def test_get_workload_not_found_raises(service):
+    with pytest.raises(MailCampaignNotFound):
+        await service.get_workload("does-not-exist")
+
+
+async def test_get_workload_is_all_zero_for_a_campaign_with_no_enrollments(service):
+    campaign = await service.create_campaign("Draft")
+    workload = await service.get_workload(campaign.mail_campaign_id)
+    assert workload.mail_campaign_id == campaign.mail_campaign_id
+    assert (workload.total, workload.pending, workload.active, workload.paused, workload.completed, workload.suppressed, workload.failed) == (0, 0, 0, 0, 0, 0, 0)
+
+
+async def test_get_workload_counts_every_status_independently(service):
+    campaign = await service.create_campaign("Draft")
+    cid = campaign.mail_campaign_id
+    await service.enrollment_store.create(_make_raw_enrollment("e-pending", cid, MailEnrollmentStatus.PENDING))
+    await service.enrollment_store.create(_make_raw_enrollment("e-active-1", cid, MailEnrollmentStatus.ACTIVE))
+    await service.enrollment_store.create(_make_raw_enrollment("e-active-2", cid, MailEnrollmentStatus.ACTIVE))
+    await service.enrollment_store.create(_make_raw_enrollment("e-paused", cid, MailEnrollmentStatus.PAUSED))
+    await service.enrollment_store.create(_make_raw_enrollment("e-completed", cid, MailEnrollmentStatus.COMPLETED))
+    await service.enrollment_store.create(_make_raw_enrollment("e-suppressed", cid, MailEnrollmentStatus.SUPPRESSED))
+    await service.enrollment_store.create(_make_raw_enrollment("e-failed", cid, MailEnrollmentStatus.FAILED))
+    # A different campaign's enrollments must never leak into this count.
+    other = await service.create_campaign("Other")
+    await service.enrollment_store.create(_make_raw_enrollment("e-other", other.mail_campaign_id, MailEnrollmentStatus.ACTIVE))
+
+    workload = await service.get_workload(cid)
+    assert workload.pending == 1
+    assert workload.active == 2
+    assert workload.paused == 1
+    assert workload.completed == 1
+    assert workload.suppressed == 1
+    assert workload.failed == 1
+    assert workload.total == 7
+    assert workload.total == (
+        workload.pending + workload.active + workload.paused + workload.completed + workload.suppressed + workload.failed
+    )
+
+
+async def test_list_batches_not_found_raises(service):
+    with pytest.raises(MailCampaignNotFound):
+        await service.list_batches("does-not-exist")
+
+
+async def test_list_batches_is_empty_for_a_campaign_with_no_batches(service):
+    campaign = await service.create_campaign("Draft")
+    assert await service.list_batches(campaign.mail_campaign_id) == []
+
+
+async def test_list_batches_is_campaign_scoped_and_newest_first(service, batch_store):
+    campaign = await service.create_campaign("Draft")
+    cid = campaign.mail_campaign_id
+    other = await service.create_campaign("Other")
+    now = datetime.now(timezone.utc)
+
+    def _batch(batch_id, campaign_id, created_at):
+        return MailEnrollmentBatch(
+            batch_id=batch_id, mail_campaign_id=campaign_id, source=MailEnrollmentBatchSource.CRM_LIST,
+            source_list_id="list-1", created_at=created_at, submitted_count=1, enrolled_count=1,
+            already_enrolled_count=0, suppressed_count=0,
+        )
+
+    await batch_store.create(_batch("b1", cid, now))
+    await batch_store.create(_batch("b2", cid, now + timedelta(hours=1)))  # newest
+    await batch_store.create(_batch("b3", other.mail_campaign_id, now + timedelta(hours=2)))  # different campaign
+
+    batches = await service.list_batches(cid)
+    assert [b.batch_id for b in batches] == ["b2", "b1"]
+    assert all(b.mail_campaign_id == cid for b in batches)

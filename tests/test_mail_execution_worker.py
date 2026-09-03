@@ -27,6 +27,7 @@ from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
@@ -103,6 +104,7 @@ async def env():
         campaign_store=campaign_store, step_store=sequence_step_store, enrollment_store=enrollment_store,
         crm_service=CrmService(), activity_log=activity_log, mailbox_store=mailbox_store, channel_store=channel_store,
         window_store=window_store, enrollment_step_store=step_store, sending_service=mail_sending_service,
+        batch_store=MemoryMailEnrollmentBatchStore(),
     )
 
     await campaign_store.create(

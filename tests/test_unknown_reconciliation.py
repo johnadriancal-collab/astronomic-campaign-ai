@@ -29,6 +29,7 @@ from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_send_window_store import MemoryMailSendWindowStore
@@ -227,6 +228,7 @@ def api_client(svc, campaign_store):
         crm_service=CrmService(), activity_log=svc.activity_log, mailbox_store=svc.mailbox_store,
         channel_store=svc.channel_store, window_store=MemoryMailSendWindowStore(),
         enrollment_step_store=svc.step_store, sending_service=svc,
+        batch_store=MemoryMailEnrollmentBatchStore(),
     )
     app.dependency_overrides[get_mail_sending_service] = lambda: svc
     app.dependency_overrides[get_mail_campaign_service] = lambda: campaign_service

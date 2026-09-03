@@ -41,8 +41,10 @@ from app.models.mail import (
     MailCampaignReview,
     MailCampaignSchedule,
     MailCampaignSharing,
+    MailCampaignWorkload,
     MailContactSuppressionStatus,
     MailEnrollment,
+    MailEnrollmentBatch,
     MailScheduleValidationError,
     MailSequenceStep,
     MailSuppression,
@@ -309,6 +311,33 @@ async def get_campaign_review(
 async def list_enrollments(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
     try:
         return await service.list_enrollments(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Workload / prospect batches (Phase 2, 2026-09-03) ---------------------
+
+
+@router.get("/campaigns/{mail_campaign_id}/workload", response_model=MailCampaignWorkload)
+async def get_campaign_workload(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+    """Enrollment-status counts, independent of the campaign's own
+    lifecycle status -- see MailCampaignWorkload's own docstring for why
+    this is never inferred from `status` (an ACTIVE campaign with zero
+    pending/in-progress enrollments is still ACTIVE, not "done")."""
+    try:
+        return await service.get_workload(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/campaigns/{mail_campaign_id}/batches", response_model=list[MailEnrollmentBatch])
+async def list_campaign_batches(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+    """Every prospect batch ever added to this campaign, newest first --
+    see MailEnrollmentBatch's own docstring. Empty for every campaign that
+    predates add_prospects() (a later stage, not implemented yet) or that
+    simply has never had a batch added -- not an error, not a gap."""
+    try:
+        return await service.list_batches(mail_campaign_id)
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 

@@ -170,6 +170,14 @@ def client(auth_svc):
     async def mail_campaign_enrollments(campaign_id: str):
         return [{"enrollment_id": "real-enrollment-data"}]
 
+    @app.get("/mail/campaigns/{campaign_id}/workload")
+    async def mail_campaign_workload(campaign_id: str):
+        return {"mail_campaign_id": campaign_id, "total": 0, "pending": 0, "active": 0, "paused": 0, "completed": 0, "suppressed": 0, "failed": 0}
+
+    @app.get("/mail/campaigns/{campaign_id}/batches")
+    async def mail_campaign_batches(campaign_id: str):
+        return [{"batch_id": "real-batch-data"}]
+
     @app.get("/mail/campaigns/{campaign_id}/channels")
     async def mail_campaign_channels_get(campaign_id: str):
         return ["mbx-1"]
@@ -740,6 +748,27 @@ def test_operator_can_inspect_campaign_review_and_enrollment_state(client, confi
 
     assert c.get("/mail/campaigns/c1/review", headers=_OPERATOR_HEADERS).status_code == 200
     assert c.get("/mail/campaigns/c1/enrollments", headers=_OPERATOR_HEADERS).status_code == 200
+
+
+def test_operator_can_read_workload_and_batches(client, configured_service_operator_token):
+    """Phase 2 (2026-09-03): the two new read-only routes added in Stage
+    2 -- workload/batch history are independent of lifecycle status, see
+    MailCampaignWorkload's own docstring."""
+    c, _svc = client
+
+    assert c.get("/mail/campaigns/c1/workload", headers=_OPERATOR_HEADERS).status_code == 200
+    assert c.get("/mail/campaigns/c1/batches", headers=_OPERATOR_HEADERS).status_code == 200
+
+
+def test_read_token_cannot_read_workload_or_batches(client, configured_service_read_token):
+    """Cross-scope isolation: the read token's scope is /crm/* only -- it
+    must not reach these two new /mail/* routes just because they're
+    read-only, same as every other /mail/* route it was already excluded
+    from."""
+    c, _svc = client
+
+    assert c.get("/mail/campaigns/c1/workload", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"}).status_code == 403
+    assert c.get("/mail/campaigns/c1/batches", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"}).status_code == 403
 
 
 # --- CANNOT: lifecycle transitions other than ready/unlock/activate/pause ---
