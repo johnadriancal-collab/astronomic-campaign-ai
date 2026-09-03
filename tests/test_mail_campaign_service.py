@@ -1903,3 +1903,87 @@ async def test_rejected_window_id_save_leaves_the_previous_schedule_untouched(se
     unchanged = await service.get_schedule(campaign.mail_campaign_id)
     assert len(unchanged.windows) == 1
     assert unchanged.windows[0].day_of_week == 0
+
+
+# --- actor attribution (Phase 2, admin/service OPERATOR token) -----------
+#
+# `actor` is purely additive -- every call site above this section omits
+# it and keeps getting actor=None (see the assertions below), matching
+# ActivityEvent.actor's own "always None today" docstring for every
+# caller except the ones explicitly tested here.
+
+
+async def test_create_campaign_actor_defaults_to_none(service, activity_log):
+    await service.create_campaign("Draft")
+
+    events = await activity_log.store.list()
+    created = next(e for e in events if e.event_type == "mail_campaign.created")
+    assert created.actor is None
+
+
+async def test_create_campaign_records_the_given_actor(service, activity_log):
+    await service.create_campaign("Draft", actor="claude_operator")
+
+    events = await activity_log.store.list()
+    created = next(e for e in events if e.event_type == "mail_campaign.created")
+    assert created.actor == "claude_operator"
+
+
+async def test_update_campaign_records_the_given_actor(service, activity_log):
+    campaign = await service.create_campaign("Draft")
+    await service.update_campaign(campaign.mail_campaign_id, {"name": "Renamed"}, actor="claude_operator")
+
+    events = await activity_log.store.list()
+    updated = next(e for e in events if e.event_type == "mail_campaign.updated")
+    assert updated.actor == "claude_operator"
+
+
+async def test_update_campaign_actor_defaults_to_none(service, activity_log):
+    campaign = await service.create_campaign("Draft")
+    await service.update_campaign(campaign.mail_campaign_id, {"name": "Renamed"})
+
+    events = await activity_log.store.list()
+    updated = next(e for e in events if e.event_type == "mail_campaign.updated")
+    assert updated.actor is None
+
+
+async def test_set_schedule_records_the_given_actor(service):
+    campaign = await service.create_campaign("Draft")
+    await service.set_schedule(
+        campaign.mail_campaign_id, "America/Chicago", [(None, 0, "09:00", "17:00")], actor="claude_operator"
+    )
+
+    events = [e for e in await service.activity_log.store.list() if e.event_type == "mail_campaign.schedule_updated"]
+    assert events[0].actor == "claude_operator"
+
+
+async def test_mark_ready_records_the_given_actor_on_both_emitted_events(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm, n_contacts=2)
+    await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set(), actor="claude_operator")
+
+    events = await service.activity_log.store.list()
+    ready_event = next(e for e in events if e.event_type == "mail_campaign.ready")
+    enrolled_event = next(e for e in events if e.event_type == "mail_enrollment.enrolled")
+    assert ready_event.actor == "claude_operator"
+    assert enrolled_event.actor == "claude_operator"
+
+
+async def test_mark_ready_actor_defaults_to_none(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm, n_contacts=1)
+    await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    events = await service.activity_log.store.list()
+    ready_event = next(e for e in events if e.event_type == "mail_campaign.ready")
+    assert ready_event.actor is None
+
+
+async def test_unlock_campaign_records_the_given_actor(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm, n_contacts=1)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.unlock_campaign(ready.mail_campaign_id, actor="claude_operator")
+
+    events = await service.activity_log.store.list()
+    unlocked_event = next(
+        e for e in events if e.event_type == "mail_campaign.updated" and "unlocked" in e.summary.lower()
+    )
+    assert unlocked_event.actor == "claude_operator"

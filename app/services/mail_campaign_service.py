@@ -405,7 +405,7 @@ class MailCampaignService:
 
     # --- Campaign CRUD -------------------------------------------------
 
-    async def create_campaign(self, name: str) -> MailCampaign:
+    async def create_campaign(self, name: str, actor: str | None = None) -> MailCampaign:
         now = datetime.now(timezone.utc)
         campaign = MailCampaign(
             mail_campaign_id=str(uuid.uuid4()), name=name, status=MailCampaignStatus.DRAFT, created_at=now, updated_at=now
@@ -419,6 +419,7 @@ class MailCampaignService:
             entity_type="mail_campaign",
             entity_id=campaign.mail_campaign_id,
             entity_name=campaign.name,
+            actor=actor,
         )
         return campaign
 
@@ -428,7 +429,7 @@ class MailCampaignService:
     async def list_campaigns(self) -> list[MailCampaign]:
         return await self.campaign_store.list()
 
-    async def update_campaign(self, mail_campaign_id: str, patch: dict[str, Any]) -> MailCampaign:
+    async def update_campaign(self, mail_campaign_id: str, patch: dict[str, Any], actor: str | None = None) -> MailCampaign:
         """
         DRAFT-only (see MailCampaignNotEditableError). Unknown/disallowed
         patch keys (including `status` -- status only ever changes via
@@ -529,6 +530,7 @@ class MailCampaignService:
             entity_type="mail_campaign",
             entity_id=updated.mail_campaign_id,
             entity_name=updated.name,
+            actor=actor,
         )
         return updated
 
@@ -805,7 +807,11 @@ class MailCampaignService:
         )
 
     async def set_schedule(
-        self, mail_campaign_id: str, timezone_name: str, windows: list[tuple[str | None, int, str, str]]
+        self,
+        mail_campaign_id: str,
+        timezone_name: str,
+        windows: list[tuple[str | None, int, str, str]],
+        actor: str | None = None,
     ) -> MailCampaignSchedule:
         """Atomically replaces the campaign's ENTIRE schedule (timezone +
         every send window) -- not an incremental add/remove, matching the
@@ -911,6 +917,7 @@ class MailCampaignService:
             entity_type="mail_campaign",
             entity_id=mail_campaign_id,
             entity_name=updated_campaign.name,
+            actor=actor,
         )
 
         return MailCampaignSchedule(
@@ -919,7 +926,9 @@ class MailCampaignService:
 
     # --- State transitions -------------------------------------------------
 
-    async def mark_ready(self, mail_campaign_id: str, suppressed_emails: set[str]) -> MailCampaign:
+    async def mark_ready(
+        self, mail_campaign_id: str, suppressed_emails: set[str], actor: str | None = None
+    ) -> MailCampaign:
         """
         `suppressed_emails` is the CURRENT set of active-suppression
         normalized emails, supplied by the caller (the API layer, which
@@ -1044,6 +1053,7 @@ class MailCampaignService:
             entity_id=updated.mail_campaign_id,
             entity_name=updated.name,
             metadata={"enrolled": enrolled, "already_enrolled": already_enrolled, "suppressed_at_enrollment": suppressed_at_enrollment},
+            actor=actor,
         )
         if enrolled > 0:
             await self.activity_log.record(
@@ -1055,10 +1065,11 @@ class MailCampaignService:
                 entity_id=updated.mail_campaign_id,
                 entity_name=updated.name,
                 metadata={"enrolled": enrolled, "suppressed_at_enrollment": suppressed_at_enrollment},
+                actor=actor,
             )
         return updated
 
-    async def unlock_campaign(self, mail_campaign_id: str) -> MailCampaign:
+    async def unlock_campaign(self, mail_campaign_id: str, actor: str | None = None) -> MailCampaign:
         """READY -> DRAFT. Deletes every MailEnrollment AND MailEnrollmentStep
         row for this campaign FIRST (the snapshot -- and any execution rows
         that could only ever have been created from an ACTIVE campaign this
@@ -1089,6 +1100,7 @@ class MailCampaignService:
             entity_type="mail_campaign",
             entity_id=updated.mail_campaign_id,
             entity_name=updated.name,
+            actor=actor,
         )
         return updated
 

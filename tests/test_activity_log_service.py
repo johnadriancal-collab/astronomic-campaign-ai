@@ -32,7 +32,7 @@ async def test_record_persists_and_returns_the_event(service):
     )
     assert event is not None
     assert event.event_id
-    assert event.actor is None  # no auth system exists -- never invented
+    assert event.actor is None  # omitted here -- see test_record_with_an_explicit_actor below
 
     page = await service.list_events()
     assert page.total == 1
@@ -123,3 +123,22 @@ async def test_record_never_raises_when_the_store_write_fails():
 async def test_metadata_defaults_to_empty_dict(service):
     event = await service.record("a", ActivityCategory.CONTACTS, ActivitySource.MANUAL_CRM, "no metadata passed")
     assert event.metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_record_with_an_explicit_actor(service):
+    """`actor` (Phase 2, admin/service OPERATOR token) -- WHO, distinct
+    from `source` (WHERE). Populated only by the specific mail-campaign/
+    CRM-list mutation call sites reachable by that token; every other
+    caller keeps getting the default None (see the test above)."""
+    event = await service.record(
+        "mail_campaign.created",
+        ActivityCategory.MAIL,
+        ActivitySource.MAIL_SYSTEM,
+        "Mail Campaign was created.",
+        actor="claude_operator",
+    )
+    assert event.actor == "claude_operator"
+
+    page = await service.list_events()
+    assert page.items[0].actor == "claude_operator"

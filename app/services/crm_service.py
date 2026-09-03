@@ -551,7 +551,9 @@ class CrmService:
             for contact_list in lists
         ]
 
-    async def create_contact_list(self, name: str, description: str | None = None) -> CrmContactListSummary:
+    async def create_contact_list(
+        self, name: str, description: str | None = None, actor: str | None = None
+    ) -> CrmContactListSummary:
         now = datetime.now(timezone.utc)
         contact_list = CrmContactList(
             list_id=str(uuid.uuid4()), name=name, description=description, created_at=now, updated_at=now
@@ -565,6 +567,7 @@ class CrmService:
             entity_type="list",
             entity_id=contact_list.list_id,
             entity_name=contact_list.name,
+            actor=actor,
         )
         return CrmContactListSummary(**contact_list.model_dump(), contact_count=0)
 
@@ -573,7 +576,9 @@ class CrmService:
         counts = await self.list_member_store.count_by_list()
         return CrmContactListSummary(**contact_list.model_dump(), contact_count=counts.get(list_id, 0))
 
-    async def update_contact_list(self, list_id: str, patch: dict[str, Any]) -> CrmContactListSummary:
+    async def update_contact_list(
+        self, list_id: str, patch: dict[str, Any], actor: str | None = None
+    ) -> CrmContactListSummary:
         """Rename/description edit only -- `list_id`/`created_at` are never
         accepted from a patch even if present in the body (model_copy below
         only ever applies name/description/updated_at)."""
@@ -596,6 +601,7 @@ class CrmService:
             entity_id=updated.list_id,
             entity_name=updated.name,
             metadata={"renamed": renamed},
+            actor=actor,
         )
         counts = await self.list_member_store.count_by_list()
         return CrmContactListSummary(**updated.model_dump(), contact_count=counts.get(list_id, 0))
@@ -640,7 +646,9 @@ class CrmService:
         items = matching[start : start + page_size]
         return CrmContactPage(items=items, total=total, page=page, page_size=page_size)
 
-    async def bulk_add_to_list(self, list_id: str, contact_ids: list[str]) -> CrmListBulkAddResult:
+    async def bulk_add_to_list(
+        self, list_id: str, contact_ids: list[str], actor: str | None = None
+    ) -> CrmListBulkAddResult:
         """Reports added/already_member/not_found rather than raising on any of
         those -- a bulk action against hundreds or thousands of ids should never
         hard-fail the whole request over one bad id or one repeat. `not_found`
@@ -675,10 +683,13 @@ class CrmService:
                 entity_id=list_id,
                 entity_name=contact_list.name,
                 metadata={"added": added, "already_member": already_member, "not_found": not_found},
+                actor=actor,
             )
         return CrmListBulkAddResult(added=added, already_member=already_member, not_found=not_found)
 
-    async def bulk_remove_from_list(self, list_id: str, contact_ids: list[str]) -> CrmListBulkRemoveResult:
+    async def bulk_remove_from_list(
+        self, list_id: str, contact_ids: list[str], actor: str | None = None
+    ) -> CrmListBulkRemoveResult:
         contact_list = await self._require_contact_list(list_id)
         removed = 0
         for contact_id in dict.fromkeys(contact_ids):
@@ -694,6 +705,7 @@ class CrmService:
                 entity_id=list_id,
                 entity_name=contact_list.name,
                 metadata={"removed": removed},
+                actor=actor,
             )
         return CrmListBulkRemoveResult(removed=removed)
 

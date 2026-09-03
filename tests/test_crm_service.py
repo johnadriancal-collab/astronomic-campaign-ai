@@ -1302,3 +1302,95 @@ async def test_logging_does_not_change_list_membership_state(service):
     await service.activity_log.list_events()
     after = await service.get_contact_list(contact_list.list_id)
     assert before.contact_count == after.contact_count == 1
+
+
+# --- actor attribution (Phase 2, admin/service OPERATOR token) -----------
+#
+# `actor` is purely additive -- every list-mutation call site above this
+# section omits it and keeps getting actor=None, matching every existing
+# assertion in this file (none of them checks `.actor`, and none needs to
+# change now that the parameter exists).
+
+
+@pytest.mark.asyncio
+async def test_create_contact_list_actor_defaults_to_none(service):
+    await service.create_contact_list(name="List")
+
+    events = await service.activity_log.store.list()
+    created = next(e for e in events if e.event_type == "list.created")
+    assert created.actor is None
+
+
+@pytest.mark.asyncio
+async def test_create_contact_list_records_the_given_actor(service):
+    await service.create_contact_list(name="List", actor="claude_operator")
+
+    events = await service.activity_log.store.list()
+    created = next(e for e in events if e.event_type == "list.created")
+    assert created.actor == "claude_operator"
+
+
+@pytest.mark.asyncio
+async def test_update_contact_list_records_the_given_actor(service):
+    contact_list = await service.create_contact_list(name="List")
+    await service.update_contact_list(contact_list.list_id, {"name": "Renamed"}, actor="claude_operator")
+
+    events = await service.activity_log.store.list()
+    updated = next(e for e in events if e.event_type == "list.updated")
+    assert updated.actor == "claude_operator"
+
+
+@pytest.mark.asyncio
+async def test_update_contact_list_actor_defaults_to_none(service):
+    contact_list = await service.create_contact_list(name="List")
+    await service.update_contact_list(contact_list.list_id, {"name": "Renamed"})
+
+    events = await service.activity_log.store.list()
+    updated = next(e for e in events if e.event_type == "list.updated")
+    assert updated.actor is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_to_list_records_the_given_actor(service):
+    contact_list = await service.create_contact_list(name="List")
+    contact = await service.create_contact({"first_name": "Solo"})
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id], actor="claude_operator")
+
+    events = await service.activity_log.store.list()
+    added = next(e for e in events if e.event_type == "list.contacts_added")
+    assert added.actor == "claude_operator"
+
+
+@pytest.mark.asyncio
+async def test_bulk_add_to_list_actor_defaults_to_none(service):
+    contact_list = await service.create_contact_list(name="List")
+    contact = await service.create_contact({"first_name": "Solo"})
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+
+    events = await service.activity_log.store.list()
+    added = next(e for e in events if e.event_type == "list.contacts_added")
+    assert added.actor is None
+
+
+@pytest.mark.asyncio
+async def test_bulk_remove_from_list_records_the_given_actor(service):
+    contact_list = await service.create_contact_list(name="List")
+    contact = await service.create_contact({"first_name": "Solo"})
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+    await service.bulk_remove_from_list(contact_list.list_id, [contact.crm_contact_id], actor="claude_operator")
+
+    events = await service.activity_log.store.list()
+    removed = next(e for e in events if e.event_type == "list.contacts_removed")
+    assert removed.actor == "claude_operator"
+
+
+@pytest.mark.asyncio
+async def test_bulk_remove_from_list_actor_defaults_to_none(service):
+    contact_list = await service.create_contact_list(name="List")
+    contact = await service.create_contact({"first_name": "Solo"})
+    await service.bulk_add_to_list(contact_list.list_id, [contact.crm_contact_id])
+    await service.bulk_remove_from_list(contact_list.list_id, [contact.crm_contact_id])
+
+    events = await service.activity_log.store.list()
+    removed = next(e for e in events if e.event_type == "list.contacts_removed")
+    assert removed.actor is None

@@ -105,14 +105,88 @@ investigation (e.g. the duplicate-contact work this feature was built
 for) needs -- excluding it would defeat the point of this token.
 
 Logging: exactly one INFO line per service-token decision (allowed or
-rejected), identifying it as "service_read" with method/path/outcome --
-never the token itself, never a request/response body. See
-_log_service_read_decision below; tests/test_admin_service_auth.py
-structurally asserts no logger call in this file can ever interpolate
-the token or the raw Authorization header.
+rejected), identifying it as "service_read"/"service_operator" with
+method/path/outcome -- never the token itself, never a request/response
+body. See _log_service_read_decision/_log_service_operator_decision
+below; tests/test_admin_service_auth.py structurally asserts no logger
+call in this file can ever interpolate the token or the raw Authorization
+header.
+
+--- Admin/service OPERATOR token (Phase 2, 2026-09-03) -------------------
+
+A SECOND service identity, alongside (never instead of) the read-only one
+above -- same "Authorization header present -> commits to this auth mode,
+never falls through to the cookie check" discipline, a SEPARATE secret
+(ADMIN_SERVICE_OPERATOR_TOKEN, never compared against or derived from the
+read token), and its OWN explicit method+path allowlist, narrower and
+shaped differently from the read token's simple "/crm/* GET" prefix rule
+since this identity can mutate.
+
+Built for a trusted automation identity (not a browser, no Hub session
+cookie, never the operator's own personal password, never a second human
+Hub login) to prepare Astronomic Mail campaigns end-to-end without a human
+manually running authenticated API calls for it -- see the approved scope
+below. Deliberately does NOT attempt real multi-user auth/roles -- this
+app has exactly one shared human Hub account (see AuthService's own
+docstring for why that's a deliberate boundary, not a gap); this is a
+second, narrowly-scoped, independently-revocable credential for automation
+only, matching the read token's precedent rather than building on top of
+the human login path.
+
+Scope -- an explicit ALLOWLIST of (method, path) rules (see
+_SERVICE_OPERATOR_RULES below), covering exactly:
+  - Mail campaigns: create, read, edit (PATCH -- already restricted by
+    MailCampaignService.update_campaign()'s own field allowlist, which
+    silently drops `status` among other keys, so this can never be used to
+    activate/pause/resume/archive a campaign by itself), sequence steps
+    (create/edit/delete/reorder), schedule (read/replace), channel
+    selection (read/replace -- selecting an ALREADY-connected mailbox by
+    id only; never anything under /mailboxes/{id}/... OAuth), Mark Ready,
+    Unlock (READY -> DRAFT), and the review/enrollments/channels/schedule/
+    steps reads needed to verify that state.
+  - Mailboxes: the bare GET /mailboxes list ONLY (to pick a mailbox id for
+    channel selection) -- never mailbox OAuth connect/disconnect.
+  - CRM contact lists: create/edit a list and add/remove its membership --
+    the audience mechanism a campaign's `source_list_id` points at (see
+    MailCampaignService.mark_ready()) -- never whole-list deletion (not
+    requested), never any CRM CONTACT record write (PATCH/DELETE
+    /crm/contacts/*), never custom-field or Luma-mapping writes, never
+    /crm/backup* or /crm/import* (those stay exclusive to a human session
+    or the read-only token's own read-only exclusion list).
+Explicitly, deliberately EXCLUDED, full stop, regardless of any future
+addition to the allow-rules above without a fresh explicit review:
+  - POST .../activate, /pause, /resume, /archive (every campaign lifecycle
+    transition other than Ready/Unlock)
+  - everything under /mail/suppressions* and /mail/execution/*
+  - everything under /mailboxes/* except the bare GET list
+  - /crm/contacts/* writes, /crm/custom-fields*, /crm/backup*, /crm/import*
+  - any auth/session/admin-configuration surface, and the
+    MAIL_SENDING_ENGINE_ENABLED/allowlist Railway variables (no HTTP route
+    controls these at all today, and none should be added to this
+    identity's scope if one ever exists).
+
+Deliberately NOT over-engineered for Phase 2's upcoming persistent-
+campaign/Batch 2+ work -- this allowlist covers exactly today's
+one-source-list/Mark Ready model. When a dedicated Add Prospects/batch
+endpoint exists, ITS route gets added here explicitly; this token grants
+nothing preemptively.
+
+Attribution: campaign/list-mutation activity-log events already emitted
+by the relevant MailCampaignService/CrmService methods now accept an
+`actor` argument (ActivityEvent.actor, previously always None -- see that
+field's own docstring: "exists purely so a real identity can be attached
+later"). The API routes reachable by this token pass
+`actor="claude_operator"` when `request.state.identity == "service_operator"`,
+and `actor=None` (byte-identical to before this feature) for every other
+caller (an ordinary Hub session, or any route this token cannot reach in
+the first place) -- see each route handler in app/api/mail.py/crm.py.
+Nothing here rewrites or backfills any historical ActivityEvent row, and
+no new read-only event type is introduced -- only the existing mutation
+events gain an actor label.
 """
 
 import hmac
+import re
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -166,25 +240,122 @@ def _is_in_service_read_scope(request: Request) -> bool:
     return request.method in _SERVICE_READ_ALLOWED_METHODS and path.startswith(_SERVICE_READ_ALLOWED_PATH_PREFIX)
 
 
-async def _enforce_service_read_token(request: Request, authorization: str) -> JSONResponse | None:
-    """Returns a JSONResponse to short-circuit the request, or None to
-    allow it through -- the ONLY two outcomes; there is no path back to
-    the cookie check from here (see module docstring)."""
-    if not settings.admin_service_read_token:
+# One path segment -- deliberately permissive about the id's own shape
+# (this app's real ids are UUIDs, but nothing here should depend on that
+# happening to remain true), matching the read-scope check's own
+# "structure, not id format" philosophy above. Never matches across a "/",
+# so it can't accidentally swallow a deeper path segment.
+_ID_SEGMENT = r"[^/]+"
+
+# The full, explicit operator allowlist -- see the module docstring's
+# "Scope" section for the reasoning behind every line and every
+# deliberate omission. A (method, compiled fullmatch pattern) pair; a
+# request is in scope only if BOTH match some entry here. This is a pure
+# allowlist: anything not listed is denied by omission, with no separate
+# exclusion list needed (unlike the read scope's backup/import carve-out,
+# which exists only because that scope is otherwise a broad prefix).
+_SERVICE_OPERATOR_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
+    (method, re.compile(pattern))
+    for method, pattern in (
+        # Mail campaigns -- create/read/edit, Mark Ready, Unlock. NOT
+        # activate/pause/resume/archive (no rule below matches those
+        # paths at all).
+        ("GET", r"^/mail/campaigns$"),
+        ("POST", r"^/mail/campaigns$"),
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}$"),
+        ("PATCH", rf"^/mail/campaigns/{_ID_SEGMENT}$"),
+        ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/ready$"),
+        ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/unlock$"),
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/review$"),
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/enrollments$"),
+        # Channels -- selecting an already-connected mailbox by id only.
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/channels$"),
+        ("PUT", rf"^/mail/campaigns/{_ID_SEGMENT}/channels$"),
+        # Schedule.
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/schedule$"),
+        ("PUT", rf"^/mail/campaigns/{_ID_SEGMENT}/schedule$"),
+        # Sequence steps.
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/steps$"),
+        ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/steps$"),
+        ("PATCH", rf"^/mail/campaigns/{_ID_SEGMENT}/steps/{_ID_SEGMENT}$"),
+        ("DELETE", rf"^/mail/campaigns/{_ID_SEGMENT}/steps/{_ID_SEGMENT}$"),
+        ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/steps/reorder$"),
+        # Mailboxes -- the bare list only, to pick an id for Channels.
+        # Deliberately excludes every /mailboxes/{id}/... OAuth path (a
+        # different, longer path shape this rule's exact "$" anchor
+        # cannot match) and /mailboxes/google/* (also a different path).
+        ("GET", r"^/mailboxes$"),
+        # CRM contact lists -- audience/list membership management only.
+        # No rule for GET (already reachable via the separate read-only
+        # token's broader /crm/* scope) and no rule for DELETE
+        # /crm/lists/{id} (whole-list deletion -- not requested).
+        ("POST", r"^/crm/lists$"),
+        ("PATCH", rf"^/crm/lists/{_ID_SEGMENT}$"),
+        ("POST", rf"^/crm/lists/{_ID_SEGMENT}/contacts/bulk-add$"),
+        ("POST", rf"^/crm/lists/{_ID_SEGMENT}/contacts/bulk-remove$"),
+        ("DELETE", rf"^/crm/lists/{_ID_SEGMENT}/contacts/{_ID_SEGMENT}$"),
+    )
+)
+
+
+def _log_service_operator_decision(request: Request, outcome: str) -> None:
+    """Same non-leaking contract as _log_service_read_decision above."""
+    logger.info(f"service_operator {outcome}: {request.method} {request.url.path}")
+
+
+def _log_unrecognized_service_token(request: Request, outcome: str) -> None:
+    """Used only when a presented token matches NEITHER configured
+    identity -- deliberately not attributed to either "service_read" or
+    "service_operator" since which one (if either) was actually intended
+    is unknown. Same non-leaking contract as the two functions above."""
+    logger.info(f"service_token {outcome}: {request.method} {request.url.path}")
+
+
+def _is_in_service_operator_scope(request: Request) -> bool:
+    path = request.url.path
+    return any(request.method == method and pattern.fullmatch(path) for method, pattern in _SERVICE_OPERATOR_RULES)
+
+
+async def _enforce_service_token(request: Request, authorization: str) -> JSONResponse | None:
+    """Dispatches to whichever service identity's secret the presented
+    token actually matches -- checked in a fixed order (read, then
+    operator; irrelevant in practice since the two secrets are
+    independently random and can never collide). Returns a JSONResponse
+    to short-circuit the request, or None to allow it through -- the ONLY
+    two outcomes; there is no path back to the cookie check from here
+    (see module docstring). 503 only when NEITHER identity has a token
+    configured at all (an operator/deployment gap); 401 for a malformed
+    header or a token that matches no configured identity; 403 for a
+    valid, recognized token used outside ITS OWN scope."""
+    read_token = settings.admin_service_read_token
+    operator_token = settings.admin_service_operator_token
+    if not read_token and not operator_token:
         return JSONResponse(status_code=503, content={"detail": "Service authentication is not configured."})
     if not authorization.startswith("Bearer "):
-        _log_service_read_decision(request, "rejected (malformed header)")
+        _log_unrecognized_service_token(request, "rejected (malformed header)")
         return JSONResponse(status_code=401, content={"detail": "Invalid Authorization header."})
     token = authorization.removeprefix("Bearer ").strip()
-    if not hmac.compare_digest(token, settings.admin_service_read_token):
-        _log_service_read_decision(request, "rejected (invalid token)")
-        return JSONResponse(status_code=401, content={"detail": "Invalid token."})
-    if not _is_in_service_read_scope(request):
-        _log_service_read_decision(request, "rejected (out of scope)")
-        return JSONResponse(status_code=403, content={"detail": "Service read token is not permitted for this request."})
-    request.state.identity = "service_read"
-    _log_service_read_decision(request, "allowed")
-    return None
+
+    if read_token and hmac.compare_digest(token, read_token):
+        if not _is_in_service_read_scope(request):
+            _log_service_read_decision(request, "rejected (out of scope)")
+            return JSONResponse(status_code=403, content={"detail": "Service read token is not permitted for this request."})
+        request.state.identity = "service_read"
+        _log_service_read_decision(request, "allowed")
+        return None
+
+    if operator_token and hmac.compare_digest(token, operator_token):
+        if not _is_in_service_operator_scope(request):
+            _log_service_operator_decision(request, "rejected (out of scope)")
+            return JSONResponse(
+                status_code=403, content={"detail": "Service operator token is not permitted for this request."}
+            )
+        request.state.identity = "service_operator"
+        _log_service_operator_decision(request, "allowed")
+        return None
+
+    _log_unrecognized_service_token(request, "rejected (invalid token)")
+    return JSONResponse(status_code=401, content={"detail": "Invalid token."})
 
 
 async def enforce_session_auth(request: Request, call_next):
@@ -193,7 +364,7 @@ async def enforce_session_auth(request: Request, call_next):
 
     authorization = request.headers.get("authorization")
     if authorization is not None:
-        rejection = await _enforce_service_read_token(request, authorization)
+        rejection = await _enforce_service_token(request, authorization)
         if rejection is not None:
             return rejection
         return await call_next(request)

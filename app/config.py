@@ -81,6 +81,26 @@ class Settings(BaseSettings):
     # explicit contact/list-only allowlist a future write token would need.
     admin_service_read_token: str | None = None
 
+    # Admin/service OPERATOR token (Phase 2, 2026-09-03) -- see
+    # app/session_auth_middleware.py's own docstring for the full flow and
+    # the exact explicit route allowlist. A SEPARATE credential from
+    # admin_service_read_token above -- distinct secret, distinct scope,
+    # distinct request.state.identity ("service_operator" vs
+    # "service_read"), never derived from or compared against the read
+    # token. Lets a trusted automation identity (not a browser, no Hub
+    # session cookie, never the operator's own personal password) perform
+    # a narrow, explicitly allow-listed set of Astronomic Mail
+    # campaign-preparation writes (create/edit a DRAFT campaign, manage its
+    # steps/schedule/channel selection, manage CRM list membership for its
+    # audience, Mark Ready, Unlock) plus the handful of reads needed to
+    # verify that state -- never campaign activation, pause/resume,
+    # archive, mail sending/execution administration, suppression
+    # mutations, mailbox OAuth connect/disconnect, CRM contact writes,
+    # custom-field/Luma-mapping writes, or the backup/import raw-data
+    # surfaces. Same "None until deliberately configured, clear 503 rather
+    # than crashing" precedent as every other token above.
+    admin_service_operator_token: str | None = None
+
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection) -- see
     # app/integrations/google_oauth_client.py and app/services/mailbox_service.py.
     # ALL five are None until deliberately configured; every route that needs

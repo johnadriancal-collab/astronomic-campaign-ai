@@ -32,7 +32,7 @@ directly (no /send, /queue, /dispatch, /worker/run).
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from app.dependencies import get_mail_campaign_service, get_mail_sending_service, get_mail_suppression_service
@@ -81,6 +81,18 @@ from app.services.mail_suppression_service import (
 router = APIRouter(prefix="/mail", tags=["mail"])
 
 
+def _operator_actor(request: Request) -> str | None:
+    """"claude_operator" when this request was authenticated via the
+    admin/service OPERATOR token (app/session_auth_middleware.py sets
+    request.state.identity == "service_operator" for exactly that case);
+    None (byte-identical to before this feature existed) for an ordinary
+    Hub session or any other identity. Passed through to the relevant
+    MailCampaignService method's `actor` argument so the resulting
+    Activity Log entry is attributable -- see that middleware module's
+    own "Attribution" docstring section."""
+    return "claude_operator" if getattr(request.state, "identity", None) == "service_operator" else None
+
+
 # --- Campaigns -----------------------------------------------------------
 
 
@@ -112,7 +124,7 @@ async def list_campaigns(service: MailCampaignService = Depends(get_mail_campaig
 
 @router.post("/campaigns", response_model=MailCampaign)
 async def create_campaign(
-    payload: MailCampaignCreateRequest, service: MailCampaignService = Depends(get_mail_campaign_service)
+    payload: MailCampaignCreateRequest, request: Request, service: MailCampaignService = Depends(get_mail_campaign_service)
 ):
     """
     Two existing service calls composed at this route only (create_campaign()
@@ -123,12 +135,13 @@ async def create_campaign(
     of it here. If no optional field was provided, the second call is
     skipped entirely and behavior is byte-identical to before this phase.
     """
-    campaign = await service.create_campaign(payload.name)
+    actor = _operator_actor(request)
+    campaign = await service.create_campaign(payload.name, actor=actor)
     patch = payload.model_dump(exclude={"name"}, exclude_none=True)
     if not patch:
         return campaign
     try:
-        return await service.update_campaign(campaign.mail_campaign_id, patch)
+        return await service.update_campaign(campaign.mail_campaign_id, patch, actor=actor)
     except MailScheduleValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
@@ -146,11 +159,12 @@ async def get_campaign(mail_campaign_id: str, service: MailCampaignService = Dep
 @router.patch("/campaigns/{mail_campaign_id}", response_model=MailCampaign)
 async def update_campaign(
     mail_campaign_id: str,
+    request: Request,
     patch: dict[str, Any] = Body(...),
     service: MailCampaignService = Depends(get_mail_campaign_service),
 ):
     try:
-        return await service.update_campaign(mail_campaign_id, patch)
+        return await service.update_campaign(mail_campaign_id, patch, actor=_operator_actor(request))
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except MailCampaignNotEditableError as e:
@@ -168,6 +182,7 @@ async def update_campaign(
 @router.post("/campaigns/{mail_campaign_id}/ready", response_model=MailCampaign)
 async def mark_campaign_ready(
     mail_campaign_id: str,
+    request: Request,
     campaign_service: MailCampaignService = Depends(get_mail_campaign_service),
     suppression_service: MailSuppressionService = Depends(get_mail_suppression_service),
 ):
@@ -176,7 +191,7 @@ async def mark_campaign_ready(
     what's checked and why this is the one place snapshotting happens."""
     try:
         suppressed = await suppression_service.list_active_suppressed_emails()
-        return await campaign_service.mark_ready(mail_campaign_id, suppressed)
+        return await campaign_service.mark_ready(mail_campaign_id, suppressed, actor=_operator_actor(request))
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except MailCampaignInvalidTransitionError as e:
@@ -186,11 +201,13 @@ async def mark_campaign_ready(
 
 
 @router.post("/campaigns/{mail_campaign_id}/unlock", response_model=MailCampaign)
-async def unlock_campaign(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+async def unlock_campaign(
+    mail_campaign_id: str, request: Request, service: MailCampaignService = Depends(get_mail_campaign_service)
+):
     """READY -> DRAFT. Deletes the (now-stale) enrollment snapshot -- see
     MailCampaignService.unlock_campaign()."""
     try:
-        return await service.unlock_campaign(mail_campaign_id)
+        return await service.unlock_campaign(mail_campaign_id, actor=_operator_actor(request))
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except MailCampaignInvalidTransitionError as e:
@@ -364,6 +381,7 @@ async def get_campaign_schedule(mail_campaign_id: str, service: MailCampaignServ
 async def set_campaign_schedule(
     mail_campaign_id: str,
     payload: MailCampaignScheduleUpdateRequest,
+    request: Request,
     service: MailCampaignService = Depends(get_mail_campaign_service),
 ):
     """Atomically replaces the campaign's full schedule (timezone + every
@@ -378,6 +396,7 @@ async def set_campaign_schedule(
             mail_campaign_id,
             payload.timezone,
             [(w.window_id, w.day_of_week, w.start_time, w.end_time) for w in payload.windows],
+            actor=_operator_actor(request),
         )
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))

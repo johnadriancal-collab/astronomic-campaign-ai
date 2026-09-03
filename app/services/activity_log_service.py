@@ -47,17 +47,29 @@ class ActivityLogService:
         entity_id: str | None = None,
         entity_name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        actor: str | None = None,
     ) -> ActivityEvent | None:
         """Returns the persisted event, or None if the write itself failed --
         callers should never branch on this return value for anything other
         than tests; the primary action this is called after has already
-        succeeded regardless of what happens here."""
+        succeeded regardless of what happens here.
+
+        `actor` (Phase 2, 2026-09-03): WHO performed the action, distinct
+        from `source` (WHERE it originated -- see ActivitySource's own
+        docstring). Every existing call site omits this (stays None,
+        byte-identical to before this parameter existed) -- it is
+        populated only by the handful of Astronomic Mail campaign/CRM-list
+        mutation routes reachable by the admin/service OPERATOR token (see
+        app/session_auth_middleware.py), which pass `actor="claude_operator"`
+        so those actions are visibly distinguishable from an ordinary Hub
+        session's identical action in the Activity Log."""
         event = ActivityEvent(
             event_id=str(uuid.uuid4()),
             event_type=event_type,
             category=category,
             created_at=datetime.now(timezone.utc),
             source=source,
+            actor=actor,
             entity_type=entity_type,
             entity_id=entity_id,
             entity_name=entity_name,

@@ -7,7 +7,7 @@ or writes Campaign/Lead/CampaignLead/EmailSequence/EmailMessage.
 
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, UploadFile
 from loguru import logger
 from pydantic import BaseModel
 
@@ -45,6 +45,13 @@ from app.services.crm_service import (
 from app.services.luma_sync_service import LumaSyncService
 
 router = APIRouter(prefix="/crm", tags=["crm"])
+
+
+def _operator_actor(request: Request) -> str | None:
+    """Same convention as app/api/mail.py's _operator_actor -- see that
+    function's docstring and app/session_auth_middleware.py's own
+    "Attribution" docstring section."""
+    return "claude_operator" if getattr(request.state, "identity", None) == "service_operator" else None
 
 
 class CrmCustomFieldCreateRequest(BaseModel):
@@ -225,8 +232,8 @@ async def list_contact_lists(service: CrmService = Depends(get_crm_service)):
 
 
 @router.post("/lists", response_model=CrmContactListSummary)
-async def create_contact_list(req: CrmListCreateRequest, service: CrmService = Depends(get_crm_service)):
-    return await service.create_contact_list(name=req.name, description=req.description)
+async def create_contact_list(req: CrmListCreateRequest, request: Request, service: CrmService = Depends(get_crm_service)):
+    return await service.create_contact_list(name=req.name, description=req.description, actor=_operator_actor(request))
 
 
 @router.get("/lists/{list_id}", response_model=CrmContactListSummary)
@@ -239,12 +246,12 @@ async def get_contact_list(list_id: str, service: CrmService = Depends(get_crm_s
 
 @router.patch("/lists/{list_id}", response_model=CrmContactListSummary)
 async def update_contact_list(
-    list_id: str, patch: dict[str, Any] = Body(...), service: CrmService = Depends(get_crm_service)
+    list_id: str, request: Request, patch: dict[str, Any] = Body(...), service: CrmService = Depends(get_crm_service)
 ):
     """Rename and/or edit the description. See CrmService.update_contact_list --
     any other key in the body (e.g. list_id, created_at) is silently ignored."""
     try:
-        return await service.update_contact_list(list_id, patch)
+        return await service.update_contact_list(list_id, patch, actor=_operator_actor(request))
     except CrmContactListNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 
@@ -277,7 +284,7 @@ async def get_list_contacts(
 
 @router.post("/lists/{list_id}/contacts/bulk-add", response_model=CrmListBulkAddResult)
 async def bulk_add_to_list(
-    list_id: str, req: CrmListBulkContactIdsRequest, service: CrmService = Depends(get_crm_service)
+    list_id: str, req: CrmListBulkContactIdsRequest, request: Request, service: CrmService = Depends(get_crm_service)
 ):
     """The ONE call the frontend makes regardless of whether it's adding 1 contact
     or every contact currently selected (which may already be thousands, from
@@ -286,17 +293,17 @@ async def bulk_add_to_list(
     error; see CrmService.bulk_add_to_list for why the response reports counts
     instead of raising on a repeat or an unrecognized id."""
     try:
-        return await service.bulk_add_to_list(list_id, req.contact_ids)
+        return await service.bulk_add_to_list(list_id, req.contact_ids, actor=_operator_actor(request))
     except CrmContactListNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.post("/lists/{list_id}/contacts/bulk-remove", response_model=CrmListBulkRemoveResult)
 async def bulk_remove_from_list(
-    list_id: str, req: CrmListBulkContactIdsRequest, service: CrmService = Depends(get_crm_service)
+    list_id: str, req: CrmListBulkContactIdsRequest, request: Request, service: CrmService = Depends(get_crm_service)
 ):
     try:
-        return await service.bulk_remove_from_list(list_id, req.contact_ids)
+        return await service.bulk_remove_from_list(list_id, req.contact_ids, actor=_operator_actor(request))
     except CrmContactListNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 
