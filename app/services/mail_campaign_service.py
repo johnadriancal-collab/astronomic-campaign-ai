@@ -29,7 +29,7 @@ omission of a button.
 """
 
 import uuid
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any
 
 from app.config import settings
@@ -45,6 +45,10 @@ from app.models.mail import (
     MailCampaignWorkload,
     MailEnrollment,
     MailEnrollmentBatch,
+    MailEnrollmentBatchMember,
+    MailEnrollmentBatchMemberState,
+    MailEnrollmentBatchSource,
+    MailEnrollmentBatchStatus,
     MailEnrollmentStatus,
     MailScheduleSource,
     MailScheduleValidationError,
@@ -57,7 +61,12 @@ from app.models.mail import (
 from app.models.mailbox import Mailbox, MailboxStatus
 from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignNotFoundError, MailCampaignStore
-from app.repositories.mail_enrollment_batch_store import MailEnrollmentBatchStore
+from app.repositories.mail_enrollment_batch_member_store import MailEnrollmentBatchMemberStore
+from app.repositories.mail_enrollment_batch_store import (
+    DuplicateBatchIdempotencyKeyError,
+    MailEnrollmentBatchNotFoundError,
+    MailEnrollmentBatchStore,
+)
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
 from app.repositories.mail_send_window_store import MailSendWindowStore
@@ -66,6 +75,7 @@ from app.repositories.mail_sequence_step_store import (
     MailSequenceStepNotFoundError,
     MailSequenceStepStore,
 )
+from app.repositories.mail_suppression_store import MailSuppressionStore
 from app.repositories.mailbox_store import MailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CrmContactListNotFound, CrmService
@@ -109,6 +119,26 @@ class MailCampaignInvalidTransitionError(Exception):
         self.from_status = from_status
         self.action = action
         super().__init__(f"Cannot {action} MailCampaign {mail_campaign_id} from status {from_status.value}.")
+
+
+class MailCampaignNotEligibleForProspectsError(Exception):
+    """Raised by add_prospects() for DRAFT, READY, or ARCHIVED (the only
+    three statuses this operation refuses -- see that method's own
+    docstring for why ACTIVE/PAUSED/COMPLETED are each fine, COMPLETED
+    conditionally so). Deliberately its own exception rather than reusing
+    MailCampaignInvalidTransitionError -- add_prospects() isn't itself a
+    status TRANSITION (it may not change status at all, e.g. against an
+    already-ACTIVE campaign), so "cannot transition from X" would be a
+    misleading message for what's actually "not an eligible status for
+    this OPERATION."""
+
+    def __init__(self, mail_campaign_id: str, status: MailCampaignStatus):
+        self.mail_campaign_id = mail_campaign_id
+        self.status = status
+        super().__init__(
+            f"MailCampaign {mail_campaign_id} is {status.value} -- prospects can only be added to an "
+            "ACTIVE, PAUSED, or (legacy) COMPLETED campaign."
+        )
 
 
 class MailCampaignNotReadyError(Exception):
@@ -385,6 +415,8 @@ class MailCampaignService:
         enrollment_step_store: MailEnrollmentStepStore,
         sending_service: MailSendingService,
         batch_store: MailEnrollmentBatchStore,
+        batch_member_store: MailEnrollmentBatchMemberStore,
+        suppression_store: MailSuppressionStore,
     ):
         self.campaign_store = campaign_store
         self.step_store = step_store
@@ -397,6 +429,18 @@ class MailCampaignService:
         self.enrollment_step_store = enrollment_step_store
         self.sending_service = sending_service
         self.batch_store = batch_store
+        self.batch_member_store = batch_member_store
+        # Stage 3 (2026-09-03): a deliberate, narrow exception to this
+        # file's own "never depend on MailSuppressionService directly"
+        # precedent (see mark_ready()'s docstring, which instead takes a
+        # caller-supplied suppressed_emails snapshot) -- reconciliation
+        # (_reconcile_batch()) must be fully self-contained, since it can
+        # run from contexts with no live request/API layer to supply a
+        # fresh snapshot from (app startup, a periodic sweep). Uses the
+        # raw store directly, never MailSuppressionService, mirroring
+        # exactly how MailSendingService's own early/final suppression
+        # checks already do this (self.suppression_store.get(...)).
+        self.suppression_store = suppression_store
 
     async def _require_campaign(self, mail_campaign_id: str) -> MailCampaign:
         campaign = await self.campaign_store.get(mail_campaign_id)
@@ -1404,13 +1448,388 @@ class MailCampaignService:
 
     async def list_batches(self, mail_campaign_id: str) -> list[MailEnrollmentBatch]:
         """Every prospect batch ever added to this campaign via
-        add_prospects() (a later Phase 2 stage -- not implemented yet),
-        newest first. Empty for every campaign that predates that feature,
-        or that has simply never had a batch added -- see
-        MailEnrollmentBatch's own docstring on why that's valid, permanent
-        state, not a gap to backfill."""
+        add_prospects(), newest first. Empty for every campaign that
+        predates that feature, or that has simply never had a batch
+        added -- see MailEnrollmentBatch's own docstring on why that's
+        valid, permanent state, not a gap to backfill."""
         await self._require_campaign(mail_campaign_id)
         return await self.batch_store.list_for_campaign(mail_campaign_id)
+
+    async def add_prospects(
+        self,
+        mail_campaign_id: str,
+        source: MailEnrollmentBatchSource,
+        idempotency_key: str,
+        source_list_id: str | None = None,
+        actor: str | None = None,
+    ) -> MailEnrollmentBatch:
+        """The persistent-campaign entry point for growing an already-
+        prepared campaign's audience -- unlike mark_ready()'s one-time
+        snapshot, this is safe to call any number of times against an
+        ACTIVE or PAUSED campaign (new prospects queue behind whatever's
+        already there; nothing sends while PAUSED, via the existing
+        campaign.status==ACTIVE gate in prepare_and_send_step() -- no new
+        gating code needed), and against a legacy COMPLETED campaign,
+        where it can REOPEN it to ACTIVE -- but only as a side effect of
+        genuinely enrolling someone new (see _reconcile_batch()'s own
+        docstring for exactly when/how; a submission that turns out to
+        enroll nobody new leaves a COMPLETED campaign COMPLETED). Refuses
+        DRAFT/READY (use the audience+Mark Ready path instead) and
+        ARCHIVED (terminal) via MailCampaignNotEligibleForProspectsError.
+
+        Stage 3 implements source=CRM_LIST only -- CSV_UPLOAD raises
+        NotImplementedError (Stage 4).
+
+        OPERATION-LEVEL IDEMPOTENCY: `idempotency_key` is required and is
+        the ENTIRE mechanism preventing an HTTP retry (lost response,
+        network retry, accidental double-submit) from creating a second,
+        duplicate batch for the same logical submission -- see
+        MailEnrollmentBatchStore's UNIQUE(mail_campaign_id,
+        idempotency_key) constraint. If a batch already exists for this
+        exact (campaign, key) pair -- whether READY (returned unchanged,
+        nothing re-resolved/re-enrolled) or still PREPARING (reconciled
+        and returned, resuming from its already-frozen cohort, never
+        re-reading the CRM List) -- this call resolves to THAT batch,
+        full stop; the source is never re-resolved once a batch row for
+        this key exists.
+
+        THE FREEZE (only for a genuinely new (campaign, key) pair):
+        resolves the CRM List's CURRENT membership (a read; safe to
+        redo if this exact freeze attempt itself needs to restart -- see
+        below), dedupes it, and writes one MailEnrollmentBatchMember row
+        per candidate (state=CANDIDATE) BEFORE the owning
+        MailEnrollmentBatch row is ever created. This ordering is
+        deliberate: the batch row's existence is the ONLY durable signal
+        that "this cohort is frozen and committed" -- nothing before that
+        point has ever been returned to any caller or become visible via
+        GET .../batches, so a crash anywhere before the batch row commits
+        (0, some, or all member rows written) is safe to treat as "never
+        happened": a retry with the same idempotency_key finds no batch
+        row yet, restarts the ENTIRE freeze from scratch under a FRESH
+        batch_id, and the old orphaned member rows are cleaned up later by
+        cleanup_orphan_batch_members() (never revisited or reconciled --
+        nothing ever looks up member rows except through an owning batch
+        row). Once the batch row exists, this guarantee flips to strict
+        immutability: see _reconcile_batch().
+
+        CONCURRENT RACE (two genuinely simultaneous submissions with the
+        same key, not a crash): both may independently freeze their own
+        candidate cohorts before either commits its batch row; only one
+        `batch_store.create()` can win the UNIQUE(campaign_id,
+        idempotency_key) constraint. The loser catches
+        DuplicateBatchIdempotencyKeyError, looks up the winner via
+        get_by_idempotency_key(), and reconciles/returns THAT one --
+        never proceeding to create any enrollment under its own,
+        now-abandoned batch_id. Only the winner's cohort ever produces
+        real MailEnrollment rows.
+
+        IDEMPOTENCY LOOKUP RUNS BEFORE ELIGIBILITY (2026-09-03 refinement):
+        an existing `(campaign_id, idempotency_key)` match is ALWAYS
+        looked up and reconciled/returned FIRST, before this method even
+        checks the campaign's current status -- otherwise a campaign that
+        gets ARCHIVED after a submission was already accepted would make
+        every subsequent retry of that exact submission (a lost response,
+        a client retry) raise MailCampaignNotEligibleForProspectsError
+        instead of returning the batch that already exists, which would
+        make operation-level idempotency unreliable across an Archive.
+        This is safe specifically because _reconcile_batch() itself
+        already refuses to do anything beyond a pure read the moment the
+        owning campaign is ARCHIVED (see that method's own docstring) --
+        so an existing batch belonging to a since-ARCHIVED campaign is
+        simply returned as-is (whatever status it already reached),
+        never advanced, never creating new enrollment/step work, never
+        touching campaign status. The eligibility check below therefore
+        only ever gates a GENUINELY NEW submission (no existing batch for
+        this key) -- DRAFT/READY/ARCHIVED are still refused for that case,
+        exactly as before."""
+        campaign = await self._require_campaign(mail_campaign_id)
+
+        existing = await self.batch_store.get_by_idempotency_key(mail_campaign_id, idempotency_key)
+        if existing is not None:
+            return await self._reconcile_batch(existing.batch_id)
+
+        if campaign.status not in (MailCampaignStatus.ACTIVE, MailCampaignStatus.PAUSED, MailCampaignStatus.COMPLETED):
+            raise MailCampaignNotEligibleForProspectsError(mail_campaign_id, campaign.status)
+
+        if source != MailEnrollmentBatchSource.CRM_LIST:
+            raise NotImplementedError("add_prospects() only supports source=crm_list in Stage 3 -- CSV upload is Stage 4.")
+        if not source_list_id:
+            raise ValueError("source_list_id is required when source=crm_list.")
+
+        await self.crm_service.get_contact_list(source_list_id)  # raises CrmContactListNotFound if dangling
+        contacts = (
+            await self.crm_service.get_list_contacts(source_list_id, page=1, page_size=_ALL_CONTACTS_PAGE_SIZE)
+        ).items
+        # Same "usable email only" filter as mark_ready()'s own snapshot,
+        # and the same order-preserving in-batch dedupe convention as
+        # CrmService.bulk_add_to_list().
+        candidate_ids = list(dict.fromkeys(c.crm_contact_id for c in contacts if normalize_email(c.email)))
+
+        batch_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        for contact_id in candidate_ids:
+            await self.batch_member_store.create(
+                MailEnrollmentBatchMember(
+                    batch_id=batch_id,
+                    crm_contact_id=contact_id,
+                    state=MailEnrollmentBatchMemberState.CANDIDATE,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+
+        batch = MailEnrollmentBatch(
+            batch_id=batch_id,
+            mail_campaign_id=mail_campaign_id,
+            source=source,
+            source_list_id=source_list_id,
+            idempotency_key=idempotency_key,
+            status=MailEnrollmentBatchStatus.PREPARING,
+            created_at=now,
+            created_by_actor=actor,
+            submitted_count=len(candidate_ids),
+        )
+        try:
+            await self.batch_store.create(batch)
+        except DuplicateBatchIdempotencyKeyError:
+            winner = await self.batch_store.get_by_idempotency_key(mail_campaign_id, idempotency_key)
+            assert winner is not None  # the collision itself proves one exists
+            return await self._reconcile_batch(winner.batch_id)
+
+        return await self._reconcile_batch(batch_id)
+
+    async def _reconcile_batch(self, batch_id: str) -> MailEnrollmentBatch:
+        """Advances one batch as far as it can go RIGHT NOW, entirely from
+        durable state -- never from a caller-supplied snapshot of
+        anything (suppression, CRM list membership, or otherwise). Safe
+        to call any number of times, from any context: synchronously at
+        the end of add_prospects() (the common, no-crash case), from a
+        retry that found an existing PREPARING/READY batch, from
+        reconcile_all_preparing_batches()'s periodic/startup sweep -- all
+        four call shapes run this exact same function.
+
+        ARCHIVED campaigns: reconciliation refuses to create any new
+        executable work against one -- returns the batch completely
+        unchanged (even a still-PREPARING one) the moment the OWNING
+        campaign is found to be ARCHIVED. This can only happen if a
+        campaign was archived after a batch was submitted but before
+        reconciliation caught up; the batch is left exactly where it is
+        (a human decision, not something this method resolves on its
+        own).
+
+        For an already-READY batch: member processing (below) is skipped
+        entirely -- never redone, never re-verified. Only the campaign-
+        reopen check (last) is ALWAYS re-run, unconditionally, even for
+        an already-READY batch -- this is what correctly finishes a crash
+        that happened after READY was durably written but before the
+        legacy-COMPLETED-→ACTIVE flip landed (see the ordering note
+        below).
+
+        For a PREPARING batch, in order:
+          1. Every still-CANDIDATE member is resolved: a fresh suppression
+             check (self.suppression_store.get(), NEVER a caller-supplied
+             snapshot -- this is what makes reconciliation genuinely
+             self-contained across a periodic sweep or app startup, which
+             have no request-scoped suppression data to hand it) decides
+             SUPPRESSED vs PENDING for a brand-new MailEnrollment; the
+             existing PK-idempotent enrollment_store.create() decides
+             ALREADY_ENROLLED vs a genuinely new enrollment. A suppressed
+             new enrollment becomes ENROLLED_SUPPRESSED (terminal, no
+             Step 1 ever); a normal one becomes ENROLLED_PENDING.
+          2. Every ENROLLED_PENDING member gets its Step 1 materialized,
+             via the campaign's CURRENT schedule (freshly re-resolved,
+             exactly as activate_campaign() itself does -- never a stale
+             or batch-specific timing rule) and the exact same
+             MailSendingService.create_step1_execution() call
+             activate_campaign() uses -- then flips PENDING -> ACTIVE and
+             the member to PREPARED.
+          3. Completeness is verified by re-fetching every member fresh
+             (never trusting an in-memory accumulator) and confirming none
+             remain CANDIDATE or ENROLLED_PENDING. Incomplete -> return
+             the batch exactly as it was (still PREPARING); a later call
+             (retry, sweep) picks up wherever this one left off, since
+             every member's OWN state -- not "how far this call got" --
+             is what determines what's left to do.
+          4. Final counts are computed FRESH from durable member states at
+             this exact moment (never accumulated across however many
+             calls it took to get here) and written to the batch row
+             together with status=READY, in ONE save() call.
+
+        Campaign reopening happens ONLY after that READY write lands, and
+        ONLY if this batch's enrolled_count is genuinely > 0 -- so a
+        submission against a legacy COMPLETED campaign that turns out to
+        contain only already-enrolled contacts (enrolled_count == 0)
+        leaves that campaign COMPLETED, never flips it. If the process
+        crashes between the READY write and this flip, the batch is
+        already durably READY with its final counts -- a later
+        reconciliation call sees status==READY, skips straight past
+        member processing, and finishes only the one remaining, cheap,
+        idempotent write. ACTIVE/PAUSED campaigns are never touched by
+        this step at all (only campaign.status == COMPLETED triggers
+        it)."""
+        batch = await self.batch_store.get(batch_id)
+        if batch is None:
+            raise MailEnrollmentBatchNotFoundError(batch_id)
+
+        campaign = await self._require_campaign(batch.mail_campaign_id)
+        if campaign.status == MailCampaignStatus.ARCHIVED:
+            return batch
+
+        if batch.status != MailEnrollmentBatchStatus.READY:
+            members = await self.batch_member_store.list_for_batch(batch_id)
+
+            for member in members:
+                if member.state != MailEnrollmentBatchMemberState.CANDIDATE:
+                    continue
+                contact = await self.crm_service.get_contact(member.crm_contact_id)
+                normalized = normalize_email(contact.email)
+                suppression = await self.suppression_store.get(normalized) if normalized else None
+                is_suppressed = suppression is not None and suppression.active
+
+                now = datetime.now(timezone.utc)
+                enrollment = MailEnrollment(
+                    enrollment_id=str(uuid.uuid4()),
+                    mail_campaign_id=batch.mail_campaign_id,
+                    crm_contact_id=member.crm_contact_id,
+                    email_at_enrollment=contact.email,
+                    status=MailEnrollmentStatus.SUPPRESSED if is_suppressed else MailEnrollmentStatus.PENDING,
+                    enrolled_at=now,
+                    created_at=now,
+                    batch_id=batch_id,
+                )
+                is_new = await self.enrollment_store.create(enrollment)
+                if is_new:
+                    new_state = (
+                        MailEnrollmentBatchMemberState.ENROLLED_SUPPRESSED
+                        if is_suppressed
+                        else MailEnrollmentBatchMemberState.ENROLLED_PENDING
+                    )
+                    await self.batch_member_store.save(
+                        member.model_copy(update={"state": new_state, "enrollment_id": enrollment.enrollment_id, "updated_at": now})
+                    )
+                else:
+                    await self.batch_member_store.save(
+                        member.model_copy(update={"state": MailEnrollmentBatchMemberState.ALREADY_ENROLLED, "updated_at": now})
+                    )
+
+            members = await self.batch_member_store.list_for_batch(batch_id)
+            pending_members = [m for m in members if m.state == MailEnrollmentBatchMemberState.ENROLLED_PENDING]
+            if pending_members:
+                steps = await self.step_store.list_for_campaign(batch.mail_campaign_id)
+                step1 = next(s for s in steps if s.step_number == 1)  # guaranteed: this campaign was READY once
+                resolved_windows, _source = await self._resolve_schedule(batch.mail_campaign_id, campaign)
+                assert campaign.timezone is not None  # guaranteed by the same readiness check activation required
+                now = datetime.now(timezone.utc)
+                for member in pending_members:
+                    enrollment = await self.enrollment_store.get(member.enrollment_id)
+                    if enrollment is None:
+                        continue  # defensive only -- this member's own create() call above guarantees it exists
+                    await self.sending_service.create_step1_execution(
+                        enrollment=enrollment, step1=step1, windows=resolved_windows, timezone_name=campaign.timezone, now=now
+                    )
+                    await self.enrollment_store.save(enrollment.model_copy(update={"status": MailEnrollmentStatus.ACTIVE}))
+                    await self.batch_member_store.save(
+                        member.model_copy(update={"state": MailEnrollmentBatchMemberState.PREPARED, "updated_at": now})
+                    )
+
+            members = await self.batch_member_store.list_for_batch(batch_id)
+            incomplete = [
+                m
+                for m in members
+                if m.state in (MailEnrollmentBatchMemberState.CANDIDATE, MailEnrollmentBatchMemberState.ENROLLED_PENDING)
+            ]
+            if incomplete:
+                return batch  # still PREPARING -- a later call finishes it
+
+            enrolled_count = sum(
+                1
+                for m in members
+                if m.state in (MailEnrollmentBatchMemberState.ENROLLED_SUPPRESSED, MailEnrollmentBatchMemberState.PREPARED)
+            )
+            already_enrolled_count = sum(1 for m in members if m.state == MailEnrollmentBatchMemberState.ALREADY_ENROLLED)
+            suppressed_count = sum(1 for m in members if m.state == MailEnrollmentBatchMemberState.ENROLLED_SUPPRESSED)
+
+            batch = batch.model_copy(
+                update={
+                    "status": MailEnrollmentBatchStatus.READY,
+                    "enrolled_count": enrolled_count,
+                    "already_enrolled_count": already_enrolled_count,
+                    "suppressed_count": suppressed_count,
+                }
+            )
+            await self.batch_store.save(batch)
+
+        if batch.enrolled_count and batch.enrolled_count > 0 and campaign.status == MailCampaignStatus.COMPLETED:
+            now = datetime.now(timezone.utc)
+            reopened = campaign.model_copy(update={"status": MailCampaignStatus.ACTIVE, "updated_at": now})
+            await self.campaign_store.save(reopened)
+            await self.activity_log.record(
+                event_type="mail_campaign.activated",
+                category=ActivityCategory.MAIL,
+                source=ActivitySource.MAIL_SYSTEM,
+                summary=f'Mail Campaign "{reopened.name}" was reactivated (a prospect batch added {batch.enrolled_count} new lead{"s" if batch.enrolled_count != 1 else ""}).',
+                entity_type="mail_campaign",
+                entity_id=reopened.mail_campaign_id,
+                entity_name=reopened.name,
+                metadata={"activated": batch.enrolled_count},
+                actor=batch.created_by_actor,
+            )
+
+        return batch
+
+    async def reconcile_all_preparing_batches(self) -> int:
+        """The discovery half of the startup/periodic reconciliation
+        sweep (see app/services/mail_batch_reconciliation_worker.py) --
+        finds every batch, across ALL campaigns, currently PREPARING and
+        reconciles each one. This is what guarantees a PREPARING batch
+        can never be silently stranded forever even if no client ever
+        retries the original submission (e.g. a user closed their tab
+        after a lost response). Deliberately independent of
+        settings.mail_sending_engine_enabled -- this is pure campaign/
+        enrollment bookkeeping, never a Gmail/provider call. Returns how
+        many batches this call newly advanced to READY."""
+        preparing = await self.batch_store.list_by_status(MailEnrollmentBatchStatus.PREPARING)
+        newly_ready = 0
+        for batch in preparing:
+            result = await self._reconcile_batch(batch.batch_id)
+            if result.status == MailEnrollmentBatchStatus.READY:
+                newly_ready += 1
+        return newly_ready
+
+    async def cleanup_orphan_batch_members(
+        self, now: datetime, older_than: timedelta = timedelta(hours=1)
+    ) -> int:
+        """Deletes MailEnrollmentBatchMember rows whose batch_id has NO
+        corresponding MailEnrollmentBatch row at all -- the orphans left
+        behind by add_prospects() restarting a freeze from scratch under
+        a fresh batch_id after a crash (see that method's own docstring).
+        Deliberately narrow, not a general-purpose garbage collector:
+        only ever looks at this one specific orphan shape.
+
+        `older_than` (default 1 hour) is the conservative age threshold
+        that keeps this from ever racing an in-progress freeze -- a
+        member row younger than this is never even considered, no matter
+        how many of its sibling rows already exist, because a real
+        freeze in progress (writing member rows for a large CRM List) is
+        never expected to take anywhere close to this long. A batch row
+        for a truly in-progress or already-committed freeze is NEVER
+        deleted by this method, at any age -- only member rows with
+        NO owning batch row at all are ever candidates.
+
+        Idempotent: a batch_id already cleaned up simply won't appear in
+        the next call's candidate list (its member rows are gone), and
+        deleting an already-empty batch_id's members is a harmless no-op
+        (delete_for_batch() returns 0). Safe at startup and periodically,
+        for the same reason reconcile_all_preparing_batches() is: no
+        Gmail/provider call anywhere in this path. Returns the total
+        number of member rows deleted."""
+        cutoff = now - older_than
+        candidate_batch_ids = await self.batch_member_store.list_distinct_batch_ids_created_before(cutoff)
+        deleted = 0
+        for batch_id in candidate_batch_ids:
+            if await self.batch_store.get(batch_id) is None:
+                deleted += await self.batch_member_store.delete_for_batch(batch_id)
+        return deleted
 
     # --- Review (pure, read-only) ----------------------------------------
 

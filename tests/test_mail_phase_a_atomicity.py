@@ -25,6 +25,7 @@ from app.models.mail import (
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
 from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
@@ -177,6 +178,8 @@ async def _build_ready_campaign_with_flaky_step_store(
         enrollment_step_store=flaky_enrollment_step_store,
         sending_service=sending_service,
         batch_store=MemoryMailEnrollmentBatchStore(),
+        batch_member_store=MemoryMailEnrollmentBatchMemberStore(),
+        suppression_store=MemoryMailSuppressionStore(),
     )
 
     contact_list = await crm.create_contact_list("Fault Injection Audience")

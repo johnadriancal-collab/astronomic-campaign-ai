@@ -19,6 +19,7 @@ from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
 from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
@@ -98,6 +99,8 @@ def campaign_service(crm, mailbox_store, channel_store, window_store):
         enrollment_step_store=enrollment_step_store,
         sending_service=sending_service,
         batch_store=MemoryMailEnrollmentBatchStore(),
+        batch_member_store=MemoryMailEnrollmentBatchMemberStore(),
+        suppression_store=MemoryMailSuppressionStore(),
     )
 
 
@@ -1212,6 +1215,178 @@ def test_activate_and_resume_are_503_when_sending_engine_disabled(client, monkey
     # status), never 503, proving pause itself never even checks the flag.
     resp = client.post(f"/mail/campaigns/{cid}/pause")
     assert resp.status_code == 409
+
+
+# --- Add Prospects (Stage 3, 2026-09-03) ------------------------------------
+
+
+def _build_active_campaign_via_api(client, crm, mailbox_store, mailbox_id="mbx-prospects", n_contacts=0):
+    """HTTP-equivalent of test_mail_add_prospects.py's _make_active_campaign()
+    helper -- builds a real DRAFT -> READY -> ACTIVE campaign entirely
+    through the router (except audience seeding, which uses the shared crm/
+    mailbox_store fixtures directly, matching test_full_wizard_flow_through_
+    ready_and_review's own convention). Callers must monkeypatch
+    settings.mail_sending_engine_enabled = True BEFORE calling this, same
+    as every other ACTIVATE-requiring test in this file."""
+    import asyncio
+
+    async def seed():
+        contact_list = await crm.create_contact_list("Add Prospects Audience")
+        contact_ids = []
+        for i in range(n_contacts):
+            c = await crm.create_contact({"email": f"seed{i}@example.com"})
+            contact_ids.append(c.crm_contact_id)
+        if contact_ids:
+            await crm.bulk_add_to_list(contact_list.list_id, contact_ids)
+        await mailbox_store.create(make_mailbox(mailbox_id=mailbox_id, email=f"{mailbox_id}@example.com"))
+        return contact_list.list_id
+
+    list_id = asyncio.run(seed())
+
+    created = client.post("/mail/campaigns", json={"name": "Add Prospects Flow"}).json()
+    cid = created["mail_campaign_id"]
+
+    assert client.put(f"/mail/campaigns/{cid}/channels", json={"mailbox_ids": [mailbox_id]}).status_code == 200
+    assert (
+        client.patch(
+            f"/mail/campaigns/{cid}",
+            json={
+                "source_list_id": list_id,
+                "sending_days": [0, 1, 2, 3, 4],
+                "start_time": "09:00",
+                "end_time": "17:00",
+                "timezone": "America/Chicago",
+            },
+        ).status_code
+        == 200
+    )
+    assert client.post(f"/mail/campaigns/{cid}/steps", json={"subject": "Hi", "body": "Body"}).status_code == 200
+    assert client.post(f"/mail/campaigns/{cid}/ready").status_code == 200
+
+    activate_resp = client.post(f"/mail/campaigns/{cid}/activate")
+    assert activate_resp.status_code == 200
+    assert activate_resp.json()["status"] == "active"
+
+    return cid, list_id
+
+
+def test_add_prospects_route_success(client, crm, mailbox_store, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+
+    import asyncio
+
+    async def add_one():
+        c = await crm.create_contact({"email": "newprospect@example.com"})
+        await crm.bulk_add_to_list(list_id, [c.crm_contact_id])
+
+    asyncio.run(add_one())
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects",
+        json={"source": "crm_list", "source_list_id": list_id, "idempotency_key": "http-key-1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ready"
+    assert body["submitted_count"] == 1
+    assert body["enrolled_count"] == 1
+    assert body["already_enrolled_count"] == 0
+
+
+def test_add_prospects_route_retry_with_same_idempotency_key_returns_the_same_batch(client, crm, mailbox_store, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+
+    import asyncio
+
+    async def add_one():
+        c = await crm.create_contact({"email": "retryprospect@example.com"})
+        await crm.bulk_add_to_list(list_id, [c.crm_contact_id])
+
+    asyncio.run(add_one())
+
+    payload = {"source": "crm_list", "source_list_id": list_id, "idempotency_key": "http-retry-key"}
+    first = client.post(f"/mail/campaigns/{cid}/prospects", json=payload)
+    second = client.post(f"/mail/campaigns/{cid}/prospects", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["batch_id"] == second.json()["batch_id"]
+    assert second.json()["enrolled_count"] == 1
+
+
+def test_add_prospects_route_missing_campaign_returns_404(client):
+    resp = client.post(
+        "/mail/campaigns/does-not-exist/prospects",
+        json={"source": "crm_list", "source_list_id": "list-1", "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 404
+
+
+def test_add_prospects_route_draft_campaign_returns_409(client):
+    created = client.post("/mail/campaigns", json={"name": "Still Draft"}).json()
+    resp = client.post(
+        f"/mail/campaigns/{created['mail_campaign_id']}/prospects",
+        json={"source": "crm_list", "source_list_id": "list-1", "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 409
+
+
+def test_add_prospects_route_unknown_source_list_returns_400(client, crm, mailbox_store, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, _list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects",
+        json={"source": "crm_list", "source_list_id": "does-not-exist", "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_prospects_route_rejects_csv_upload_source_with_422(client, crm, mailbox_store, monkeypatch):
+    """Literal["crm_list"] on the request model rejects "csv_upload" at
+    the Pydantic layer, before MailCampaignService.add_prospects()'s own
+    NotImplementedError is ever reached -- Stage 4 is not implemented."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects",
+        json={"source": "csv_upload", "source_list_id": list_id, "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 422
+
+
+def test_add_prospects_route_paused_campaign_succeeds(client, crm, mailbox_store, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+    assert client.post(f"/mail/campaigns/{cid}/pause").status_code == 200
+
+    import asyncio
+
+    async def add_one():
+        c = await crm.create_contact({"email": "pausedprospect@example.com"})
+        await crm.bulk_add_to_list(list_id, [c.crm_contact_id])
+
+    asyncio.run(add_one())
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects",
+        json={"source": "crm_list", "source_list_id": list_id, "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["enrolled_count"] == 1
 
 
 def test_mail_campaign_status_enum_is_exactly_the_phase_a_set(client):

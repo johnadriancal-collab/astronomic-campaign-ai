@@ -442,6 +442,18 @@ class MailEnrollmentBatchSource(str, Enum):
     CSV_UPLOAD = "csv_upload"
 
 
+class MailEnrollmentBatchStatus(str, Enum):
+    """PREPARING -> READY, the only two V1 values -- deliberately no
+    terminal FAILED state (see MailCampaignService._reconcile_batch()'s
+    own docstring): every failure mode this batch lifecycle can hit is
+    recoverable by re-running the same idempotent steps, so "stuck in
+    PREPARING" IS the recoverable-failure representation, not a gap
+    needing a separate state."""
+
+    PREPARING = "preparing"
+    READY = "ready"
+
+
 class MailEnrollmentBatch(BaseModel):
     """
     Provenance record for one call to MailCampaignService.add_prospects()
@@ -476,7 +488,22 @@ class MailEnrollmentBatch(BaseModel):
                                suppressed_at_enrollment counter. Always
                                true: suppressed_count &lt;= enrolled_count,
                                and enrolled_count + already_enrolled_count
-                               == submitted_count.
+                               == submitted_count. enrolled_count counts
+                               BOTH ENROLLED_SUPPRESSED and PREPARED
+                               members (see MailEnrollmentBatchMemberState)
+                               -- every genuinely new MailEnrollment this
+                               batch produced, regardless of whether a
+                               Step 1 was ever materialized for it.
+
+    submitted_count/enrolled_count/already_enrolled_count/suppressed_count
+    are all None while status == PREPARING -- submitted_count IS known the
+    instant the cohort is frozen (see MailEnrollmentBatchMember's own
+    docstring on why members are written BEFORE this row), but is kept
+    None here rather than written early and left to look "final" before
+    it truly is; MailCampaignService._reconcile_batch() is the only writer
+    of this whole object, and it fills in all four counts atomically,
+    together, at the same moment it flips status to READY (never a
+    partial write of some counts but not others).
 
     No backfill: every MailEnrollment created before this model existed
     has batch_id=None and no corresponding MailEnrollmentBatch row --
@@ -488,12 +515,80 @@ class MailEnrollmentBatch(BaseModel):
     source: MailEnrollmentBatchSource
     source_list_id: str | None = None
     source_import_batch_id: str | None = None
+    idempotency_key: str
+    status: MailEnrollmentBatchStatus
     created_at: datetime
     created_by_actor: str | None = None
-    submitted_count: int
-    enrolled_count: int
-    already_enrolled_count: int
-    suppressed_count: int
+    submitted_count: int | None = None
+    enrolled_count: int | None = None
+    already_enrolled_count: int | None = None
+    suppressed_count: int | None = None
+
+
+class MailEnrollmentBatchMemberState(str, Enum):
+    """One member's progress through resolution -- a strict, one-way
+    progression, never reversed:
+
+        CANDIDATE --> ALREADY_ENROLLED                (terminal)
+                  --> ENROLLED_SUPPRESSED              (terminal)
+                  --> ENROLLED_PENDING --> PREPARED     (terminal)
+
+    CANDIDATE: frozen at cohort-resolution time, not yet processed by any
+      reconciliation pass.
+    ALREADY_ENROLLED: this campaign already contained a MailEnrollment for
+      this contact (at ANY status, including long-COMPLETED) -- skipped,
+      no new row created.
+    ENROLLED_SUPPRESSED: a genuinely NEW MailEnrollment was created
+      (status=SUPPRESSED, since this contact's email was already
+      suppressed at the moment reconciliation processed this member -- see
+      _reconcile_batch()'s own docstring on why this is checked fresh,
+      never from a caller-supplied snapshot). No Step 1 is ever
+      materialized for a suppressed enrollment. Terminal.
+    ENROLLED_PENDING: a genuinely new MailEnrollment was created
+      (status=PENDING) but its Step 1 has not been materialized yet --
+      the one non-terminal "enrolled" state.
+    PREPARED: this member's enrollment now has a materialized Step 1 row
+      (created via the exact same MailSendingService.
+      create_step1_execution() call activate_campaign() itself uses) and
+      has been flipped PENDING -> ACTIVE. Terminal."""
+
+    CANDIDATE = "candidate"
+    ALREADY_ENROLLED = "already_enrolled"
+    ENROLLED_SUPPRESSED = "enrolled_suppressed"
+    ENROLLED_PENDING = "enrolled_pending"
+    PREPARED = "prepared"
+
+
+class MailEnrollmentBatchMember(BaseModel):
+    """One frozen candidate belonging to exactly one MailEnrollmentBatch --
+    the durable representation of "the cohort," deliberately NOT a
+    contact-id array on MailEnrollmentBatch itself (a batch of hundreds of
+    contacts needs real per-contact state to be resumable after a crash,
+    which a flat array can't represent -- see MailEnrollmentBatchMemberState).
+
+    Written ONCE per batch, at cohort-freeze time, for EVERY resolved
+    candidate -- see MailCampaignService.add_prospects()'s own docstring
+    for why every member row is written BEFORE the owning
+    MailEnrollmentBatch row itself: the batch row's existence is the sole
+    signal that a freeze is durably committed, so a crash any time before
+    it exists is safe to treat as "never happened" (a retry restarts from
+    scratch under a fresh batch_id; these orphaned rows are cleaned up by
+    MailCampaignService.cleanup_orphan_batch_members() -- see that
+    method's own docstring). Once the owning batch row exists, this set of
+    members is IMMUTABLE as a set -- reconciliation only ever advances
+    each member's own `state`, never adds or removes a member, never
+    re-resolves the original CRM List/CSV source.
+
+    PRIMARY KEY (batch_id, crm_contact_id) -- the actual DB-level
+    guarantee that a candidate can never appear twice within one batch's
+    cohort."""
+
+    batch_id: str
+    crm_contact_id: str
+    state: MailEnrollmentBatchMemberState
+    enrollment_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class MailCampaignWorkload(BaseModel):

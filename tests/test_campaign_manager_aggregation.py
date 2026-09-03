@@ -31,6 +31,7 @@ from app.repositories.email_sequence_step_store import MemoryEmailSequenceStepSt
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
 from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
@@ -105,6 +106,8 @@ def test_client():
         enrollment_step_store=mail_enrollment_step_store,
         sending_service=mail_sending_service,
         batch_store=MemoryMailEnrollmentBatchStore(),
+        batch_member_store=MemoryMailEnrollmentBatchMemberStore(),
+        suppression_store=MemoryMailSuppressionStore(),
     )
 
     app = FastAPI()

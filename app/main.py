@@ -84,6 +84,7 @@ from app.repositories.sqlite_luma_question_mapping_store import SQLiteLumaQuesti
 from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrationStore
 from app.repositories.sqlite_mail_campaign_mailbox_store import SQLiteMailCampaignMailboxStore
 from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
+from app.repositories.sqlite_mail_enrollment_batch_member_store import SQLiteMailEnrollmentBatchMemberStore
 from app.repositories.sqlite_mail_enrollment_batch_store import SQLiteMailEnrollmentBatchStore
 from app.repositories.sqlite_mail_enrollment_step_store import SQLiteMailEnrollmentStepStore
 from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
@@ -119,6 +120,7 @@ from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
@@ -154,6 +156,7 @@ async def lifespan(app: FastAPI):
     mail_send_window_store = SQLiteMailSendWindowStore(settings.database_path)
     mail_enrollment_step_store = SQLiteMailEnrollmentStepStore(settings.database_path)
     mail_enrollment_batch_store = SQLiteMailEnrollmentBatchStore(settings.database_path)
+    mail_enrollment_batch_member_store = SQLiteMailEnrollmentBatchMemberStore(settings.database_path)
     mailbox_send_policy_store = SQLiteMailboxSendPolicyStore(settings.database_path)
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
@@ -186,6 +189,7 @@ async def lifespan(app: FastAPI):
     await mail_send_window_store.connect()
     await mail_enrollment_step_store.connect()
     await mail_enrollment_batch_store.connect()
+    await mail_enrollment_batch_member_store.connect()
     await mailbox_send_policy_store.connect()
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
@@ -298,6 +302,8 @@ async def lifespan(app: FastAPI):
         enrollment_step_store=mail_enrollment_step_store,
         sending_service=mail_sending_service,
         batch_store=mail_enrollment_batch_store,
+        batch_member_store=mail_enrollment_batch_member_store,
+        suppression_store=mail_suppression_store,
     )
 
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). CSRF
@@ -336,6 +342,17 @@ async def lifespan(app: FastAPI):
     )
     app.state.mail_execution_worker = mail_execution_worker
     mail_execution_worker.start()
+
+    # Phase 2 Stage 3 -- recovers any MailEnrollmentBatch left PREPARING by
+    # a crashed/interrupted add_prospects() call, and cleans up orphaned
+    # MailEnrollmentBatchMember rows. Deliberately started unconditionally
+    # (no mail_sending_engine_enabled gate) and makes zero Gmail/provider
+    # calls -- see MailBatchReconciliationWorker's own module docstring.
+    mail_batch_reconciliation_worker = MailBatchReconciliationWorker(
+        mail_campaign_service=app.state.mail_campaign_service,
+    )
+    app.state.mail_batch_reconciliation_worker = mail_batch_reconciliation_worker
+    mail_batch_reconciliation_worker.start()
 
     # Internal Hub login -- a single shared account, no signup/roles/teams
     # (see app/services/auth_service.py's module docstring). AUTH_EMAIL/
@@ -399,8 +416,10 @@ async def lifespan(app: FastAPI):
     yield
     # Worker stop MUST happen before any store closes -- see
     # MailExecutionWorker.stop()'s own docstring on why (no coroutine may
-    # still be mid-write when a connection closes underneath it).
+    # still be mid-write when a connection closes underneath it). Same
+    # reasoning applies to the reconciliation worker.
     await mail_execution_worker.stop()
+    await mail_batch_reconciliation_worker.stop()
     await campaign_store.close()
     await lead_store.close()
     await campaign_lead_store.close()
@@ -424,6 +443,7 @@ async def lifespan(app: FastAPI):
     await mail_send_window_store.close()
     await mail_enrollment_step_store.close()
     await mail_enrollment_batch_store.close()
+    await mail_enrollment_batch_member_store.close()
     await mailbox_send_policy_store.close()
     await mailbox_store.close()
     await mailbox_credential_store.close()

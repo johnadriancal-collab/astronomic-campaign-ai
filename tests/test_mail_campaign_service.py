@@ -15,6 +15,7 @@ from app.models.mail import (
     MailEnrollment,
     MailEnrollmentBatch,
     MailEnrollmentBatchSource,
+    MailEnrollmentBatchStatus,
     MailEnrollmentStatus,
     MailScheduleValidationError,
 )
@@ -22,6 +23,7 @@ from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
 from app.repositories.mail_enrollment_batch_store import MemoryMailEnrollmentBatchStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
@@ -103,12 +105,20 @@ def batch_store():
 
 
 @pytest.fixture
+def batch_member_store():
+    return MemoryMailEnrollmentBatchMemberStore()
+
+
+@pytest.fixture
 def suppression_store():
     return MemoryMailSuppressionStore()
 
 
 @pytest.fixture
-def service(crm, activity_log, mailbox_store, channel_store, window_store, enrollment_step_store, suppression_store, batch_store):
+def service(
+    crm, activity_log, mailbox_store, channel_store, window_store, enrollment_step_store, suppression_store,
+    batch_store, batch_member_store,
+):
     campaign_store = MemoryMailCampaignStore()
     enrollment_store = MemoryMailEnrollmentStore()
     sending_service = MailSendingService(
@@ -133,6 +143,8 @@ def service(crm, activity_log, mailbox_store, channel_store, window_store, enrol
         enrollment_step_store=enrollment_step_store,
         sending_service=sending_service,
         batch_store=batch_store,
+        batch_member_store=batch_member_store,
+        suppression_store=suppression_store,
     )
 
 
@@ -2205,8 +2217,9 @@ async def test_list_batches_is_campaign_scoped_and_newest_first(service, batch_s
     def _batch(batch_id, campaign_id, created_at):
         return MailEnrollmentBatch(
             batch_id=batch_id, mail_campaign_id=campaign_id, source=MailEnrollmentBatchSource.CRM_LIST,
-            source_list_id="list-1", created_at=created_at, submitted_count=1, enrolled_count=1,
-            already_enrolled_count=0, suppressed_count=0,
+            source_list_id="list-1", idempotency_key=f"key-{batch_id}",
+            status=MailEnrollmentBatchStatus.READY, created_at=created_at,
+            submitted_count=1, enrolled_count=1, already_enrolled_count=0, suppressed_count=0,
         )
 
     await batch_store.create(_batch("b1", cid, now))

@@ -178,6 +178,10 @@ def client(auth_svc):
     async def mail_campaign_batches(campaign_id: str):
         return [{"batch_id": "real-batch-data"}]
 
+    @app.post("/mail/campaigns/{campaign_id}/prospects")
+    async def mail_campaign_add_prospects(campaign_id: str):
+        return {"batch_id": "real-new-batch-data", "mail_campaign_id": campaign_id}
+
     @app.get("/mail/campaigns/{campaign_id}/channels")
     async def mail_campaign_channels_get(campaign_id: str):
         return ["mbx-1"]
@@ -769,6 +773,28 @@ def test_read_token_cannot_read_workload_or_batches(client, configured_service_r
 
     assert c.get("/mail/campaigns/c1/workload", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"}).status_code == 403
     assert c.get("/mail/campaigns/c1/batches", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"}).status_code == 403
+
+
+def test_operator_can_add_prospects(client, configured_service_operator_token):
+    """Stage 3 (2026-09-03): CRM-List Add Prospects is operator-token
+    eligible -- see MailCampaignService.add_prospects()'s own docstring.
+    This stand-in route is source-agnostic (the real CSV-vs-CRM-List
+    distinction is enforced by the request body's Literal type at the
+    real /mail/campaigns/{id}/prospects route, not by this middleware
+    scope check), so this test only proves the PATH+METHOD is in scope."""
+    c, _svc = client
+
+    resp = c.post("/mail/campaigns/c1/prospects", headers=_OPERATOR_HEADERS)
+
+    assert resp.status_code == 200
+
+
+def test_read_token_cannot_add_prospects(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.post("/mail/campaigns/c1/prospects", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
 
 
 # --- CANNOT: lifecycle transitions other than ready/unlock/activate/pause ---

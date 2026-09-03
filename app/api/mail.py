@@ -30,7 +30,7 @@ directly (no /send, /queue, /dispatch, /worker/run).
 """
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -45,6 +45,7 @@ from app.models.mail import (
     MailContactSuppressionStatus,
     MailEnrollment,
     MailEnrollmentBatch,
+    MailEnrollmentBatchSource,
     MailScheduleValidationError,
     MailSequenceStep,
     MailSuppression,
@@ -61,6 +62,7 @@ from app.services.mail_campaign_service import (
     MailCampaignInvalidTransitionError,
     MailCampaignLegacyScheduleLockedError,
     MailCampaignNotEditableError,
+    MailCampaignNotEligibleForProspectsError,
     MailCampaignNotFound,
     MailCampaignNotReadyError,
     MailCampaignService,
@@ -334,12 +336,55 @@ async def get_campaign_workload(mail_campaign_id: str, service: MailCampaignServ
 async def list_campaign_batches(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
     """Every prospect batch ever added to this campaign, newest first --
     see MailEnrollmentBatch's own docstring. Empty for every campaign that
-    predates add_prospects() (a later stage, not implemented yet) or that
-    simply has never had a batch added -- not an error, not a gap."""
+    predates add_prospects(), or that simply has never had a batch added
+    -- not an error, not a gap."""
     try:
         return await service.list_batches(mail_campaign_id)
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+class MailAddProspectsRequest(BaseModel):
+    """`source` is a `Literal["crm_list"]` (not the broader
+    MailEnrollmentBatchSource enum) deliberately -- Stage 3 only
+    implements the CRM-List path; a request naming "csv_upload" is
+    rejected by Pydantic itself with a 422, before this route's own body
+    ever runs, rather than reaching MailCampaignService.add_prospects()'s
+    own NotImplementedError. `idempotency_key` is required, not optional
+    -- see add_prospects()'s own docstring for why this is the entire
+    mechanism preventing an HTTP retry from creating a duplicate batch."""
+
+    source: Literal["crm_list"]
+    source_list_id: str
+    idempotency_key: str
+
+
+@router.post("/campaigns/{mail_campaign_id}/prospects", response_model=MailEnrollmentBatch)
+async def add_prospects(
+    mail_campaign_id: str,
+    payload: MailAddProspectsRequest,
+    request: Request,
+    service: MailCampaignService = Depends(get_mail_campaign_service),
+):
+    """Add a batch of prospects to an already-persistent campaign -- see
+    MailCampaignService.add_prospects()'s own docstring for the full
+    idempotency/freeze/reconciliation contract. A retry with the same
+    idempotency_key always resolves to the same batch, never creates a
+    second one."""
+    try:
+        return await service.add_prospects(
+            mail_campaign_id,
+            source=MailEnrollmentBatchSource.CRM_LIST,
+            idempotency_key=payload.idempotency_key,
+            source_list_id=payload.source_list_id,
+            actor=_operator_actor(request),
+        )
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignNotEligibleForProspectsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except CrmContactListNotFound as e:
+        raise HTTPException(status_code=400, detail=f"Selected CRM List not found: {e}")
 
 
 # --- Channels (selected sending mailboxes) --------------------------------

@@ -108,12 +108,25 @@ def test_workload_and_batches_reads_are_in_scope():
 
 
 def test_workload_and_batches_are_read_only():
-    """add_prospects() (the write side) is a later stage -- not granted
-    preemptively. Any write method against these paths must stay out of
-    scope until that stage explicitly adds its own rule."""
+    """add_prospects() (the write side) lives at its own distinct path
+    (/mail/campaigns/{id}/prospects, see test_add_prospects_write_is_in_scope
+    below) -- these two read paths themselves must stay read-only."""
     for method in ("POST", "PATCH", "PUT", "DELETE"):
         assert _in_scope(method, "/mail/campaigns/c1/workload") is False
         assert _in_scope(method, "/mail/campaigns/c1/batches") is False
+
+
+def test_add_prospects_write_is_in_scope():
+    """Stage 3 (2026-09-03): CRM-List Add Prospects is operator-token
+    eligible. CSV upload is deferred to Stage 4 and enforced out of band
+    by the request body's Literal["crm_list"] type, not by this route
+    scope check -- the route itself is source-agnostic."""
+    assert _in_scope("POST", "/mail/campaigns/c1/prospects") is True
+
+
+def test_add_prospects_path_rejects_other_methods():
+    for method in ("GET", "PATCH", "PUT", "DELETE"):
+        assert _in_scope(method, "/mail/campaigns/c1/prospects") is False
 
 
 def test_channels_read_and_write_are_in_scope():
@@ -253,17 +266,18 @@ def test_unrelated_top_level_surfaces_are_out_of_scope():
 # --- Closed-set regression guard (Phase 2, 2026-09-03) ----------------------
 
 
-def test_operator_rule_count_has_not_grown_beyond_the_two_new_workload_batch_reads():
+def test_operator_rule_count_has_not_grown_beyond_stage_3_add_prospects():
     """A precise tripwire against accidental scope broadening: this exact
-    count (27) is Stage 2's expected total -- the pre-Stage-2 set of 25
-    campaign-lifecycle/channel/schedule/step/mailbox/CRM-list rules, plus
-    exactly the two new read-only rules this stage adds (workload,
-    batches). If this number ever changes without a corresponding,
-    deliberate update to this test, something was granted (or revoked)
-    that wasn't explicitly reviewed."""
+    count (28) is Stage 3's expected total -- Stage 2's 27 rules (the
+    pre-Stage-2 set of 25 campaign-lifecycle/channel/schedule/step/
+    mailbox/CRM-list rules, plus the two Stage 2 read-only rules for
+    workload and batches), plus exactly the one new write rule this
+    stage adds (POST .../prospects). If this number ever changes without
+    a corresponding, deliberate update to this test, something was
+    granted (or revoked) that wasn't explicitly reviewed."""
     from app.session_auth_middleware import _SERVICE_OPERATOR_RULES
 
-    assert len(_SERVICE_OPERATOR_RULES) == 27
+    assert len(_SERVICE_OPERATOR_RULES) == 28
 
 
 def test_no_write_method_is_granted_on_the_two_new_read_routes_via_any_other_rule():
@@ -275,3 +289,15 @@ def test_no_write_method_is_granted_on_the_two_new_read_routes_via_any_other_rul
     for path in ("/mail/campaigns/c1/workload", "/mail/campaigns/c1/batches"):
         matching_methods = {method for method, pattern in _SERVICE_OPERATOR_RULES if pattern.fullmatch(path)}
         assert matching_methods == {"GET"}, f"{path} unexpectedly matches methods {matching_methods}"
+
+
+def test_only_post_is_granted_on_the_new_prospects_route_via_any_other_rule():
+    """Defense in depth beyond test_add_prospects_path_rejects_other_methods:
+    confirms no OTHER rule in the table accidentally also matches this
+    exact path for a method beyond POST."""
+    from app.session_auth_middleware import _SERVICE_OPERATOR_RULES
+
+    matching_methods = {
+        method for method, pattern in _SERVICE_OPERATOR_RULES if pattern.fullmatch("/mail/campaigns/c1/prospects")
+    }
+    assert matching_methods == {"POST"}, f"unexpectedly matches methods {matching_methods}"
