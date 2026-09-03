@@ -2053,3 +2053,64 @@ async def test_operator_identity_still_hits_the_sending_engine_gate(service, crm
 
     unchanged = await service.get_campaign(ready.mail_campaign_id)
     assert unchanged.status == MailCampaignStatus.READY
+
+
+# --- pause_campaign actor attribution (Phase 2, admin/service OPERATOR -----
+# token, approved 2026-09-03 as Activate's safe inverse) --------------------
+
+
+async def test_operator_can_pause_an_active_campaign(service, crm):
+    """Companion to test_pause_then_resume_round_trip above -- the
+    operator identity CAN pause a genuinely ACTIVE campaign."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+
+    paused = await service.pause_campaign(ready.mail_campaign_id, actor="claude_operator")
+
+    assert paused.status == MailCampaignStatus.PAUSED
+
+    events = await service.activity_log.store.list()
+    paused_event = next(e for e in events if e.event_type == "mail_campaign.paused")
+    assert paused_event.actor == "claude_operator"
+
+
+async def test_pause_actor_defaults_to_none(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+
+    await service.pause_campaign(ready.mail_campaign_id)
+
+    events = await service.activity_log.store.list()
+    paused_event = next(e for e in events if e.event_type == "mail_campaign.paused")
+    assert paused_event.actor is None
+
+
+async def test_operator_identity_cannot_pause_a_non_active_campaign_merely_by_being_authorized(service):
+    """The same core guarantee as Activate's version of this test: `actor`
+    carries NO special privilege -- a DRAFT campaign (never activated) is
+    rejected with the EXACT SAME MailCampaignInvalidTransitionError
+    regardless of who/what is calling, matching test_pause_requires_active
+    above byte-for-byte except for the added actor kwarg."""
+    campaign = await service.create_campaign("Draft")
+
+    with pytest.raises(MailCampaignInvalidTransitionError):
+        await service.pause_campaign(campaign.mail_campaign_id, actor="claude_operator")
+
+    unchanged = await service.get_campaign(campaign.mail_campaign_id)
+    assert unchanged.status == MailCampaignStatus.DRAFT
+
+
+async def test_operator_identity_cannot_pause_a_ready_campaign_merely_by_being_authorized(service, crm):
+    """A second non-ACTIVE state, closer to what this token will actually
+    encounter in practice (a campaign it just Marked Ready but hasn't
+    Activated) -- still rejected identically regardless of actor."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    with pytest.raises(MailCampaignInvalidTransitionError):
+        await service.pause_campaign(ready.mail_campaign_id, actor="claude_operator")
+
+    unchanged = await service.get_campaign(ready.mail_campaign_id)
+    assert unchanged.status == MailCampaignStatus.READY

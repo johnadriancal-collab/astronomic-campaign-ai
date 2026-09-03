@@ -255,11 +255,17 @@ async def activate_campaign(
 
 
 @router.post("/campaigns/{mail_campaign_id}/pause", response_model=MailCampaign)
-async def pause_campaign(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+async def pause_campaign(
+    mail_campaign_id: str, request: Request, service: MailCampaignService = Depends(get_mail_campaign_service)
+):
     """ACTIVE -> PAUSED. Backend only -- see activate_campaign()'s note
-    above."""
+    above. Also reachable by the admin/service OPERATOR token (since
+    Phase 2, 2026-09-03) -- the safer inverse of Activate: it can only
+    ever stop new claims on an already-ACTIVE campaign, never resume one
+    or touch anything else -- see app/session_auth_middleware.py's own
+    docstring."""
     try:
-        return await service.pause_campaign(mail_campaign_id)
+        return await service.pause_campaign(mail_campaign_id, actor=_operator_actor(request))
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except MailCampaignInvalidTransitionError as e:

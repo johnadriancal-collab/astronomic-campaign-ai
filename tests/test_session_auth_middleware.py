@@ -709,15 +709,25 @@ def test_operator_can_mark_ready_and_unlock(client, configured_service_operator_
     assert c.post("/mail/campaigns/c1/unlock", headers=_OPERATOR_HEADERS).status_code == 200
 
 
-# --- CAN: Activate (Phase 2 addition, 2026-09-03 -- a separate safety gate --
-# see app/session_auth_middleware.py's module docstring for why this alone,
-# and not pause/resume/archive, was approved) --------------------------------
+# --- CAN: Activate / Pause (Phase 2 additions, 2026-09-03 -- a matched pair
+# of safety gates; see app/session_auth_middleware.py's module docstring for
+# why exactly these two, and not resume/archive, were approved) -------------
 
 
 def test_operator_can_activate(client, configured_service_operator_token):
     c, _svc = client
 
     resp = c.post("/mail/campaigns/c1/activate", headers=_OPERATOR_HEADERS)
+
+    assert resp.status_code == 200
+
+
+def test_operator_can_pause(client, configured_service_operator_token):
+    """Pause is Activate's safe inverse -- approved specifically because
+    it can only ever stop an already-ACTIVE campaign, never start one."""
+    c, _svc = client
+
+    resp = c.post("/mail/campaigns/c1/pause", headers=_OPERATOR_HEADERS)
 
     assert resp.status_code == 200
 
@@ -732,14 +742,16 @@ def test_operator_can_inspect_campaign_review_and_enrollment_state(client, confi
     assert c.get("/mail/campaigns/c1/enrollments", headers=_OPERATOR_HEADERS).status_code == 200
 
 
-# --- CANNOT: lifecycle transitions other than ready/unlock/activate ---------
+# --- CANNOT: lifecycle transitions other than ready/unlock/activate/pause ---
 
 
-def test_operator_cannot_pause_or_resume(client, configured_service_operator_token):
+def test_operator_cannot_resume(client, configured_service_operator_token):
     c, _svc = client
 
-    assert c.post("/mail/campaigns/c1/pause", headers=_OPERATOR_HEADERS).status_code == 403
-    assert c.post("/mail/campaigns/c1/resume", headers=_OPERATOR_HEADERS).status_code == 403
+    resp = c.post("/mail/campaigns/c1/resume", headers=_OPERATOR_HEADERS)
+
+    assert resp.status_code == 403
+    assert "active" not in resp.text
 
 
 def test_operator_cannot_archive(client, configured_service_operator_token):
@@ -888,10 +900,10 @@ def test_out_of_scope_operator_token_never_falls_through_to_a_valid_cookie(clien
     c, _svc = client
     _login(c)
 
-    resp = c.post("/mail/campaigns/c1/pause", headers=_OPERATOR_HEADERS)
+    resp = c.post("/mail/campaigns/c1/resume", headers=_OPERATOR_HEADERS)
 
     assert resp.status_code == 403
-    assert "paused" not in resp.text
+    assert "active" not in resp.text
 
 
 def test_operator_fails_closed_when_unconfigured(client):
@@ -957,13 +969,13 @@ def test_normal_session_auth_for_operator_scoped_routes_is_completely_unchanged(
 ):
     """A logged-in Hub session can still do everything through the normal
     cookie path regardless of the operator token existing -- including
-    actions the OPERATOR token itself cannot reach (e.g. pause, or
+    actions the OPERATOR token itself cannot reach (e.g. resume, or
     deleting a whole CRM list)."""
     c, _svc = client
     _login(c)
 
     assert c.post("/mail/campaigns").status_code == 200
-    assert c.post("/mail/campaigns/c1/pause").status_code == 200
+    assert c.post("/mail/campaigns/c1/resume").status_code == 200
     assert c.delete("/crm/lists/list-1").status_code == 200
 
 

@@ -33,6 +33,7 @@ from app.api.mail import (
     activate_campaign,
     create_campaign,
     mark_campaign_ready,
+    pause_campaign,
     set_campaign_schedule,
     unlock_campaign,
     update_campaign,
@@ -80,6 +81,10 @@ class _StubMailCampaignService:
 
     async def activate_campaign(self, *args, **kwargs):
         self.calls["activate_campaign"] = _RecordedCall(args, kwargs)
+        return _FakeCampaign()
+
+    async def pause_campaign(self, *args, **kwargs):
+        self.calls["pause_campaign"] = _RecordedCall(args, kwargs)
         return _FakeCampaign()
 
     async def set_schedule(self, *args, **kwargs):
@@ -236,6 +241,22 @@ async def test_activate_campaign_route_passes_none_actor_for_an_ordinary_session
     await activate_campaign("c1", _FakeRequest(None), service=service)
 
     assert service.calls["activate_campaign"].kwargs.get("actor") is None
+
+
+async def test_pause_campaign_route_passes_actor_through():
+    service = _StubMailCampaignService()
+
+    await pause_campaign("c1", _FakeRequest("service_operator"), service=service)
+
+    assert service.calls["pause_campaign"].kwargs.get("actor") == "claude_operator"
+
+
+async def test_pause_campaign_route_passes_none_actor_for_an_ordinary_session():
+    service = _StubMailCampaignService()
+
+    await pause_campaign("c1", _FakeRequest(None), service=service)
+
+    assert service.calls["pause_campaign"].kwargs.get("actor") is None
 
 
 async def test_set_campaign_schedule_route_passes_actor_through():

@@ -1273,7 +1273,7 @@ class MailCampaignService:
                 incomplete.append(enrollment.enrollment_id)
         return incomplete
 
-    async def pause_campaign(self, mail_campaign_id: str) -> MailCampaign:
+    async def pause_campaign(self, mail_campaign_id: str, actor: str | None = None) -> MailCampaign:
         """ACTIVE -> PAUSED. Stops NEW claims from this campaign (every
         MailSendingService.process_one_due_step() call checks campaign
         status first) without touching a single MailEnrollment or
@@ -1296,6 +1296,7 @@ class MailCampaignService:
             entity_type="mail_campaign",
             entity_id=updated.mail_campaign_id,
             entity_name=updated.name,
+            actor=actor,
         )
         return updated
 

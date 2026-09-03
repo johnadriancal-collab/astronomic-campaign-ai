@@ -143,9 +143,12 @@ _SERVICE_OPERATOR_RULES below), covering exactly:
     selection (read/replace -- selecting an ALREADY-connected mailbox by
     id only; never anything under /mailboxes/{id}/... OAuth), Mark Ready,
     Unlock (READY -> DRAFT), Activate (DRAFT/READY-lifecycle preparation
-    only -- see the "Activate is a separate safety gate" note below), and
-    the review/enrollments/channels/schedule/steps reads needed to verify
-    that state.
+    only -- see the "Activate is a separate safety gate" note below),
+    Pause (ACTIVE -> PAUSED -- the safer INVERSE of Activate, approved
+    alongside it for the same reason: it can only ever stop new claims on
+    an already-ACTIVE campaign, see the "Pause is Activate's safe inverse"
+    note below), and the review/enrollments/channels/schedule/steps reads
+    needed to verify that state.
   - Mailboxes: the bare GET /mailboxes list ONLY (to pick a mailbox id for
     channel selection) -- never mailbox OAuth connect/disconnect.
   - CRM contact lists: create/edit a list and add/remove its membership --
@@ -157,8 +160,8 @@ _SERVICE_OPERATOR_RULES below), covering exactly:
     or the read-only token's own read-only exclusion list).
 Explicitly, deliberately EXCLUDED, full stop, regardless of any future
 addition to the allow-rules above without a fresh explicit review:
-  - POST .../pause, /resume, /archive (every campaign lifecycle transition
-    other than Ready/Unlock/Activate -- see the "not yet" note below)
+  - POST .../resume, /archive (every campaign lifecycle transition other
+    than Ready/Unlock/Activate/Pause -- see the "not yet" note below)
   - everything under /mail/suppressions* and /mail/execution/*
   - everything under /mailboxes/* except the bare GET list
   - /crm/contacts/* writes, /crm/custom-fields*, /crm/backup*, /crm/import*
@@ -175,11 +178,18 @@ MailCampaignService.activate_campaign()'s own docstring) -- it has zero
 ability to touch `mail_sending_engine_enabled`, the mailbox/recipient
 send allowlists, or dispatch any real Gmail/SMTP call. Those remain
 independent, Railway-environment-variable-only safety boundaries that
-this token has no path to at all, with or without this grant. Pause/
-resume/archive remain excluded for now -- narrower than what could
-plausibly be justified by the same reasoning, but not yet explicitly
-requested/reviewed; add them only after their own explicit approval, the
-same way Activate itself was.
+this token has no path to at all, with or without this grant.
+
+Pause is Activate's safe inverse (Phase 2 addition, 2026-09-03, approved
+alongside the discovery that ACTIVE/PAUSED campaigns cannot yet have
+their schedule edited -- see MailCampaignService.pause_campaign()'s own
+docstring): it stops new claims on an ACTIVE campaign without touching a
+single MailEnrollment/MailEnrollmentStep row, and -- unlike Resume -- has
+no way to make sending happen; if anything, granting Pause makes the
+operator identity STRICTLY safer to hold, since it can now also stop an
+activation it or a human made, without needing session access to do so.
+Resume/archive remain excluded for now -- add them only after their own
+explicit approval, the same way Activate and Pause each were.
 
 Deliberately NOT over-engineered for Phase 2's upcoming persistent-
 campaign/Batch 2+ work -- this allowlist covers exactly today's
@@ -273,10 +283,11 @@ _ID_SEGMENT = r"[^/]+"
 _SERVICE_OPERATOR_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
-        # Mail campaigns -- create/read/edit, Mark Ready, Unlock, Activate.
-        # NOT pause/resume/archive (no rule below matches those paths at
+        # Mail campaigns -- create/read/edit, Mark Ready, Unlock, Activate,
+        # Pause. NOT resume/archive (no rule below matches those paths at
         # all) -- see the module docstring's "Activate is a SEPARATE
-        # safety gate" note for why Activate alone was approved here.
+        # safety gate" / "Pause is Activate's safe inverse" notes for why
+        # exactly these two, and not resume/archive, were approved.
         ("GET", r"^/mail/campaigns$"),
         ("POST", r"^/mail/campaigns$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}$"),
@@ -284,6 +295,7 @@ _SERVICE_OPERATOR_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/ready$"),
         ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/unlock$"),
         ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/activate$"),
+        ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/pause$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/review$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/enrollments$"),
         # Channels -- selecting an already-connected mailbox by id only.
