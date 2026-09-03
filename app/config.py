@@ -68,6 +68,19 @@ class Settings(BaseSettings):
     # 503 rather than crashing at startup when it's unset, same as ITF's.
     email_intake_webhook_token: str | None = None
 
+    # Admin/service read-only tooling (Phase 1 -- READ ONLY, 2026-09-03) -- see
+    # app/session_auth_middleware.py's own docstring for the full flow. Lets a
+    # trusted development/operations tool (not a browser, no Hub session
+    # cookie possible or wanted) make authenticated GET/HEAD/OPTIONS calls
+    # against /crm/* for production investigation, via `Authorization: Bearer
+    # <token>`. Deliberately separate from every webhook token above -- this
+    # is pulled by an operator tool, never pushed by an external service.
+    # Same "None until deliberately configured, clear 503 rather than
+    # crashing" precedent as itf_webhook_token. There is NO corresponding
+    # write token yet -- see that middleware module for why, and for the
+    # explicit contact/list-only allowlist a future write token would need.
+    admin_service_read_token: str | None = None
+
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection) -- see
     # app/integrations/google_oauth_client.py and app/services/mailbox_service.py.
     # ALL five are None until deliberately configured; every route that needs

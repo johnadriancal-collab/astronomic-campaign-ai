@@ -21,11 +21,23 @@ from app.session_auth_middleware import enforce_session_auth
 REAL_PASSWORD = "correct horse battery staple"
 
 
+SERVICE_READ_TOKEN = "test-service-read-token-value-not-a-real-secret"
+
+
 @pytest.fixture(autouse=True)
 def configured_credentials(monkeypatch):
     monkeypatch.setattr(auth_service_module.settings, "auth_email", "team@astronomic.com")
     monkeypatch.setattr(auth_service_module.settings, "auth_password_hash", hash_password(REAL_PASSWORD))
     monkeypatch.setattr(auth_service_module.settings, "cookie_secure", False)
+    # Unset by default in every test unless a test explicitly opts in via the
+    # `configured_service_read_token` fixture below -- matches production's
+    # own "None until deliberately configured" default.
+    monkeypatch.setattr(auth_service_module.settings, "admin_service_read_token", None)
+
+
+@pytest.fixture
+def configured_service_read_token(monkeypatch):
+    monkeypatch.setattr(auth_service_module.settings, "admin_service_read_token", SERVICE_READ_TOKEN)
 
 
 @pytest.fixture
@@ -63,6 +75,42 @@ def client(auth_svc):
     @app.post("/sync/email-intake")  # stands in for the email-intake webhook
     async def email_intake_webhook():
         return {"ok": True}
+
+    @app.get("/crm/contacts")  # stands in for a real CRM read route
+    async def crm_contacts_read():
+        return [{"crm_contact_id": "real-crm-data"}]
+
+    @app.get("/crm/backup/export")  # stands in for the real full-database backup export
+    async def crm_backup_export():
+        return {"contacts": ["every-contact-in-the-database"]}
+
+    @app.get("/crm/backup/something-nested")  # a hypothetical future route under the same excluded namespace
+    async def crm_backup_nested():
+        return {"ok": True}
+
+    @app.get("/crm/backupfoo")  # NOT the backup namespace -- must not be mistakenly excluded
+    async def crm_backupfoo():
+        return {"crm_contact_id": "unrelated-route-that-merely-starts-with-the-same-letters"}
+
+    @app.get("/crm/import/some-batch-id")  # stands in for the real raw CSV import batch route
+    async def crm_import_batch():
+        return {"rows": ["raw-csv-row-1", "raw-csv-row-2"]}
+
+    @app.get("/crm/import/some-batch-id/nested")  # a hypothetical future route under the same excluded namespace
+    async def crm_import_nested():
+        return {"ok": True}
+
+    @app.get("/crm/importfoo")  # NOT the import namespace -- must not be mistakenly excluded
+    async def crm_importfoo():
+        return {"crm_contact_id": "unrelated-route-that-merely-starts-with-the-same-letters"}
+
+    @app.post("/crm/contacts")  # stands in for a real CRM write route
+    async def crm_contacts_write():
+        return {"crm_contact_id": "would-have-been-created"}
+
+    @app.patch("/crm/contacts/some-id")  # stands in for a real CRM write route
+    async def crm_contact_patch():
+        return {"crm_contact_id": "would-have-been-modified"}
 
     with TestClient(app) as c:
         yield c, auth_svc
@@ -207,3 +255,226 @@ def test_logout_is_reachable_with_no_prior_session(client):
     resp = c.post("/auth/logout")
 
     assert resp.status_code == 200
+
+
+# --- admin/service read-only token (Phase 1) ----------------------------
+
+
+def test_service_read_token_can_get_a_permitted_crm_endpoint(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/contacts", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 200
+    assert resp.json() == [{"crm_contact_id": "real-crm-data"}]
+
+
+@pytest.mark.parametrize("method", ["post", "patch"])
+def test_service_read_token_gets_403_for_a_crm_write(client, configured_service_read_token, method):
+    c, _svc = client
+    path = "/crm/contacts" if method == "post" else "/crm/contacts/some-id"
+
+    resp = getattr(c, method)(path, headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+    assert "would-have-been" not in resp.text
+
+
+def test_service_read_token_gets_403_outside_crm_scope(client, configured_service_read_token):
+    """Same valid token, but /campaign is not under /crm/ -- must be
+    rejected outright, not silently allowed just because the token itself
+    checks out."""
+    c, _svc = client
+
+    resp = c.get("/campaign", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+    assert "real-private-data" not in resp.text
+
+
+def test_invalid_service_token_is_rejected(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/contacts", headers={"Authorization": "Bearer not-the-real-token"})
+
+    assert resp.status_code == 401
+    assert "real-crm-data" not in resp.text
+
+
+def test_malformed_authorization_header_is_rejected(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/contacts", headers={"Authorization": SERVICE_READ_TOKEN})  # missing "Bearer " prefix
+
+    assert resp.status_code == 401
+
+
+def test_invalid_service_token_never_falls_through_to_a_valid_cookie(client, configured_service_read_token):
+    """The core determinism requirement: presenting ANY Authorization
+    header commits the request to the service-token auth mode -- even a
+    genuinely logged-in browser session must not rescue a bad/out-of-
+    scope service-token request."""
+    c, _svc = client
+    _login(c)  # this browser session is completely valid on its own
+
+    resp = c.get("/crm/contacts", headers={"Authorization": "Bearer not-the-real-token"})
+
+    assert resp.status_code == 401
+    assert "real-crm-data" not in resp.text
+
+
+def test_out_of_scope_service_token_never_falls_through_to_a_valid_cookie(client, configured_service_read_token):
+    c, _svc = client
+    _login(c)
+
+    resp = c.post("/crm/contacts", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+    assert "would-have-been" not in resp.text
+
+
+def test_no_authorization_header_preserves_existing_cookie_behavior_unauthenticated(client, configured_service_read_token):
+    """Regression guard: adding this whole mechanism must not change what
+    happens when no Authorization header is sent at all, token configured
+    or not."""
+    c, _svc = client
+
+    resp = c.get("/crm/contacts")
+
+    assert resp.status_code == 401
+
+
+def test_no_authorization_header_preserves_existing_cookie_behavior_authenticated(client, configured_service_read_token):
+    c, _svc = client
+    _login(c)
+
+    resp = c.get("/crm/contacts")
+
+    assert resp.status_code == 200
+    assert resp.json() == [{"crm_contact_id": "real-crm-data"}]
+
+
+def test_valid_browser_session_is_completely_unaffected_by_this_feature_existing(client, configured_service_read_token):
+    """Every pre-existing cookie-auth test above already proves this
+    implicitly (they all run with admin_service_read_token configured via
+    the autouse fixture change), but this one states it explicitly as its
+    own regression guard."""
+    c, _svc = client
+    _login(c)
+
+    resp = c.get("/campaign")
+
+    assert resp.status_code == 200
+    assert resp.json() == [{"campaign_id": "real-private-data"}]
+
+
+def test_service_token_attempt_fails_closed_when_unconfigured(client):
+    """No `configured_service_read_token` fixture here -- admin_service_read_token
+    is None (the autouse fixture's default), matching production before
+    this feature is deliberately turned on. Same 503 "not configured"
+    convention as every other webhook token in this codebase, not a 401 --
+    an operator/deployment gap is distinguishable from a bad credential."""
+    c, _svc = client
+
+    resp = c.get("/crm/contacts", headers={"Authorization": "Bearer anything-at-all"})
+
+    assert resp.status_code == 503
+
+
+def test_service_token_never_appears_in_any_response_body(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/contacts", headers={"Authorization": "Bearer not-the-real-token"})
+
+    assert SERVICE_READ_TOKEN not in resp.text
+
+
+# --- /crm/backup is explicitly excluded from service-read scope ------------
+
+
+def test_service_read_token_gets_403_for_backup_export(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/backup/export", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+    assert "every-contact-in-the-database" not in resp.text
+
+
+def test_service_read_token_gets_403_for_a_nested_backup_path(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/backup/something-nested", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+
+
+def test_backupfoo_is_not_mistakenly_treated_as_the_backup_namespace(client, configured_service_read_token):
+    """Precision guard: a hypothetical unrelated route that merely starts
+    with the same characters as "/crm/backup" must NOT be excluded --
+    only "/crm/backup" itself and paths under "/crm/backup/"."""
+    c, _svc = client
+
+    resp = c.get("/crm/backupfoo", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 200
+
+
+def test_normal_session_auth_for_backup_routes_is_completely_unchanged(client, configured_service_read_token):
+    """The exclusion applies ONLY to the service-read code path -- a
+    logged-in browser session must retain exactly its pre-existing access
+    to /crm/backup/export (unauthenticated still 401, authenticated still
+    200), regardless of whether a service-read token is configured at
+    all."""
+    c, _svc = client
+
+    unauthenticated = c.get("/crm/backup/export")
+    assert unauthenticated.status_code == 401
+
+    _login(c)
+    authenticated = c.get("/crm/backup/export")
+    assert authenticated.status_code == 200
+    assert authenticated.json() == {"contacts": ["every-contact-in-the-database"]}
+
+
+# --- /crm/import is also explicitly excluded from service-read scope -------
+
+
+def test_service_read_token_gets_403_for_an_import_batch(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/import/some-batch-id", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+    assert "raw-csv-row-1" not in resp.text
+
+
+def test_service_read_token_gets_403_for_a_nested_import_path(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.get("/crm/import/some-batch-id/nested", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+
+
+def test_importfoo_is_not_mistakenly_treated_as_the_import_namespace(client, configured_service_read_token):
+    """Precision guard: a hypothetical unrelated route that merely starts
+    with the same characters as "/crm/import" must NOT be excluded --
+    only "/crm/import" itself and paths under "/crm/import/"."""
+    c, _svc = client
+
+    resp = c.get("/crm/importfoo", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 200
+
+
+def test_normal_session_auth_for_import_routes_is_completely_unchanged(client, configured_service_read_token):
+    c, _svc = client
+
+    unauthenticated = c.get("/crm/import/some-batch-id")
+    assert unauthenticated.status_code == 401
+
+    _login(c)
+    authenticated = c.get("/crm/import/some-batch-id")
+    assert authenticated.status_code == 200
+    assert authenticated.json() == {"rows": ["raw-csv-row-1", "raw-csv-row-2"]}
