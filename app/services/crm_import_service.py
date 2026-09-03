@@ -13,6 +13,7 @@ on comma would shred a single selected option into several garbage values.
 import csv
 import io
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
@@ -272,6 +273,16 @@ class CrmImportService:
 
     async def preview(self, import_batch_id: str, column_mapping: dict[str, str]) -> CrmImportBatch:
         batch = await self._require_batch(import_batch_id)
+        if batch.status in (CrmImportBatchStatus.COMMITTING, CrmImportBatchStatus.COMMITTED):
+            # preview() unconditionally REPLACES batch.preview with a fresh
+            # list (see the end of this method) -- allowing that once
+            # commit() has started would silently destroy the durable
+            # per-row commit_outcome/resolved_contact_id progress that
+            # commit()'s own resumability relies on (Stage 4A, 2026-09-03).
+            raise ValueError(
+                f"CrmImportBatch {import_batch_id} has already been committed (or is mid-commit) -- "
+                "re-running preview() would discard durable commit progress. Upload a new CSV instead."
+            )
         batch.column_mapping = column_mapping
 
         # Reference data classification rules need (e.g. classify_role's
@@ -423,67 +434,359 @@ class CrmImportService:
             CrmImportRowStatus.ERROR: "skip",
         }[status]
 
+    async def _find_existing_by_confident_identifiers(self, mapped_fields: dict[str, Any]) -> CrmContact | None:
+        """RAW identifier lookup only -- email, then apollo_contact_id, then
+        linkedin_url, the same order and normalization as classify_match()'s
+        first three tiers, but deliberately NOT classify_match() itself:
+        no conflict-downgrade (_conflicts_on_identity), no name+company
+        fallback tier. Used ONLY by commit()'s "creating"-resume path (see
+        that method's own docstring) to recover a contact a PRIOR, already-
+        decided create attempt for this exact row produced -- never to
+        classify or influence a row's decision in the first place, so it
+        can never reinterpret what a human (or _default_decision) already
+        chose for this row."""
+        email = normalize_email(mapped_fields.get("email"))
+        if email:
+            found = await self.crm_service.contact_store.get_by_email(email)
+            if found is not None:
+                return found
+        apollo_id = mapped_fields.get("apollo_contact_id")
+        if apollo_id:
+            found = await self.crm_service.contact_store.get_by_apollo_contact_id(apollo_id)
+            if found is not None:
+                return found
+        linkedin = normalize_linkedin_url(mapped_fields.get("linkedin_url"))
+        if linkedin:
+            found = await self.crm_service.contact_store.get_by_linkedin_url(linkedin)
+            if found is not None:
+                return found
+        return None
+
+    async def _attempt_create(self, row: CrmImportRowPreview, created_in_this_commit: dict[int, str]) -> None:
+        """Mutates `row` in place to a terminal outcome ("created" or
+        "error") -- never leaves it at "creating". Caller owns the durable
+        checkpoint save() both before (the "creating" marker) and after
+        calling this."""
+        try:
+            contact = await self.crm_service.create_contact_from_import(row.mapped_fields)
+            created_in_this_commit[row.row_index] = contact.crm_contact_id
+            row.commit_outcome = "created"
+            row.resolved_contact_id = contact.crm_contact_id
+        except Exception:
+            row.commit_outcome = "error"
+
+    @staticmethod
+    def _compute_report(preview: list[CrmImportRowPreview]) -> CrmImportReport:
+        """Derives the aggregate report entirely from durable per-row
+        commit_outcome values -- never from any in-memory counter -- so the
+        SAME report is returned whether this is the call that just finished
+        committing or a later call against an already-COMMITTED batch (see
+        commit()'s own docstring). Every row is assumed to already have a
+        non-None commit_outcome when this is called."""
+        counts = Counter(row.commit_outcome for row in preview)
+        return CrmImportReport(
+            created=counts.get("created", 0),
+            updated=counts.get("updated", 0),
+            skipped=counts.get("skipped", 0),
+            errors=counts.get("error", 0),
+        )
+
     async def commit(self, import_batch_id: str, decisions: dict[int, str] | None = None) -> CrmImportReport:
+        """
+        Idempotent and resumable (Stage 4A, 2026-09-03) -- a row's
+        `commit_outcome`, once set, is PERMANENT: this method never
+        revisits, re-decides, or re-applies a row that already has one,
+        regardless of how many times commit() is called against this batch
+        or what `decisions` a later call happens to supply for that same
+        row_index. This is what makes a retry safe after a crash, and what
+        makes a batch already fully COMMITTED a true no-op on every
+        subsequent call (zero contact creates/updates, zero Activity Log
+        re-emission, the exact same CrmImportReport returned every time --
+        computed fresh from durable state via _compute_report(), never from
+        an in-memory counter carried across calls).
+
+        DURABILITY MECHANISM: each row's outcome is persisted via
+        `batch_store.save()` immediately after that ONE row is decided --
+        not once at the end of the whole loop (the pre-Stage-4A behavior,
+        which left a crash anywhere in a 500-row commit with ZERO durable
+        progress, so a naive retry would blindly re-run every "create"
+        decision and produce real duplicate contacts). This bounds the
+        general unsafe crash window to a single row.
+
+        CREATE gets one further, deliberate refinement (2026-09-03,
+        post-review): a "create" decision is NOT applied in one step. This
+        method first durably marks the row `commit_outcome = "creating"`
+        (a TRANSIENT, non-terminal value -- see CrmImportRowPreview's own
+        docstring) BEFORE attempting `create_contact_from_import()`, then
+        only afterward resolves it to a terminal "created"/"error". This
+        is what lets a resumed call tell "this row's create was already
+        ATTEMPTED once" (commit_outcome == "creating") apart from "this
+        row has never been decided at all" (commit_outcome is None) --
+        an ambiguity that matters because those two situations must be
+        handled completely differently: the former is safe to recover
+        automatically (see below); reinterpreting the latter would
+        silently override a human's (or _default_decision()'s) own
+        create/update/skip choice, which this method must never do.
+
+        For a row found in the "creating" state, this method recovers
+        rather than blindly re-creating: `_find_existing_by_confident_
+        identifiers()` looks the row's OWN email/apollo_contact_id/
+        linkedin_url up directly against CrmContactStore -- the same
+        three tiers classify_match() uses, in the same order, but
+        deliberately NOT classify_match() itself (no conflict-downgrade,
+        no name+company fallback tier -- see that helper's own docstring
+        for exactly why re-running that POLICY here would risk
+        reinterpreting the row's already-made decision). If found, that
+        IS this row's own earlier create having actually landed --
+        recovered as "created" with the correct resolved_contact_id,
+        zero new CrmContact rows. If not found, no attempt has actually
+        landed yet (the crash was before create_contact_from_import()
+        ever ran, or before it returned) -- attempt it now, for real.
+
+        This closes the duplicate-creation gap for every row carrying at
+        least one confident identifier (email, apollo_contact_id, or
+        linkedin_url) -- which CrmContactStore's own UNIQUE constraints
+        (see SQLiteCrmContactStore's schema) ALSO already independently
+        guard: even without this recovery logic, a blind second `create_
+        contact_from_import()` for such a row would fail with a UNIQUE
+        violation rather than silently duplicating (caught by the same
+        try/except as any other row-processing failure, landing on
+        "error" -- see _attempt_create()). The recovery logic's real
+        value is turning that failure into a correct "created" outcome
+        with the right resolved_contact_id, instead of an "error" that
+        would incorrectly hide an already-successfully-created contact
+        from list_resolved_contact_ids().
+
+        REMAINING GAP, quantified precisely: a row with NO confident
+        identifier at all (blank email, blank apollo_contact_id, blank
+        linkedin_url -- classified NEW or POSSIBLE_DUPLICATE purely via
+        the name+company fallback tier, or with no identifying data
+        whatsoever) has nothing for CrmContactStore's UNIQUE constraints
+        OR this recovery lookup to key off. For such a row ONLY, the
+        exact crash window this method cannot close: contact created,
+        crash before the "creating" checkpoint's own save() completes,
+        retry finds no durable marker at all and no recoverable match,
+        genuinely creates a second contact. Deliberately NOT mitigated by
+        falling back to a name+company lookup here: unlike email/apollo/
+        linkedin, name+company is NOT unique in this CRM (multiple real
+        contacts can share it -- that's exactly why it's a fallback tier,
+        never confident), so a name+company-based "recovery" could not
+        reliably distinguish "the contact THIS row's own earlier attempt
+        created" from "a different, unrelated existing contact that
+        happens to share a name and company" -- silently merging into the
+        wrong one would be worse than the gap itself. This residual gap
+        is real but narrow, and irrelevant to this codebase's actual
+        current consumer of resolved contacts (a campaign-scoped Add
+        Prospects cohort, Stage 3/4B) since that consumer already excludes
+        every contact lacking a usable email before freezing its cohort --
+        a row that can hit this gap could never have contributed to that
+        cohort in the first place.
+
+        Beyond CREATE, this residual-crash-window concern does not apply:
+        UPDATE's `apply_import_mapping()` merge is fill-only, so blindly
+        re-running it against the same target with the same mapped_fields
+        on a genuine retry is a true no-op (already verified by this
+        file's own test suite) -- no equivalent "creating" checkpoint is
+        needed there.
+
+        `CrmImportBatchStatus.COMMITTING` marks "an attempt has begun, not
+        every row is durably resolved yet" -- distinct from MAPPED ("never
+        attempted") and COMMITTED ("every row resolved, report finalized,
+        event logged"). Set once, on the first call, and left alone on a
+        resumed call (no-op re-write avoided). preview() refuses to run
+        again once a batch reaches COMMITTING/COMMITTED (see that method's
+        own guard) so this progress can never be silently discarded.
+
+        ACTIVITY LOG ORDERING (verified, 2026-09-03): `batch.status` is
+        saved as COMMITTED strictly BEFORE the one `import.completed`
+        event is recorded -- so a crash in the narrow gap between those
+        two statements leaves the batch correctly, durably COMMITTED
+        forever, but the completion event permanently unwritten (the
+        COMMITTED fast-path at the top of this method returns immediately
+        on any later call, never re-entering the code that logs it).
+        `import.completed` is therefore AT MOST once, best-effort -- never
+        exactly-once, and this is intentional, not an oversight: it
+        matches ActivityLogService.record()'s own explicitly documented
+        contract ("BEST EFFORT and must NEVER raise... every call site
+        invokes this AFTER its own store write, never before or wrapping
+        it in a shared transaction") and this codebase's one other
+        analogous case (MailCampaignService._reconcile_batch()'s
+        "mail_campaign.activated"/reactivated event, logged strictly after
+        the campaign's own status flip, with the identical accepted
+        lost-on-crash gap). The reverse ordering (log first, flip after)
+        was deliberately rejected: it would risk the opposite, and worse,
+        failure -- a crash between the log write and the COMMITTED flip
+        would leave the batch not-yet-COMMITTED, so a resumed call would
+        re-enter the finalize block and log the event a SECOND time.
+        Losing an audit-trail entry is an accepted, bounded risk; a
+        duplicated one, or worse, a duplicated CRM mutation, is not.
+
+        Matching/classification/merge policy is completely untouched: every
+        row's `status`/`matched_contact_id`/`matched_on` (set once, by
+        preview()) and the exact same `_default_decision()`/
+        `apply_import_mapping()` calls decide what happens to a row the
+        FIRST time it's ever processed here -- nothing about WHICH decision
+        a row gets, or what create/update actually does, changed in this
+        pass. `created_in_this_commit` (resolving a same-file "update the
+        row created earlier" reference) is now seeded from every row's
+        already-durable `resolved_contact_id`, not just ones created within
+        this specific call, so that cross-reference still resolves
+        correctly on a resumed call.
+        """
         batch = await self._require_batch(import_batch_id)
         if batch.preview is None:
             raise ValueError("Must call preview() before commit()")
+
+        if batch.status == CrmImportBatchStatus.COMMITTED:
+            if all(row.commit_outcome is None for row in batch.preview):
+                # A genuinely pre-existing production case, not a
+                # hypothetical: CrmImportBatch already had real committed
+                # rows in production before Stage 4A added commit_outcome
+                # tracking, so their preview rows have no durable outcome
+                # to reconstruct a report from. Refusing loudly here is
+                # strictly safer than the pre-Stage-4A behavior (which
+                # would have silently RE-COMMITTED the whole batch, creating
+                # real duplicate contacts) and safer than silently
+                # returning a misrepresentative all-zero report.
+                raise ValueError(
+                    f"CrmImportBatch {import_batch_id} was committed before per-row commit "
+                    "outcome tracking existed (Stage 4A, 2026-09-03) -- its original report "
+                    "cannot be reconstructed from durable state. No action was taken."
+                )
+            return self._compute_report(batch.preview)
+
         decisions = decisions or {}
 
-        created = updated = skipped = errors = 0
-        created_in_this_commit: dict[int, str] = {}
+        if batch.status != CrmImportBatchStatus.COMMITTING:
+            batch.status = CrmImportBatchStatus.COMMITTING
+            await self.batch_store.save(batch)
+
+        created_in_this_commit: dict[int, str] = {
+            row.row_index: row.resolved_contact_id for row in batch.preview if row.resolved_contact_id is not None
+        }
 
         for row in batch.preview:
-            if row.status == CrmImportRowStatus.ERROR:
-                skipped += 1
+            if row.commit_outcome == "creating":
+                # A create attempt for THIS row already began in an earlier,
+                # interrupted call -- recover rather than blindly retry. See
+                # this method's own docstring for the full reasoning.
+                recovered = await self._find_existing_by_confident_identifiers(row.mapped_fields)
+                if recovered is not None:
+                    row.commit_outcome = "created"
+                    row.resolved_contact_id = recovered.crm_contact_id
+                    created_in_this_commit[row.row_index] = recovered.crm_contact_id
+                else:
+                    await self._attempt_create(row, created_in_this_commit)
+                await self.batch_store.save(batch)
                 continue
+
+            if row.commit_outcome is not None:
+                continue  # already durably resolved by this or an earlier call -- never revisited
+
+            if row.status == CrmImportRowStatus.ERROR:
+                # Matches the pre-Stage-4A aggregate exactly: a row that
+                # failed classification at PREVIEW time counts toward
+                # `skipped`, not `errors`, in the final report.
+                row.commit_outcome = "skipped"
+                await self.batch_store.save(batch)
+                continue
+
             decision = decisions.get(row.row_index, self._default_decision(row.status))
+
+            if decision == "create":
+                # Durable "an attempt is starting" marker, written BEFORE
+                # the mutation -- see this method's own docstring for why
+                # this two-phase write is specifically needed for create
+                # (and only create).
+                row.commit_outcome = "creating"
+                await self.batch_store.save(batch)
+                await self._attempt_create(row, created_in_this_commit)
+                await self.batch_store.save(batch)
+                continue
 
             try:
                 if decision == "skip":
-                    skipped += 1
-                elif decision == "create":
-                    contact: CrmContact = await self.crm_service.create_contact_from_import(row.mapped_fields)
-                    created_in_this_commit[row.row_index] = contact.crm_contact_id
-                    created += 1
+                    row.commit_outcome = "skipped"
                 elif decision == "update":
                     target_id = row.matched_contact_id
                     if target_id is None and row.matched_on and row.matched_on.startswith("within_file_row_"):
                         ref_row = int(row.matched_on.removeprefix("within_file_row_"))
                         target_id = created_in_this_commit.get(ref_row)
-                    if target_id is None:
-                        errors += 1
-                        continue
-                    existing = await self.crm_service.contact_store.get(target_id)
+                    existing = await self.crm_service.contact_store.get(target_id) if target_id is not None else None
                     if existing is None:
-                        errors += 1
-                        continue
-                    merged = self.crm_service.apply_import_mapping(existing, row.mapped_fields, is_new=False)
-                    await self.crm_service.contact_store.save(merged)
-                    updated += 1
+                        row.commit_outcome = "error"
+                    else:
+                        merged = self.crm_service.apply_import_mapping(existing, row.mapped_fields, is_new=False)
+                        await self.crm_service.contact_store.save(merged)
+                        row.commit_outcome = "updated"
+                        row.resolved_contact_id = target_id
                 else:
-                    errors += 1
+                    row.commit_outcome = "error"
             except Exception:
-                errors += 1
+                row.commit_outcome = "error"
 
+            # Durable checkpoint, immediately after THIS row's own outcome
+            # is decided -- see this method's own docstring for exactly
+            # what crash window this bounds.
+            await self.batch_store.save(batch)
+
+        # Reaching this point means the loop above ran to completion without
+        # being interrupted -- every row in batch.preview now has a non-None
+        # commit_outcome (either just set, or already durable from an
+        # earlier call). Finalize exactly once.
         batch.status = CrmImportBatchStatus.COMMITTED
         await self.batch_store.save(batch)
 
-        # ONE summary event per commit() call, never one per row -- reuses
-        # CrmService's own ActivityLogService rather than taking a separate
-        # dependency, since this service is always constructed with a
-        # crm_service that already has one (see app/main.py's lifespan wiring).
+        report = self._compute_report(batch.preview)
+
+        # ONE summary event per commit() call that actually finalizes a
+        # batch -- never one per row, and never again on a later no-op call
+        # against an already-COMMITTED batch (that path returns above,
+        # before this line is ever reached again). Reuses CrmService's own
+        # ActivityLogService rather than taking a separate dependency,
+        # since this service is always constructed with a crm_service that
+        # already has one (see app/main.py's lifespan wiring).
         await self.crm_service.activity_log.record(
             event_type="import.completed",
             category=ActivityCategory.IMPORTS,
             source=ActivitySource.CSV_IMPORT,
             summary=(
-                f"CSV import completed: {created} created, {updated} updated, "
-                f"{skipped} skipped, {errors} error{'s' if errors != 1 else ''} "
+                f"CSV import completed: {report.created} created, {report.updated} updated, "
+                f"{report.skipped} skipped, {report.errors} error{'s' if report.errors != 1 else ''} "
                 f'("{batch.filename}").'
             ),
             entity_type="import_batch",
             entity_id=batch.import_batch_id,
             entity_name=batch.filename,
-            metadata={"created": created, "updated": updated, "skipped": skipped, "errors": errors},
+            metadata={"created": report.created, "updated": report.updated, "skipped": report.skipped, "errors": report.errors},
         )
-        return CrmImportReport(created=created, updated=updated, skipped=skipped, errors=errors)
+        return report
+
+    async def list_resolved_contact_ids(self, import_batch_id: str) -> list[str]:
+        """Every unique CrmContact id this import batch actually resolved --
+        both newly created and updated/matched-existing rows, in file
+        order, deduped (two CSV rows resolving to the SAME contact --
+        e.g. a within-file duplicate, or two rows independently matching
+        the same existing contact -- contribute only once). Excludes
+        skipped/error rows and any row with no resolved contact.
+
+        Requires the batch to be fully COMMITTED (raises ValueError
+        otherwise, including for a batch still COMMITTING) -- an
+        incomplete commit's outcomes are incomplete by definition, and
+        returning a partial list here would silently misrepresent the
+        import as more finished than it actually is.
+
+        This is the narrow, read-only entry point a campaign-scoped CSV
+        Add Prospects operation (Stage 4B, not yet implemented) will
+        consume to resolve its candidate cohort -- deliberately just a
+        list of ids, nothing more, so that consumer never needs to touch
+        CrmImportRowPreview/mapped_fields/matching internals directly."""
+        batch = await self._require_batch(import_batch_id)
+        if batch.status != CrmImportBatchStatus.COMMITTED:
+            raise ValueError(
+                f"CrmImportBatch {import_batch_id} is not fully committed (status={batch.status.value}) -- "
+                "resolved contact ids are only available once every row has been durably resolved."
+            )
+        if batch.preview is None:
+            return []
+        return list(dict.fromkeys(row.resolved_contact_id for row in batch.preview if row.resolved_contact_id is not None))

@@ -44,7 +44,7 @@ Three field groups, kept structurally distinct on purpose:
 import types
 from datetime import datetime
 from enum import Enum
-from typing import Any, get_args, get_origin
+from typing import Any, Literal, get_args, get_origin
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -598,17 +598,46 @@ class CrmImportRowStatus(str, Enum):
 
 
 class CrmImportRowPreview(BaseModel):
+    """`matched_contact_id`/`matched_on` are PREVIEW-time information only --
+    set once by preview() and never touched again (see classify_match()'s
+    own semantics). `commit_outcome`/`resolved_contact_id` are a SEPARATE,
+    durable record of what commit() actually did with this row -- see
+    CrmImportService.commit()'s own docstring (Stage 4A, 2026-09-03) for why
+    these are kept distinct rather than overloading matched_contact_id: a
+    row's preview-time match and its eventual commit outcome can differ
+    (e.g. a POSSIBLE_DUPLICATE row a human overrides to "create" has no
+    matched_contact_id at all, but does get a resolved_contact_id once
+    committed). Both commit fields are None until commit() actually
+    processes this row. `commit_outcome` has one TRANSIENT, non-terminal
+    value -- "creating" -- durably written immediately BEFORE a "create"
+    decision's CrmContact mutation is attempted, specifically so a crash
+    between that mutation succeeding and its own terminal outcome landing
+    is distinguishable from "never attempted at all" (see
+    CrmImportService.commit()'s own docstring for exactly what this
+    unlocks). Every other value ("created"/"updated"/"skipped"/"error") is
+    PERMANENT once set: commit() never revisits or changes a row that
+    already has one of those, which is the core mechanism that makes
+    commit() safely resumable after a crash."""
+
     row_index: int
     mapped_fields: dict[str, Any]
     status: CrmImportRowStatus
     matched_contact_id: str | None = None
     matched_on: str | None = None  # "email" | "apollo_contact_id" | "linkedin_url" | "name_company"
     error: str | None = None
+    commit_outcome: Literal["creating", "created", "updated", "skipped", "error"] | None = None
+    resolved_contact_id: str | None = None
 
 
 class CrmImportBatchStatus(str, Enum):
     UPLOADED = "uploaded"
     MAPPED = "mapped"
+    # COMMITTING (Stage 4A, 2026-09-03): a commit() attempt has begun but not
+    # every row has a durable commit_outcome yet -- distinguishes "commit
+    # interrupted partway through" from "never committed" (MAPPED) and from
+    # "fully committed" (COMMITTED). See CrmImportService.commit()'s own
+    # docstring for the full resumability contract this status supports.
+    COMMITTING = "committing"
     COMMITTED = "committed"
 
 

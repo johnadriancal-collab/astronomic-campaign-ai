@@ -442,6 +442,8 @@ async def preview_import(
         return await service.preview(import_batch_id, req.column_mapping)
     except CrmImportBatchNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.post("/import/{import_batch_id}/commit", response_model=CrmImportReport)
