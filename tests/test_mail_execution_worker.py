@@ -25,6 +25,7 @@ from app.models.mail import (
 )
 from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
@@ -38,6 +39,7 @@ from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicySt
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.repositories.worker_lease_store import MemoryWorkerLeaseStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_execution_worker import MailExecutionWorker
@@ -108,6 +110,7 @@ async def env():
         batch_store=MemoryMailEnrollmentBatchStore(),
         batch_member_store=MemoryMailEnrollmentBatchMemberStore(),
         suppression_store=MemoryMailSuppressionStore(),
+        crm_import_reader=CrmImportService(crm_service=CrmService(), batch_store=MemoryCrmImportBatchStore()),
     )
 
     await campaign_store.create(

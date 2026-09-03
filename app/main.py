@@ -84,6 +84,7 @@ from app.repositories.sqlite_luma_question_mapping_store import SQLiteLumaQuesti
 from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrationStore
 from app.repositories.sqlite_mail_campaign_mailbox_store import SQLiteMailCampaignMailboxStore
 from app.repositories.sqlite_mail_campaign_store import SQLiteMailCampaignStore
+from app.repositories.sqlite_mail_campaign_csv_prospect_link_store import SQLiteMailCampaignCsvProspectLinkStore
 from app.repositories.sqlite_mail_enrollment_batch_member_store import SQLiteMailEnrollmentBatchMemberStore
 from app.repositories.sqlite_mail_enrollment_batch_store import SQLiteMailEnrollmentBatchStore
 from app.repositories.sqlite_mail_enrollment_step_store import SQLiteMailEnrollmentStepStore
@@ -119,6 +120,7 @@ from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
 from app.services.luma_sync_service import LumaSyncService
+from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProspectService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_execution_worker import MailExecutionWorker
@@ -157,6 +159,7 @@ async def lifespan(app: FastAPI):
     mail_enrollment_step_store = SQLiteMailEnrollmentStepStore(settings.database_path)
     mail_enrollment_batch_store = SQLiteMailEnrollmentBatchStore(settings.database_path)
     mail_enrollment_batch_member_store = SQLiteMailEnrollmentBatchMemberStore(settings.database_path)
+    mail_campaign_csv_prospect_link_store = SQLiteMailCampaignCsvProspectLinkStore(settings.database_path)
     mailbox_send_policy_store = SQLiteMailboxSendPolicyStore(settings.database_path)
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
@@ -190,6 +193,7 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_step_store.connect()
     await mail_enrollment_batch_store.connect()
     await mail_enrollment_batch_member_store.connect()
+    await mail_campaign_csv_prospect_link_store.connect()
     await mailbox_send_policy_store.connect()
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
@@ -304,6 +308,18 @@ async def lifespan(app: FastAPI):
         batch_store=mail_enrollment_batch_store,
         batch_member_store=mail_enrollment_batch_member_store,
         suppression_store=mail_suppression_store,
+        # Stage 4B (2026-09-03): the SAME crm_import_service instance
+        # constructed above, but MailCampaignService only ever sees it as
+        # the narrow, read-only CrmImportResolutionReader Protocol -- see
+        # that Protocol's own docstring. MailCampaignCsvProspectService,
+        # constructed right below, is the one place that gets the FULL,
+        # writable crm_import_service.
+        crm_import_reader=crm_import_service,
+    )
+    app.state.mail_campaign_csv_prospect_service = MailCampaignCsvProspectService(
+        crm_import_service=crm_import_service,
+        mail_campaign_service=app.state.mail_campaign_service,
+        link_store=mail_campaign_csv_prospect_link_store,
     )
 
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). CSRF
@@ -444,6 +460,7 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_step_store.close()
     await mail_enrollment_batch_store.close()
     await mail_enrollment_batch_member_store.close()
+    await mail_campaign_csv_prospect_link_store.close()
     await mailbox_send_policy_store.close()
     await mailbox_store.close()
     await mailbox_credential_store.close()

@@ -27,6 +27,7 @@ from app.models.mail import MailCampaignStatus
 from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.campaign_store import MemoryCampaignStore
+from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
 from app.repositories.email_sequence_step_store import MemoryEmailSequenceStepStore
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
@@ -42,6 +43,7 @@ from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicySt
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.campaign_service import CampaignService
+from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.mail_campaign_service import MailCampaignService
@@ -108,6 +110,7 @@ def test_client():
         batch_store=MemoryMailEnrollmentBatchStore(),
         batch_member_store=MemoryMailEnrollmentBatchMemberStore(),
         suppression_store=MemoryMailSuppressionStore(),
+        crm_import_reader=CrmImportService(crm_service=CrmService(), batch_store=MemoryCrmImportBatchStore()),
     )
 
     app = FastAPI()

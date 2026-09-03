@@ -525,6 +525,39 @@ class MailEnrollmentBatch(BaseModel):
     suppressed_count: int | None = None
 
 
+class MailCampaignCsvProspectLink(BaseModel):
+    """Durable, permanent link from one (mail_campaign_id, idempotency_key)
+    pair to the CrmImportBatch it is bound to (Stage 4B, 2026-09-03) --
+    written by MailCampaignCsvProspectService as the FIRST action of a
+    CSV-driven Add Prospects operation, before the campaign eligibility
+    preflight, before CrmImportService.commit(), before anything else --
+    see that service's own docstring for the full ordering and why.
+
+    Its entire purpose: once created, a retry of the SAME operation that
+    happens to (re)supply a DIFFERENT import_batch_id must still resolve
+    to THIS row's own recorded id, never the retry's -- so one logical
+    "upload this CSV, add these prospects" operation can never fan out
+    into more than one CrmImportBatch commit, regardless of how many
+    times the client retries. `PRIMARY KEY (mail_campaign_id,
+    idempotency_key)` at the store level is the actual mechanism (see
+    MailCampaignCsvProspectLinkStore); this model carries no separate id
+    of its own because that composite pair already uniquely identifies
+    the row.
+
+    Deliberately minimal and PII-free: three ids and a timestamp, nothing
+    else. The real import content (raw CSV rows, mapped fields, per-row
+    classification) lives exclusively in CrmImportBatch, reachable only
+    through the existing, separate, human-session-only /crm/import/*
+    routes -- this table is never a second place that data could leak
+    into, and is safe to read/log without any of the privacy handling
+    CrmImportBatch itself requires."""
+
+    mail_campaign_id: str
+    idempotency_key: str
+    import_batch_id: str
+    created_at: datetime
+
+
 class MailEnrollmentBatchMemberState(str, Enum):
     """One member's progress through resolution -- a strict, one-way
     progression, never reversed:

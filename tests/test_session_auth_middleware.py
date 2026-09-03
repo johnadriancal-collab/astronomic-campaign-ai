@@ -112,6 +112,14 @@ def client(auth_svc):
     async def crm_importfoo():
         return {"crm_contact_id": "unrelated-route-that-merely-starts-with-the-same-letters"}
 
+    @app.post("/crm/import/upload")  # stands in for the real raw CSV upload route
+    async def crm_import_upload():
+        return {"import_batch_id": "would-have-been-created", "rows": ["raw-csv-row-1"]}
+
+    @app.post("/crm/import/some-batch-id/preview")  # stands in for the real raw CSV preview route
+    async def crm_import_preview():
+        return {"preview": ["raw-csv-row-1"]}
+
     @app.post("/crm/contacts")  # stands in for a real CRM write route
     async def crm_contacts_write():
         return {"crm_contact_id": "would-have-been-created"}
@@ -181,6 +189,14 @@ def client(auth_svc):
     @app.post("/mail/campaigns/{campaign_id}/prospects")
     async def mail_campaign_add_prospects(campaign_id: str):
         return {"batch_id": "real-new-batch-data", "mail_campaign_id": campaign_id}
+
+    # Stage 4B (2026-09-03), deliberately EXCLUDED from operator scope --
+    # a genuinely distinct path from the CRM-List /prospects route above
+    # (not a shared path with a branching body), human-Hub-session-only
+    # for V1. See app/api/mail.py's own route docstring.
+    @app.post("/mail/campaigns/{campaign_id}/prospects/csv")
+    async def mail_campaign_add_prospects_csv(campaign_id: str):
+        return {"batch_id": "real-new-csv-batch-data", "mail_campaign_id": campaign_id}
 
     @app.get("/mail/campaigns/{campaign_id}/channels")
     async def mail_campaign_channels_get(campaign_id: str):
@@ -778,13 +794,51 @@ def test_read_token_cannot_read_workload_or_batches(client, configured_service_r
 def test_operator_can_add_prospects(client, configured_service_operator_token):
     """Stage 3 (2026-09-03): CRM-List Add Prospects is operator-token
     eligible -- see MailCampaignService.add_prospects()'s own docstring.
-    This stand-in route is source-agnostic (the real CSV-vs-CRM-List
-    distinction is enforced by the request body's Literal type at the
-    real /mail/campaigns/{id}/prospects route, not by this middleware
-    scope check), so this test only proves the PATH+METHOD is in scope."""
+    This route (POST .../prospects) is CRM-List only -- its Pydantic
+    request model has always rejected a csv_upload-shaped body at the
+    schema level. As of Stage 4B (2026-09-03), CSV Add Prospects also
+    lives at a COMPLETELY SEPARATE path, POST .../prospects/csv (see the
+    "CANNOT" test below) -- two independent layers keeping the operator
+    token's grant here scoped to CRM-List only, never CSV."""
     c, _svc = client
 
     resp = c.post("/mail/campaigns/c1/prospects", headers=_OPERATOR_HEADERS)
+
+    assert resp.status_code == 200
+
+
+def test_operator_cannot_add_prospects_via_csv(client, configured_service_operator_token):
+    """Stage 4B (2026-09-03): the CSV Add Prospects orchestration route is
+    deliberately NOT granted to the operator token -- human-Hub-session
+    only for V1 (see app/api/mail.py's own route docstring). No rule for
+    it exists in _SERVICE_OPERATOR_RULES at all -- denied by omission,
+    the same allowlist mechanism protecting every other unlisted route."""
+    c, _svc = client
+
+    resp = c.post("/mail/campaigns/c1/prospects/csv", headers=_OPERATOR_HEADERS)
+
+    assert resp.status_code == 403
+
+
+def test_read_token_cannot_add_prospects_via_csv(client, configured_service_read_token):
+    c, _svc = client
+
+    resp = c.post("/mail/campaigns/c1/prospects/csv", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+
+
+def test_human_session_can_add_prospects_via_csv(client):
+    """The one route Stage 4B adds is reachable by an ordinary
+    authenticated Hub session with ZERO middleware change -- the
+    service-token scope tables only apply when an Authorization: Bearer
+    header matching one of the two known tokens is present at all; a
+    plain session-cookie request never enters that code path (see
+    enforce_session_auth()'s own control flow)."""
+    c, _svc = client
+    _login(c)
+
+    resp = c.post("/mail/campaigns/c1/prospects/csv")
 
     assert resp.status_code == 200
 
@@ -893,6 +947,21 @@ def test_operator_cannot_access_backup_or_import(client, configured_service_oper
 
     assert c.get("/crm/backup/export", headers=_OPERATOR_HEADERS).status_code == 403
     assert c.get("/crm/import/some-batch-id", headers=_OPERATOR_HEADERS).status_code == 403
+
+
+def test_operator_cannot_upload_or_preview_a_csv_import(client, configured_service_operator_token):
+    """Stage 4B (2026-09-03) requirement, verified explicitly rather than
+    relying only on the broader GET-scoped test above: the operator token
+    remains forbidden from the raw CSV upload/preview routes too -- these
+    are POST, not covered by _is_excluded_from_service_read at all (that
+    exclusion only matters for the read token's GET-only scope); for the
+    operator token, no rule for either of these paths exists in
+    _SERVICE_OPERATOR_RULES, so both are denied by the same omission
+    mechanism as every other unlisted route."""
+    c, _svc = client
+
+    assert c.post("/crm/import/upload", headers=_OPERATOR_HEADERS).status_code == 403
+    assert c.post("/crm/import/some-batch-id/preview", headers=_OPERATOR_HEADERS).status_code == 403
 
 
 # --- CANNOT: unrelated API surfaces ------------------------------------------

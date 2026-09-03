@@ -26,6 +26,7 @@ from app.models.mail import (
     MailSuppressionReason,
 )
 from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
@@ -38,6 +39,7 @@ from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
 from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicyStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmContactListNotFound, CrmService
 from app.services.mail_campaign_service import (
     MailCampaignNotEligibleForProspectsError,
@@ -112,9 +114,14 @@ def enrollment_store():
 
 
 @pytest.fixture
+def crm_import_service(crm):
+    return CrmImportService(crm_service=crm, batch_store=MemoryCrmImportBatchStore())
+
+
+@pytest.fixture
 def service(
     crm, activity_log, mailbox_store, channel_store, window_store, enrollment_step_store, suppression_store,
-    batch_store, batch_member_store, campaign_store, enrollment_store,
+    batch_store, batch_member_store, campaign_store, enrollment_store, crm_import_service,
 ):
     sending_service = MailSendingService(
         campaign_store=campaign_store,
@@ -140,6 +147,7 @@ def service(
         batch_store=batch_store,
         batch_member_store=batch_member_store,
         suppression_store=suppression_store,
+        crm_import_reader=crm_import_service,
     )
 
 
@@ -326,9 +334,13 @@ async def test_add_prospects_accepts_paused(service, crm):
     assert unchanged.status == MailCampaignStatus.PAUSED
 
 
-async def test_add_prospects_rejects_unimplemented_csv_source(service, crm):
+async def test_add_prospects_requires_source_import_batch_id_for_csv_upload(service, crm):
+    """CSV_UPLOAD is implemented (Stage 4B, 2026-09-03) -- see
+    tests/test_mail_add_prospects_csv.py for its full coverage. This
+    file keeps only the boundary check mirroring
+    test_add_prospects_requires_source_list_id_for_crm_list below."""
     active, contact_list = await _make_active_campaign(service, crm, n_contacts=0)
-    with pytest.raises(NotImplementedError):
+    with pytest.raises(ValueError):
         await service.add_prospects(
             active.mail_campaign_id, source=MailEnrollmentBatchSource.CSV_UPLOAD, idempotency_key="k1"
         )

@@ -30,7 +30,7 @@ omission of a button.
 
 import uuid
 from datetime import datetime, time, timedelta, timezone
-from typing import Any
+from typing import Any, Protocol
 
 from app.config import settings
 from app.models.activity import ActivityCategory, ActivitySource
@@ -86,6 +86,38 @@ from app.services.mail_sending_service import MailSendingService
 # the simplest way to read a full list's membership without inventing a
 # second "get all" method on CrmService (which this file must not modify).
 _ALL_CONTACTS_PAGE_SIZE = 100_000
+
+# Shared by add_prospects()'s own authoritative eligibility check and
+# MailCampaignCsvProspectService's read-only preflight check (Stage 4B,
+# 2026-09-03) -- defined exactly once so the two checks can never drift
+# apart. See add_prospects()'s own docstring for what each of these three
+# statuses means for this operation, and MailCampaignNotEligibleForProspectsError
+# for why DRAFT/READY/ARCHIVED are refused.
+PROSPECT_ELIGIBLE_CAMPAIGN_STATUSES = frozenset(
+    {MailCampaignStatus.ACTIVE, MailCampaignStatus.PAUSED, MailCampaignStatus.COMPLETED}
+)
+
+
+class CrmImportResolutionReader(Protocol):
+    """The ONLY CRM-import capability MailCampaignService is ever allowed
+    to depend on (Stage 4B, 2026-09-03) -- read-only, and structurally
+    incapable of triggering a CRM mutation: this Protocol's surface has no
+    commit()/preview()/upload() at all, only the one read this file
+    actually needs. CrmImportService satisfies this structurally, with
+    ZERO changes to that file -- Python's Protocol typing (PEP 544) needs
+    no explicit declaration or inheritance, only a matching method
+    signature. This keeps this file's existing, load-bearing invariant
+    ("CrmService is a read-only dependency here... this file never calls
+    anything that mutates a CrmContact or a CrmContactList/membership")
+    true for CRM import too, enforced by the type system rather than by a
+    docstring promise plus a structural test alone. The component that
+    legitimately needs the FULL, writable CrmImportService is
+    MailCampaignCsvProspectService (app/services/
+    mail_campaign_csv_prospect_service.py) -- the one place in this
+    codebase allowed to trigger a CSV-driven CRM mutation on a campaign's
+    behalf."""
+
+    async def list_resolved_contact_ids(self, import_batch_id: str) -> list[str]: ...
 
 
 class MailCampaignNotFound(Exception):
@@ -417,6 +449,7 @@ class MailCampaignService:
         batch_store: MailEnrollmentBatchStore,
         batch_member_store: MailEnrollmentBatchMemberStore,
         suppression_store: MailSuppressionStore,
+        crm_import_reader: CrmImportResolutionReader,
     ):
         self.campaign_store = campaign_store
         self.step_store = step_store
@@ -441,6 +474,11 @@ class MailCampaignService:
         # exactly how MailSendingService's own early/final suppression
         # checks already do this (self.suppression_store.get(...)).
         self.suppression_store = suppression_store
+        # Stage 4B (2026-09-03): read-only CRM-import resolution, typed as
+        # the narrow CrmImportResolutionReader Protocol (not the full,
+        # writable CrmImportService) -- see that Protocol's own docstring.
+        # Used only by add_prospects()'s CSV_UPLOAD branch below.
+        self.crm_import_reader = crm_import_reader
 
     async def _require_campaign(self, mail_campaign_id: str) -> MailCampaign:
         campaign = await self.campaign_store.get(mail_campaign_id)
@@ -1461,6 +1499,7 @@ class MailCampaignService:
         source: MailEnrollmentBatchSource,
         idempotency_key: str,
         source_list_id: str | None = None,
+        source_import_batch_id: str | None = None,
         actor: str | None = None,
     ) -> MailEnrollmentBatch:
         """The persistent-campaign entry point for growing an already-
@@ -1477,8 +1516,22 @@ class MailCampaignService:
         DRAFT/READY (use the audience+Mark Ready path instead) and
         ARCHIVED (terminal) via MailCampaignNotEligibleForProspectsError.
 
-        Stage 3 implements source=CRM_LIST only -- CSV_UPLOAD raises
-        NotImplementedError (Stage 4).
+        Both source=CRM_LIST (Stage 3) and source=CSV_UPLOAD (Stage 4B,
+        2026-09-03) are implemented. CSV_UPLOAD resolves its candidates via
+        `crm_import_reader.list_resolved_contact_ids(source_import_batch_id)`
+        -- the narrow, read-only CrmImportResolutionReader Protocol (see
+        this file's own module-level docstring for that type) -- which
+        itself requires the referenced CrmImportBatch to already be fully
+        COMMITTED (raises otherwise). This method NEVER commits a CRM
+        import itself, exactly as it never mutates a CrmContactList for
+        the CRM_LIST source: resolving an already-committed import is a
+        pure read, structurally identical in kind to reading a
+        CrmContactList's current membership. Triggering the actual CRM
+        commit is the job of MailCampaignCsvProspectService (app/services/
+        mail_campaign_csv_prospect_service.py), the one component in this
+        codebase allowed to hold a writable CrmImportService -- see that
+        service's own docstring for the full orchestration ordering
+        (durable link -> eligibility preflight -> commit -> this method).
 
         OPERATION-LEVEL IDEMPOTENCY: `idempotency_key` is required and is
         the ENTIRE mechanism preventing an HTTP retry (lost response,
@@ -1548,22 +1601,38 @@ class MailCampaignService:
         if existing is not None:
             return await self._reconcile_batch(existing.batch_id)
 
-        if campaign.status not in (MailCampaignStatus.ACTIVE, MailCampaignStatus.PAUSED, MailCampaignStatus.COMPLETED):
+        if campaign.status not in PROSPECT_ELIGIBLE_CAMPAIGN_STATUSES:
             raise MailCampaignNotEligibleForProspectsError(mail_campaign_id, campaign.status)
 
-        if source != MailEnrollmentBatchSource.CRM_LIST:
-            raise NotImplementedError("add_prospects() only supports source=crm_list in Stage 3 -- CSV upload is Stage 4.")
-        if not source_list_id:
-            raise ValueError("source_list_id is required when source=crm_list.")
-
-        await self.crm_service.get_contact_list(source_list_id)  # raises CrmContactListNotFound if dangling
-        contacts = (
-            await self.crm_service.get_list_contacts(source_list_id, page=1, page_size=_ALL_CONTACTS_PAGE_SIZE)
-        ).items
-        # Same "usable email only" filter as mark_ready()'s own snapshot,
-        # and the same order-preserving in-batch dedupe convention as
-        # CrmService.bulk_add_to_list().
-        candidate_ids = list(dict.fromkeys(c.crm_contact_id for c in contacts if normalize_email(c.email)))
+        if source == MailEnrollmentBatchSource.CRM_LIST:
+            if not source_list_id:
+                raise ValueError("source_list_id is required when source=crm_list.")
+            await self.crm_service.get_contact_list(source_list_id)  # raises CrmContactListNotFound if dangling
+            contacts = (
+                await self.crm_service.get_list_contacts(source_list_id, page=1, page_size=_ALL_CONTACTS_PAGE_SIZE)
+            ).items
+            # Same "usable email only" filter as mark_ready()'s own snapshot,
+            # and the same order-preserving in-batch dedupe convention as
+            # CrmService.bulk_add_to_list().
+            candidate_ids = list(dict.fromkeys(c.crm_contact_id for c in contacts if normalize_email(c.email)))
+        else:
+            assert source == MailEnrollmentBatchSource.CSV_UPLOAD  # the only two MailEnrollmentBatchSource values
+            if not source_import_batch_id:
+                raise ValueError("source_import_batch_id is required when source=csv_upload.")
+            # Raises CrmImportBatchNotFound / ValueError (not yet fully
+            # COMMITTED) via the reader Protocol -- see this method's own
+            # docstring. Already deduped by list_resolved_contact_ids()
+            # itself; only the blank-email filter is this method's own
+            # job, reading each contact's CURRENT, live email (never a
+            # transient CSV-row value) -- same principle as the CRM_LIST
+            # branch above, and the same reason _reconcile_batch() always
+            # re-checks suppression fresh rather than trusting a snapshot.
+            resolved_ids = await self.crm_import_reader.list_resolved_contact_ids(source_import_batch_id)
+            candidate_ids = []
+            for contact_id in resolved_ids:
+                contact = await self.crm_service.get_contact(contact_id)
+                if normalize_email(contact.email):
+                    candidate_ids.append(contact_id)
 
         batch_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
@@ -1583,6 +1652,7 @@ class MailCampaignService:
             mail_campaign_id=mail_campaign_id,
             source=source,
             source_list_id=source_list_id,
+            source_import_batch_id=source_import_batch_id,
             idempotency_key=idempotency_key,
             status=MailEnrollmentBatchStatus.PREPARING,
             created_at=now,

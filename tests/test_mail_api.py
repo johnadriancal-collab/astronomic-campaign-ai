@@ -14,9 +14,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.mail import router as mail_router
-from app.dependencies import get_mail_campaign_service, get_mail_suppression_service
+from app.dependencies import get_mail_campaign_csv_prospect_service, get_mail_campaign_service, get_mail_suppression_service
 from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
 from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
+from app.repositories.mail_campaign_csv_prospect_link_store import MemoryMailCampaignCsvProspectLinkStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
@@ -29,7 +31,9 @@ from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
 from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicyStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
+from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProspectService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
@@ -72,7 +76,12 @@ def window_store():
 
 
 @pytest.fixture
-def campaign_service(crm, mailbox_store, channel_store, window_store):
+def crm_import_service(crm):
+    return CrmImportService(crm_service=crm, batch_store=MemoryCrmImportBatchStore())
+
+
+@pytest.fixture
+def campaign_service(crm, mailbox_store, channel_store, window_store, crm_import_service):
     campaign_store = MemoryMailCampaignStore()
     enrollment_store = MemoryMailEnrollmentStore()
     enrollment_step_store = MemoryMailEnrollmentStepStore()
@@ -101,6 +110,7 @@ def campaign_service(crm, mailbox_store, channel_store, window_store):
         batch_store=MemoryMailEnrollmentBatchStore(),
         batch_member_store=MemoryMailEnrollmentBatchMemberStore(),
         suppression_store=MemoryMailSuppressionStore(),
+        crm_import_reader=crm_import_service,
     )
 
 
@@ -110,11 +120,21 @@ def suppression_service():
 
 
 @pytest.fixture
-def client(campaign_service, suppression_service):
+def csv_prospect_service(crm_import_service, campaign_service):
+    return MailCampaignCsvProspectService(
+        crm_import_service=crm_import_service,
+        mail_campaign_service=campaign_service,
+        link_store=MemoryMailCampaignCsvProspectLinkStore(),
+    )
+
+
+@pytest.fixture
+def client(campaign_service, suppression_service, csv_prospect_service):
     app = FastAPI()
     app.include_router(mail_router)
     app.dependency_overrides[get_mail_campaign_service] = lambda: campaign_service
     app.dependency_overrides[get_mail_suppression_service] = lambda: suppression_service
+    app.dependency_overrides[get_mail_campaign_csv_prospect_service] = lambda: csv_prospect_service
     with TestClient(app) as c:
         yield c
 
@@ -1352,8 +1372,9 @@ def test_add_prospects_route_unknown_source_list_returns_400(client, crm, mailbo
 
 def test_add_prospects_route_rejects_csv_upload_source_with_422(client, crm, mailbox_store, monkeypatch):
     """Literal["crm_list"] on the request model rejects "csv_upload" at
-    the Pydantic layer, before MailCampaignService.add_prospects()'s own
-    NotImplementedError is ever reached -- Stage 4 is not implemented."""
+    the Pydantic layer -- this route stays CRM-List only, unchanged by
+    Stage 4B (2026-09-03); CSV Add Prospects lives at the separate
+    POST .../prospects/csv route instead (see the tests below)."""
     from app.config import settings
 
     monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
@@ -1384,6 +1405,177 @@ def test_add_prospects_route_paused_campaign_succeeds(client, crm, mailbox_store
     resp = client.post(
         f"/mail/campaigns/{cid}/prospects",
         json={"source": "crm_list", "source_list_id": list_id, "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["enrolled_count"] == 1
+
+
+# --- CSV Add Prospects route (Stage 4B, 2026-09-03) -------------------------
+
+
+def _upload_and_preview_csv_for_http_tests(crm_import_service, csv_text: str, mapping: dict[str, str]) -> str:
+    """Upload+preview (deliberately NOT commit) via the real
+    CrmImportService directly (NOT HTTP -- /crm/import/* lives under a
+    different router than this file mounts, and is already covered
+    end-to-end by test_crm_api.py) -- exactly the state the real frontend
+    flow hands off to POST .../prospects/csv after its own steps 1-5: the
+    route itself performs the commit as part of its own orchestration
+    (see MailCampaignCsvProspectService's own docstring), it is never a
+    precondition of calling the route."""
+    import asyncio
+
+    async def run():
+        batch = await crm_import_service.upload("prospects.csv", csv_text.encode("utf-8"))
+        await crm_import_service.preview(batch.import_batch_id, mapping)
+        return batch.import_batch_id
+
+    return asyncio.run(run())
+
+
+def test_add_prospects_csv_route_success(client, crm, mailbox_store, crm_import_service, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, _list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+    import_batch_id = _upload_and_preview_csv_for_http_tests(crm_import_service, "Email\ncsvprospect@example.com\n", {"Email": "email"})
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects/csv",
+        json={"import_batch_id": import_batch_id, "idempotency_key": "http-csv-key-1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["source"] == "csv_upload"
+    assert body["source_import_batch_id"] == import_batch_id
+    assert body["status"] == "ready"
+    assert body["submitted_count"] == 1
+    assert body["enrolled_count"] == 1
+
+
+def test_add_prospects_csv_route_retry_with_same_idempotency_key_returns_the_same_batch(
+    client, crm, mailbox_store, crm_import_service, monkeypatch
+):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, _list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+    import_batch_id = _upload_and_preview_csv_for_http_tests(crm_import_service, "Email\nretrycsv@example.com\n", {"Email": "email"})
+
+    payload = {"import_batch_id": import_batch_id, "idempotency_key": "http-csv-retry-key"}
+    first = client.post(f"/mail/campaigns/{cid}/prospects/csv", json=payload)
+    second = client.post(f"/mail/campaigns/{cid}/prospects/csv", json=payload)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["batch_id"] == second.json()["batch_id"]
+    assert second.json()["enrolled_count"] == 1
+
+
+def test_add_prospects_csv_route_missing_campaign_returns_404(client, crm_import_service):
+    import_batch_id = _upload_and_preview_csv_for_http_tests(crm_import_service, "Email\na@example.com\n", {"Email": "email"})
+    resp = client.post(
+        "/mail/campaigns/does-not-exist/prospects/csv",
+        json={"import_batch_id": import_batch_id, "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 404
+
+
+def test_add_prospects_csv_route_draft_campaign_returns_409(client, crm_import_service):
+    created = client.post("/mail/campaigns", json={"name": "Still Draft"}).json()
+    import_batch_id = _upload_and_preview_csv_for_http_tests(crm_import_service, "Email\na@example.com\n", {"Email": "email"})
+
+    resp = client.post(
+        f"/mail/campaigns/{created['mail_campaign_id']}/prospects/csv",
+        json={"import_batch_id": import_batch_id, "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 409
+
+
+def test_add_prospects_csv_route_unknown_import_batch_returns_404(client, crm, mailbox_store, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, _list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects/csv",
+        json={"import_batch_id": "does-not-exist", "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 404
+
+
+def test_add_prospects_csv_route_uploaded_but_never_previewed_import_returns_400(
+    client, crm, mailbox_store, crm_import_service, monkeypatch
+):
+    """A merely-PREVIEWED (not yet committed) batch is the NORMAL first-
+    time flow -- commit() is called AS PART OF this route, not a
+    precondition of calling it (see MailCampaignCsvProspectService's own
+    docstring: link -> preflight -> commit -> add_prospects). The real
+    400 case is a batch that was never even previewed at all -- commit()
+    itself refuses with "Must call preview() before commit()"."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, _list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+
+    import asyncio
+
+    async def upload_only():
+        batch = await crm_import_service.upload("p.csv", b"Email\na@example.com\n")
+        return batch.import_batch_id
+
+    import_batch_id = asyncio.run(upload_only())
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects/csv",
+        json={"import_batch_id": import_batch_id, "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 400
+
+
+def test_add_prospects_csv_route_paused_campaign_succeeds(client, crm, mailbox_store, crm_import_service, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, _list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+    assert client.post(f"/mail/campaigns/{cid}/pause").status_code == 200
+    import_batch_id = _upload_and_preview_csv_for_http_tests(crm_import_service, "Email\npausedcsv@example.com\n", {"Email": "email"})
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects/csv",
+        json={"import_batch_id": import_batch_id, "idempotency_key": "k1"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["enrolled_count"] == 1
+
+
+def test_add_prospects_csv_route_decisions_are_passed_through(client, crm, mailbox_store, crm_import_service, monkeypatch):
+    """Proves the decisions dict reaches CrmImportService.commit() through
+    the route -- a human-approved POSSIBLE_DUPLICATE -> create override,
+    exactly the CRM Import review step's own existing format."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mail_sending_engine_enabled", True)
+    cid, _list_id = _build_active_campaign_via_api(client, crm, mailbox_store)
+
+    import asyncio
+
+    async def setup():
+        await crm.create_contact({"first_name": "Ada", "last_name": "Lovelace", "company": "Acme"})
+        batch = await crm_import_service.upload(
+            "p.csv", b"First Name,Last Name,Company,Email\nAda,Lovelace,Acme,newada@example.com\n"
+        )
+        await crm_import_service.preview(
+            batch.import_batch_id,
+            {"First Name": "first_name", "Last Name": "last_name", "Company": "company", "Email": "email"},
+        )
+        return batch.import_batch_id
+
+    import_batch_id = asyncio.run(setup())
+
+    resp = client.post(
+        f"/mail/campaigns/{cid}/prospects/csv",
+        json={"import_batch_id": import_batch_id, "idempotency_key": "k1", "decisions": {"0": "create"}},
     )
     assert resp.status_code == 200
     assert resp.json()["enrolled_count"] == 1

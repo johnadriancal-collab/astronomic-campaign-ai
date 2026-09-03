@@ -30,6 +30,7 @@ from app.models.mail import (
     MailEnrollmentStatus,
 )
 from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_batch_member_store import MemoryMailEnrollmentBatchMemberStore
@@ -42,6 +43,7 @@ from app.repositories.mail_suppression_store import MemoryMailSuppressionStore
 from app.repositories.mailbox_send_policy_store import MemoryMailboxSendPolicyStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_campaign_service import MailCampaignService
@@ -188,6 +190,7 @@ def service(
         batch_store=batch_store,
         batch_member_store=batch_member_store,
         suppression_store=suppression_store,
+        crm_import_reader=CrmImportService(crm_service=crm, batch_store=MemoryCrmImportBatchStore()),
     )
 
 

@@ -35,7 +35,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from pydantic import BaseModel
 
-from app.dependencies import get_mail_campaign_service, get_mail_sending_service, get_mail_suppression_service
+from app.dependencies import (
+    get_mail_campaign_csv_prospect_service,
+    get_mail_campaign_service,
+    get_mail_sending_service,
+    get_mail_suppression_service,
+)
 from app.models.mail import (
     MailCampaign,
     MailCampaignReview,
@@ -52,7 +57,9 @@ from app.models.mail import (
     MailSuppressionReason,
 )
 from app.models.mailbox import Mailbox
+from app.services.crm_import_service import CrmImportBatchNotFound
 from app.services.crm_service import CrmContactListNotFound
+from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProspectService
 from app.services.mail_campaign_service import (
     InvalidMailSequenceStepDelayError,
     InvalidMailTemplateVariableError,
@@ -385,6 +392,67 @@ async def add_prospects(
         raise HTTPException(status_code=409, detail=str(e))
     except CrmContactListNotFound as e:
         raise HTTPException(status_code=400, detail=f"Selected CRM List not found: {e}")
+
+
+class MailAddProspectsFromCsvRequest(BaseModel):
+    """`decisions` uses the EXACT same shape as CrmImportCommitRequest
+    (app/api/crm.py) -- row_index (as a string, JSON object keys) ->
+    "create"|"update"|"skip" -- so the frontend can build it identically
+    to how it already builds a decisions payload for the standalone
+    CRM Import review step, no new format to learn. `import_batch_id`
+    must already be COMMITTED, in progress (COMMITTING), or ready to
+    commit (MAPPED) -- it's expected to be the id returned by the
+    existing, unmodified POST /crm/import/upload -> POST /crm/import/{id}/preview
+    steps the frontend already calls directly (see MailCampaignCsvProspectService's
+    own module docstring for the full flow); this route never uploads or
+    parses a CSV itself, and never will -- see this file's own module
+    docstring for why no second CSV upload/parser API exists here."""
+
+    import_batch_id: str
+    idempotency_key: str
+    decisions: dict[str, str] = {}
+
+
+@router.post("/campaigns/{mail_campaign_id}/prospects/csv", response_model=MailEnrollmentBatch)
+async def add_prospects_from_csv(
+    mail_campaign_id: str,
+    payload: MailAddProspectsFromCsvRequest,
+    request: Request,
+    service: MailCampaignCsvProspectService = Depends(get_mail_campaign_csv_prospect_service),
+):
+    """The one new route Stage 4B adds (2026-09-03) -- CSV-driven Add
+    Prospects, orchestrating CrmImportService.commit() +
+    MailCampaignService.add_prospects() behind one durable idempotency
+    link. See MailCampaignCsvProspectService's own module docstring for
+    the full ordering, the "existing link always wins" guarantee, and the
+    documented eligibility race.
+
+    DELIBERATELY NOT reachable by either admin/service token -- this is a
+    human-Hub-session-only route for Stage 4B V1 (see
+    app/session_auth_middleware.py's module docstring): no entry exists
+    for it in _SERVICE_OPERATOR_RULES (denied by omission, the same
+    allowlist mechanism protecting every other unlisted route), and it is
+    a genuinely distinct path from the existing, unmodified
+    POST .../prospects (CRM-List) route -- not a shared path with a
+    branching body, specifically so the operator token's existing grant
+    on that route can never be reinterpreted as covering this one."""
+    try:
+        decisions = {int(row_index): decision for row_index, decision in payload.decisions.items()}
+        return await service.add_prospects_from_csv(
+            mail_campaign_id,
+            idempotency_key=payload.idempotency_key,
+            import_batch_id=payload.import_batch_id,
+            decisions=decisions,
+            actor=_operator_actor(request),
+        )
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignNotEligibleForProspectsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except CrmImportBatchNotFound as e:
+        raise HTTPException(status_code=404, detail=f"CSV import batch not found: {e}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 # --- Channels (selected sending mailboxes) --------------------------------

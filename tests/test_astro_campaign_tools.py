@@ -21,6 +21,7 @@ from app.repositories.campaign_store import MemoryCampaignStore
 from app.repositories.crm_contact_list_member_store import MemoryCrmContactListMemberStore
 from app.repositories.crm_contact_list_store import MemoryCrmContactListStore
 from app.repositories.crm_contact_store import MemoryCrmContactStore
+from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
 from app.repositories.email_sequence_store import MemoryEmailSequenceStore
 from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
@@ -36,6 +37,7 @@ from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_campaign_tools import ASTRO_CAMPAIGN_TOOL_DEFINITIONS, CAMPAIGN_LIST_LIMIT, AstroCampaignTools
 from app.services.campaign_service import CampaignService
+from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_sending_service import MailSendingService
@@ -133,6 +135,7 @@ async def tools():
         batch_store=MemoryMailEnrollmentBatchStore(),
         batch_member_store=MemoryMailEnrollmentBatchMemberStore(),
         suppression_store=suppression_store,
+        crm_import_reader=CrmImportService(crm_service=crm_service, batch_store=MemoryCrmImportBatchStore()),
     )
     mail_suppression_service = MailSuppressionService(store=suppression_store, activity_log=activity_log)
 
