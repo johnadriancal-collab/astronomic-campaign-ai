@@ -225,19 +225,25 @@ async def archive_campaign(mail_campaign_id: str, service: MailCampaignService =
 
 
 @router.post("/campaigns/{mail_campaign_id}/activate", response_model=MailCampaign)
-async def activate_campaign(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
+async def activate_campaign(
+    mail_campaign_id: str, request: Request, service: MailCampaignService = Depends(get_mail_campaign_service)
+):
     """READY -> ACTIVE. Backend only in this phase -- deliberately not
     exposed anywhere in the production frontend yet (see
     MailCampaignService.activate_campaign()'s docstring); nothing calls
-    this route today except tests. 422 lists every readiness problem found
-    (same shape as POST .../ready) if the campaign's execution-critical
-    state has drifted since it became READY. 503 if
-    mail_sending_engine_enabled is False (the default) -- see that
-    setting's docstring in app/config.py; same convention as
+    this route today except tests (and, since Phase 2, the admin/service
+    OPERATOR token -- see app/session_auth_middleware.py's own docstring
+    for why activation and actual provider sending are two independent
+    safety gates: this route can only ever flip a campaign's STATUS,
+    never touch mail_sending_engine_enabled or the allowlists below). 422
+    lists every readiness problem found (same shape as POST .../ready) if
+    the campaign's execution-critical state has drifted since it became
+    READY. 503 if mail_sending_engine_enabled is False (the default) --
+    see that setting's docstring in app/config.py; same convention as
     AuthNotConfiguredError/EmailIntakeWebhook's "unconfigured/disabled ->
     503" pattern elsewhere in this API."""
     try:
-        return await service.activate_campaign(mail_campaign_id)
+        return await service.activate_campaign(mail_campaign_id, actor=_operator_actor(request))
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except MailCampaignInvalidTransitionError as e:

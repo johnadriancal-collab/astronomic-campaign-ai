@@ -30,6 +30,7 @@ from app.api.crm import (
 from app.api.mail import (
     MailCampaignCreateRequest,
     MailCampaignScheduleUpdateRequest,
+    activate_campaign,
     create_campaign,
     mark_campaign_ready,
     set_campaign_schedule,
@@ -75,6 +76,10 @@ class _StubMailCampaignService:
 
     async def unlock_campaign(self, *args, **kwargs):
         self.calls["unlock_campaign"] = _RecordedCall(args, kwargs)
+        return _FakeCampaign()
+
+    async def activate_campaign(self, *args, **kwargs):
+        self.calls["activate_campaign"] = _RecordedCall(args, kwargs)
         return _FakeCampaign()
 
     async def set_schedule(self, *args, **kwargs):
@@ -215,6 +220,22 @@ async def test_unlock_campaign_route_passes_actor_through():
     await unlock_campaign("c1", _FakeRequest("service_operator"), service=service)
 
     assert service.calls["unlock_campaign"].kwargs.get("actor") == "claude_operator"
+
+
+async def test_activate_campaign_route_passes_actor_through():
+    service = _StubMailCampaignService()
+
+    await activate_campaign("c1", _FakeRequest("service_operator"), service=service)
+
+    assert service.calls["activate_campaign"].kwargs.get("actor") == "claude_operator"
+
+
+async def test_activate_campaign_route_passes_none_actor_for_an_ordinary_session():
+    service = _StubMailCampaignService()
+
+    await activate_campaign("c1", _FakeRequest(None), service=service)
+
+    assert service.calls["activate_campaign"].kwargs.get("actor") is None
 
 
 async def test_set_campaign_schedule_route_passes_actor_through():

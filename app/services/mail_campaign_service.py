@@ -1104,7 +1104,7 @@ class MailCampaignService:
         )
         return updated
 
-    async def activate_campaign(self, mail_campaign_id: str) -> MailCampaign:
+    async def activate_campaign(self, mail_campaign_id: str, actor: str | None = None) -> MailCampaign:
         """READY -> ACTIVE. The ONLY way execution is ever allowed to begin
         -- nothing else in this codebase sets ACTIVE.
 
@@ -1224,6 +1224,7 @@ class MailCampaignService:
             entity_id=updated.mail_campaign_id,
             entity_name=updated.name,
             metadata={"activated": activated},
+            actor=actor,
         )
         return updated
 

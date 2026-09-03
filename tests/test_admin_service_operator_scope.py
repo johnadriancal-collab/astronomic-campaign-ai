@@ -90,9 +90,10 @@ def test_get_and_patch_a_single_campaign_are_in_scope():
     assert _in_scope("PATCH", "/mail/campaigns/c1") is True
 
 
-def test_mark_ready_and_unlock_are_in_scope():
+def test_mark_ready_unlock_and_activate_are_in_scope():
     assert _in_scope("POST", "/mail/campaigns/c1/ready") is True
     assert _in_scope("POST", "/mail/campaigns/c1/unlock") is True
+    assert _in_scope("POST", "/mail/campaigns/c1/activate") is True
 
 
 def test_review_and_enrollments_reads_are_in_scope():
@@ -121,8 +122,10 @@ def test_steps_crud_and_reorder_are_in_scope():
 # --- Mail campaigns: explicitly excluded ------------------------------------
 
 
-def test_activate_pause_resume_archive_are_all_out_of_scope():
-    assert _in_scope("POST", "/mail/campaigns/c1/activate") is False
+def test_pause_resume_archive_remain_out_of_scope():
+    """Activate was explicitly approved (2026-09-03) as its own safety
+    gate, separate from pause/resume/archive -- see the module docstring.
+    These three remain excluded and need their own future review."""
     assert _in_scope("POST", "/mail/campaigns/c1/pause") is False
     assert _in_scope("POST", "/mail/campaigns/c1/resume") is False
     assert _in_scope("POST", "/mail/campaigns/c1/archive") is False

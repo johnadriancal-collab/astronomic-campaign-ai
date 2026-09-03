@@ -137,13 +137,15 @@ Scope -- an explicit ALLOWLIST of (method, path) rules (see
 _SERVICE_OPERATOR_RULES below), covering exactly:
   - Mail campaigns: create, read, edit (PATCH -- already restricted by
     MailCampaignService.update_campaign()'s own field allowlist, which
-    silently drops `status` among other keys, so this can never be used to
-    activate/pause/resume/archive a campaign by itself), sequence steps
+    silently drops `status` among other keys, so PATCH itself can never be
+    used to activate/pause/resume/archive a campaign), sequence steps
     (create/edit/delete/reorder), schedule (read/replace), channel
     selection (read/replace -- selecting an ALREADY-connected mailbox by
     id only; never anything under /mailboxes/{id}/... OAuth), Mark Ready,
-    Unlock (READY -> DRAFT), and the review/enrollments/channels/schedule/
-    steps reads needed to verify that state.
+    Unlock (READY -> DRAFT), Activate (DRAFT/READY-lifecycle preparation
+    only -- see the "Activate is a separate safety gate" note below), and
+    the review/enrollments/channels/schedule/steps reads needed to verify
+    that state.
   - Mailboxes: the bare GET /mailboxes list ONLY (to pick a mailbox id for
     channel selection) -- never mailbox OAuth connect/disconnect.
   - CRM contact lists: create/edit a list and add/remove its membership --
@@ -155,8 +157,8 @@ _SERVICE_OPERATOR_RULES below), covering exactly:
     or the read-only token's own read-only exclusion list).
 Explicitly, deliberately EXCLUDED, full stop, regardless of any future
 addition to the allow-rules above without a fresh explicit review:
-  - POST .../activate, /pause, /resume, /archive (every campaign lifecycle
-    transition other than Ready/Unlock)
+  - POST .../pause, /resume, /archive (every campaign lifecycle transition
+    other than Ready/Unlock/Activate -- see the "not yet" note below)
   - everything under /mail/suppressions* and /mail/execution/*
   - everything under /mailboxes/* except the bare GET list
   - /crm/contacts/* writes, /crm/custom-fields*, /crm/backup*, /crm/import*
@@ -164,6 +166,20 @@ addition to the allow-rules above without a fresh explicit review:
     MAIL_SENDING_ENGINE_ENABLED/allowlist Railway variables (no HTTP route
     controls these at all today, and none should be added to this
     identity's scope if one ever exists).
+
+Activate is a SEPARATE safety gate from actual provider sending (Phase 2
+addition, 2026-09-03, approved specifically for this reason): this route
+can only ever flip a MailCampaign's `status` field from READY to ACTIVE
+(re-running the exact same readiness validation mark_ready() used -- see
+MailCampaignService.activate_campaign()'s own docstring) -- it has zero
+ability to touch `mail_sending_engine_enabled`, the mailbox/recipient
+send allowlists, or dispatch any real Gmail/SMTP call. Those remain
+independent, Railway-environment-variable-only safety boundaries that
+this token has no path to at all, with or without this grant. Pause/
+resume/archive remain excluded for now -- narrower than what could
+plausibly be justified by the same reasoning, but not yet explicitly
+requested/reviewed; add them only after their own explicit approval, the
+same way Activate itself was.
 
 Deliberately NOT over-engineered for Phase 2's upcoming persistent-
 campaign/Batch 2+ work -- this allowlist covers exactly today's
@@ -257,15 +273,17 @@ _ID_SEGMENT = r"[^/]+"
 _SERVICE_OPERATOR_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
     (method, re.compile(pattern))
     for method, pattern in (
-        # Mail campaigns -- create/read/edit, Mark Ready, Unlock. NOT
-        # activate/pause/resume/archive (no rule below matches those
-        # paths at all).
+        # Mail campaigns -- create/read/edit, Mark Ready, Unlock, Activate.
+        # NOT pause/resume/archive (no rule below matches those paths at
+        # all) -- see the module docstring's "Activate is a SEPARATE
+        # safety gate" note for why Activate alone was approved here.
         ("GET", r"^/mail/campaigns$"),
         ("POST", r"^/mail/campaigns$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}$"),
         ("PATCH", rf"^/mail/campaigns/{_ID_SEGMENT}$"),
         ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/ready$"),
         ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/unlock$"),
+        ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/activate$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/review$"),
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/enrollments$"),
         # Channels -- selecting an already-connected mailbox by id only.

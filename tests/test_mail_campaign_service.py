@@ -1987,3 +1987,69 @@ async def test_unlock_campaign_records_the_given_actor(service, crm):
         e for e in events if e.event_type == "mail_campaign.updated" and "unlocked" in e.summary.lower()
     )
     assert unlocked_event.actor == "claude_operator"
+
+
+# --- activate_campaign actor attribution (Phase 2, admin/service OPERATOR --
+# token, approved 2026-09-03 as a safety gate separate from actual sending) -
+
+
+async def test_activate_a_valid_ready_campaign_succeeds_with_the_given_actor(service, crm):
+    """The operator identity CAN activate a genuinely READY campaign --
+    companion to test_activate_a_valid_ready_campaign_succeeds above,
+    proving the `actor` argument doesn't change the outcome, only the
+    attribution."""
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    activated = await service.activate_campaign(ready.mail_campaign_id, actor="claude_operator")
+
+    assert activated.status == MailCampaignStatus.ACTIVE
+
+    events = await service.activity_log.store.list()
+    activated_event = next(e for e in events if e.event_type == "mail_campaign.activated")
+    assert activated_event.actor == "claude_operator"
+
+
+async def test_activate_actor_defaults_to_none(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    await service.activate_campaign(ready.mail_campaign_id)
+
+    events = await service.activity_log.store.list()
+    activated_event = next(e for e in events if e.event_type == "mail_campaign.activated")
+    assert activated_event.actor is None
+
+
+async def test_operator_identity_cannot_activate_a_non_ready_campaign_merely_by_being_authorized(service):
+    """The core guarantee behind granting Activate to the operator token at
+    all: `actor` carries NO special privilege through MailCampaignService
+    -- a DRAFT campaign is rejected with the EXACT SAME
+    MailCampaignInvalidTransitionError regardless of who (or what) is
+    calling, matching test_activate_requires_ready above byte-for-byte
+    except for the added actor kwarg."""
+    campaign = await service.create_campaign("Draft")
+
+    with pytest.raises(MailCampaignInvalidTransitionError):
+        await service.activate_campaign(campaign.mail_campaign_id, actor="claude_operator")
+
+    unchanged = await service.get_campaign(campaign.mail_campaign_id)
+    assert unchanged.status == MailCampaignStatus.DRAFT
+
+
+async def test_operator_identity_still_hits_the_sending_engine_gate(service, crm, monkeypatch):
+    """Companion to test_activate_refused_when_sending_engine_disabled --
+    the deployment-wide mail_sending_engine_enabled gate is completely
+    outside MailCampaignService/the operator token's reach (see
+    app/session_auth_middleware.py's own docstring: this token has no
+    path to that Railway-environment-variable-only setting at all), so it
+    refuses activation identically regardless of `actor`."""
+    monkeypatch.setattr(mail_campaign_service_module.settings, "mail_sending_engine_enabled", False)
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+
+    with pytest.raises(MailSendingEngineDisabledError):
+        await service.activate_campaign(ready.mail_campaign_id, actor="claude_operator")
+
+    unchanged = await service.get_campaign(ready.mail_campaign_id)
+    assert unchanged.status == MailCampaignStatus.READY
