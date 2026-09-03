@@ -62,10 +62,10 @@ from pydantic import BaseModel, Field
 
 class MailCampaignStatus(str, Enum):
     """
-    DRAFT -> READY -> ACTIVE <-> PAUSED -> COMPLETED, with ARCHIVED reachable
-    from any non-archived status (terminal, no un-archive -- unchanged from
-    before this phase). See MailCampaignService.activate_campaign()'s
-    docstring for the full state machine and exactly what each status means:
+    DRAFT -> READY -> ACTIVE <-> PAUSED, with ARCHIVED reachable from any
+    non-archived status (terminal, no un-archive). See
+    MailCampaignService.activate_campaign()'s docstring for the full state
+    machine and exactly what each status means:
 
       READY:     configuration validated + audience snapshotted. Does NOT
                  mean execution is allowed -- this is a deliberate,
@@ -75,18 +75,33 @@ class MailCampaignStatus(str, Enum):
       ACTIVE:    execution is allowed. The ONLY way to reach this is the
                  explicit activate_campaign() transition -- mark_ready()
                  itself never changes status past READY, and nothing here
-                 auto-activates a campaign.
+                 auto-activates a campaign. A campaign is a PERSISTENT
+                 container, not a one-time batch (Phase 2, 2026-09-03):
+                 ACTIVE stays ACTIVE regardless of how much work is
+                 currently queued -- an ACTIVE campaign with zero pending
+                 enrollments is still ACTIVE, ready for more prospects to
+                 be added, not "done." Workload (pending/in-progress/
+                 completed/suppressed/failed counts) is tracked
+                 independently of this status field, never inferred from
+                 it.
       PAUSED:    execution temporarily halted (manual pause, or an assigned
                  mailbox becoming unavailable -- see MailEnrollmentStatus.
                  PAUSED). Configuration remains just as locked as ACTIVE --
                  pausing execution is not the same as unlocking
                  configuration; see activate_campaign()'s docstring for why
                  there is no PAUSED/ACTIVE -> DRAFT path in this phase.
-      COMPLETED: every enrollment reached its own terminal state. A system
-                 transition (nothing here sets it directly via an API call
-                 in Phase A -- see MailSendingService.
-                 maybe_complete_campaign()), reserved for once a real
-                 worker exists to reach it.
+      COMPLETED: LEGACY ONLY as of Phase 2 (2026-09-03) -- no code path
+                 writes this anymore (MailSendingService.
+                 maybe_complete_campaign(), the only thing that ever did,
+                 was removed entirely: exhausting an ACTIVE campaign's
+                 current workload no longer auto-transitions it anywhere,
+                 by design -- see ACTIVE's own docstring above). Existing
+                 campaigns already in this status from before Phase 2 are
+                 NOT migrated/rewritten and remain readable exactly as
+                 they were; explicitly adding a new prospect batch to one
+                 is the only way to reopen it, back to ACTIVE, and once
+                 reopened it behaves like any other persistent ACTIVE
+                 campaign (never auto-returns here).
     """
 
     DRAFT = "draft"

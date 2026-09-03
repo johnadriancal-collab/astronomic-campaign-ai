@@ -315,9 +315,16 @@ async def test_3_step_sequence_step3_sent_completes_enrollment_with_no_phantom_s
     assert enrollment_after.status == MailEnrollmentStatus.COMPLETED
 
 
-async def test_maybe_complete_campaign_flips_status_once_every_enrollment_is_terminal(
-    svc, basic_setup, campaign_store, enrollment_store
+async def test_campaign_remains_active_after_every_enrollment_becomes_terminal(
+    svc, basic_setup, campaign_store, enrollment_store, activity_log
 ):
+    """Phase 2 (2026-09-03): a campaign is a PERSISTENT container, not a
+    one-time batch -- exhausting an ACTIVE campaign's current workload
+    must never auto-transition it anywhere. This is the direct
+    replacement for the old maybe_complete_campaign() behavior (removed
+    entirely, not left as a silent no-op) -- see MailCampaignStatus's own
+    docstring for the current, permanent meaning of ACTIVE vs. the
+    now-legacy-only COMPLETED."""
     step1 = make_step("s1", 1)
     enrollment = make_enrollment("e1")
     await enrollment_store.create(enrollment)
@@ -325,8 +332,16 @@ async def test_maybe_complete_campaign_flips_status_once_every_enrollment_is_ter
     sender = FakeMailSender()
     await svc.process_one_due_step(row1, sender=sender, claimed_by="w1", sequence_steps=[step1], windows=all_day_windows(), timezone_name=TZ, now=NOW)
 
+    # The enrollment itself still reaches its own terminal state normally --
+    # only the campaign-level auto-transition is gone.
+    enrollment_after = await enrollment_store.get("e1")
+    assert enrollment_after.status == MailEnrollmentStatus.COMPLETED
+
     campaign_after = await campaign_store.get("c1")
-    assert campaign_after.status == MailCampaignStatus.COMPLETED, "process_one_due_step() must call maybe_complete_campaign() internally"
+    assert campaign_after.status == MailCampaignStatus.ACTIVE, "a campaign must stay ACTIVE regardless of remaining workload"
+
+    events = await activity_log.store.list()
+    assert not any(e.event_type == "mail_campaign.completed" for e in events), "no code path should emit this event anymore"
 
 
 # --- Suppression cascade -----------------------------------------------------

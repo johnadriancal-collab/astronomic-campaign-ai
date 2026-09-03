@@ -1132,39 +1132,6 @@ class MailSendingService:
             entity_id=enrollment.mail_campaign_id,
         )
 
-    async def maybe_complete_campaign(self, mail_campaign_id: str, now: datetime) -> bool:
-        """Whenever an enrollment might have just reached a terminal state,
-        checks whether EVERY enrollment for this campaign is now terminal
-        (COMPLETED/SUPPRESSED/FAILED -- PENDING/ACTIVE/PAUSED are not) and,
-        if so, flips the campaign itself to COMPLETED. A no-op (returns
-        False) if the campaign isn't ACTIVE, has zero enrollments, or any
-        enrollment is still non-terminal. Safe to call after every
-        record_send_success()/suppress_enrollment() -- cheap, and doing so
-        is the only way COMPLETED is ever reached (nothing else in Phase A
-        sets it)."""
-        campaign = await self.campaign_store.get(mail_campaign_id)
-        if campaign is None or campaign.status != MailCampaignStatus.ACTIVE:
-            return False
-        enrollments = await self.enrollment_store.list_for_campaign(mail_campaign_id)
-        if not enrollments:
-            return False
-        terminal = {MailEnrollmentStatus.COMPLETED, MailEnrollmentStatus.SUPPRESSED, MailEnrollmentStatus.FAILED}
-        if not all(e.status in terminal for e in enrollments):
-            return False
-
-        updated = campaign.model_copy(update={"status": MailCampaignStatus.COMPLETED, "updated_at": now})
-        await self.campaign_store.save(updated)
-        await self.activity_log.record(
-            event_type="mail_campaign.completed",
-            category=ActivityCategory.MAIL,
-            source=ActivitySource.MAIL_SYSTEM,
-            summary=f'Mail Campaign "{campaign.name}" completed -- every enrollment reached a terminal state.',
-            entity_type="mail_campaign",
-            entity_id=campaign.mail_campaign_id,
-            entity_name=campaign.name,
-        )
-        return True
-
     # --- The runtime safety checklist + one send attempt -----------------------
 
     async def _pause_enrollment_for_mailbox(self, enrollment: MailEnrollment, mail_campaign_id: str, now: datetime) -> None:
@@ -1272,7 +1239,6 @@ class MailSendingService:
                 entity_type="mail_campaign",
                 entity_id=mail_campaign_id,
             )
-        await self.maybe_complete_campaign(mail_campaign_id, now)
         return ProcessOutcome(sent=False, blocked_reason=blocked_reason, sender_error=str(error))
 
     async def _handle_transient_prepare_failure(
@@ -1929,7 +1895,6 @@ class MailSendingService:
             timezone_name=timezone_name,
             now=now,
         )
-        await self.maybe_complete_campaign(campaign.mail_campaign_id, now)
         return ProcessOutcome(sent=True)
 
     # --- Phase C: paused-enrollment recovery ------------------------------------
@@ -2033,7 +1998,6 @@ class MailSendingService:
                 entity_type="mail_campaign",
                 entity_id=step.mail_campaign_id,
             )
-            await self.maybe_complete_campaign(step.mail_campaign_id, now)
         return applied
 
     async def resolve_unknown_step_confirmed_not_sent(self, enrollment_step_id: str, *, now: datetime) -> bool:
