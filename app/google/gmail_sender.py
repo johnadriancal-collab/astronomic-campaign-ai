@@ -128,6 +128,7 @@ class GmailSender(MailSenderPort):
             references=list(request.references) or None,
             list_unsubscribe=request.list_unsubscribe_header,
             list_unsubscribe_post=request.list_unsubscribe_post_header,
+            html_body=request.html_body,
         )
         raw = encode_gmail_raw(mime_bytes)
 

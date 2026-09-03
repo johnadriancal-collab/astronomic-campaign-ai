@@ -234,6 +234,102 @@ def test_crlf_in_list_unsubscribe_is_rejected():
         )
 
 
+# --- build_mime_message: HTML alternative (Phase C/D) ------------------------
+
+
+def test_html_body_omitted_is_byte_for_byte_the_old_single_part_shape():
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",
+        rfc_message_id="mid@astronomic.com",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    assert parsed.is_multipart() is False
+    assert parsed.get_content_type() == "text/plain"
+
+
+def test_html_body_given_produces_multipart_alternative_with_plain_then_html():
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="Plain version.",
+        rfc_message_id="mid@astronomic.com",
+        html_body="<p>HTML version.</p>",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    assert parsed.is_multipart() is True
+    assert parsed.get_content_type() == "multipart/alternative"
+    parts = list(parsed.iter_parts())
+    assert len(parts) == 2
+    assert parts[0].get_content_type() == "text/plain"
+    assert parts[1].get_content_type() == "text/html"
+
+
+def test_plain_part_is_unchanged_when_html_body_is_also_given():
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="Plain version.",
+        rfc_message_id="mid@astronomic.com",
+        html_body="<p>HTML version.</p>",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    plain_part = next(p for p in parsed.iter_parts() if p.get_content_type() == "text/plain")
+    assert plain_part.get_content().strip() == "Plain version."
+    assert plain_part.get_content_charset() == "utf-8"
+
+
+def test_html_part_content_and_charset_match_the_given_html_body():
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="Plain version.",
+        rfc_message_id="mid@astronomic.com",
+        html_body="<p>HTML version.</p>",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    html_part = next(p for p in parsed.iter_parts() if p.get_content_type() == "text/html")
+    assert html_part.get_content().strip() == "<p>HTML version.</p>"
+    assert html_part.get_content_charset() == "utf-8"
+
+
+def test_unicode_html_body_round_trips():
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="Plain café.",
+        rfc_message_id="mid@astronomic.com",
+        html_body="<p>HTML café \U0001f389</p>",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    html_part = next(p for p in parsed.iter_parts() if p.get_content_type() == "text/html")
+    assert html_part.get_content().strip() == "<p>HTML café \U0001f389</p>"
+
+
+def test_html_alternative_coexists_with_list_unsubscribe_headers():
+    """The two Phase B3/C features are independent -- adding an HTML part
+    must not disturb the top-level List-Unsubscribe/List-Unsubscribe-Post
+    headers, which live on the outer multipart message, not on either part."""
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="Plain version.",
+        rfc_message_id="mid@astronomic.com",
+        html_body="<p>HTML version.</p>",
+        list_unsubscribe="<https://api.astronomicconnect.com/mail/unsubscribe/one-click?token=abc>",
+        list_unsubscribe_post="List-Unsubscribe=One-Click",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    assert parsed["List-Unsubscribe"] == "<https://api.astronomicconnect.com/mail/unsubscribe/one-click?token=abc>"
+    assert parsed["List-Unsubscribe-Post"] == "List-Unsubscribe=One-Click"
+    assert parsed.get_content_type() == "multipart/alternative"
+
+
+def test_html_body_header_injection_style_content_is_not_treated_as_a_header():
+    """html_body is body CONTENT, not a header value -- this module's
+    HeaderInjectionError checks apply only to the header-family params
+    (see _assert_safe_header_value's call sites); a raw newline or a
+    string that merely looks like a header inside html_body must pass
+    straight through as ordinary part content."""
+    raw = build_mime_message(
+        from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",
+        rfc_message_id="mid@astronomic.com",
+        html_body="<p>Line one.</p>\n<p>X-Not-A-Real-Header: still just text</p>",
+    )
+    parsed = _message_from_bytes(raw, policy=policy.default)
+    html_part = next(p for p in parsed.iter_parts() if p.get_content_type() == "text/html")
+    assert "X-Not-A-Real-Header: still just text" in html_part.get_content()
+
+
 def test_encode_gmail_raw_uses_urlsafe_alphabet_and_round_trips():
     mime_bytes = build_mime_message(
         from_email="a@astronomic.com", to_email="b@example.com", subject="s", body="b",

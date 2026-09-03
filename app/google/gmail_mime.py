@@ -1,12 +1,25 @@
 """
 Deterministic RFC-compliant MIME construction for Astronomic Mail Phase B2
-(Gmail Sender Foundation) -- plain-text only, matching the current
-MailSequenceStep/MailEnrollmentStep content model (see app/models/mail.py;
-there is no HTML/rich-text body anywhere in this codebase). Built entirely
-on Python's standard-library `email` package (via the modern
-`email.message.EmailMessage` API + default policy) -- no third-party MIME
-library, matching this app's existing "small, auditable surface" philosophy
-(see app/google/oauth_client.py's module docstring).
+(Gmail Sender Foundation), extended in Phase C/D for an optional HTML
+alternative part (see `html_body` below) -- built entirely on Python's
+standard-library `email` package (via the modern `email.message.EmailMessage`
+API + default policy) -- no third-party MIME library, matching this app's
+existing "small, auditable surface" philosophy (see app/google/oauth_client.py's
+module docstring).
+
+`html_body` is OPTIONAL and OFF by default: when omitted, this function
+builds the exact same single-part `text/plain` message it always has --
+zero behavior change for any existing caller. When given, it uses
+`EmailMessage.add_alternative()` (confirmed empirically below) to build a
+real RFC 2046 `multipart/alternative` message: `text/plain` first (the
+existing `body`, unchanged), `text/html` second (the RECOMMENDED
+least-to-most-preferred order) -- an HTML-capable client renders the HTML
+part; a plain-text-only client falls back to the exact same text it
+always got. This module has no opinion on WHAT the HTML looks like or
+whether it's safe (e.g. properly escaped) -- that responsibility belongs
+entirely to the caller (see app/services/mail_unsubscribe_composition.py's
+build_html_body(), the one intended source of this value); this module
+only assembles whatever string it's given into a `text/html` MIME part.
 
 Nothing in this module makes a network call or knows about Gmail's API
 shape (that's app/google/gmail_api_client.py) or Mailbox/OAuth state (that's
@@ -34,6 +47,11 @@ CONFIRMED empirically (not assumed) against this exact stdlib version:
   encoded-word encoded by the default policy's generator; a non-ASCII body
   is correctly UTF-8/quoted-printable-or-base64 encoded by set_content().
   Both were verified directly, not assumed from documentation.
+- `msg.set_content(body)` followed by `msg.add_alternative(html_body,
+  subtype="html")` produces a top-level `Content-Type: multipart/alternative`
+  message containing exactly two parts, `text/plain` then `text/html`, each
+  with its own correctly-chosen Content-Transfer-Encoding -- confirmed
+  directly against this exact stdlib version, not assumed from docs.
 """
 
 import base64
@@ -73,6 +91,7 @@ def build_mime_message(
     references: list[str] | None = None,
     list_unsubscribe: str | None = None,
     list_unsubscribe_post: str | None = None,
+    html_body: str | None = None,
 ) -> bytes:
     """Builds a complete, RFC 5322 / RFC 2045-2047 compliant plain-text
     MIME message as raw bytes, ready for base64url encoding (see
@@ -106,6 +125,14 @@ def build_mime_message(
     generated here -- see app/services/mail_unsubscribe_composition.py for
     the (currently unwired -- see that module's own safety note) caller
     that builds these values from a real per-recipient token.
+
+    `html_body`, when given, adds a `text/html` alternative part alongside
+    the existing plain-text `body` -- see this module's own docstring for
+    the exact resulting MIME structure. Omitted (the default): behavior is
+    byte-for-byte identical to before this parameter existed. This function
+    does not escape, sanitize, or otherwise inspect `html_body`'s content --
+    it is the CALLER's responsibility to ensure it's safe HTML (see
+    app/services/mail_unsubscribe_composition.py's build_html_body()).
 
     Raises HeaderInjectionError before constructing anything if
     from_email/to_email/subject/rfc_message_id/in_reply_to_message_id/any
@@ -143,6 +170,13 @@ def build_mime_message(
     # Content-Transfer-Encoding, and MIME-Version -- all automatic, see
     # this module's docstring.
     msg.set_content(body)
+    if html_body is not None:
+        # Restructures the message into multipart/alternative with this
+        # new part appended AFTER the plain-text part above -- text/plain
+        # first, text/html second, matching RFC 2046's recommended
+        # least-to-most-preferred ordering. See this module's own
+        # docstring for the exact confirmed structure.
+        msg.add_alternative(html_body, subtype="html")
     return msg.as_bytes()
 
 

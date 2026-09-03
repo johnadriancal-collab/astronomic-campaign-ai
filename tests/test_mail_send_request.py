@@ -213,3 +213,27 @@ def test_list_unsubscribe_header_without_post_header_is_rejected():
 def test_list_unsubscribe_post_header_without_header_is_rejected():
     with pytest.raises(MailSendRequestValidationError):
         make_request(list_unsubscribe_post_header="List-Unsubscribe=One-Click")
+
+
+# --- html_body (Phase C/D) --------------------------------------------------------
+
+
+def test_html_body_defaults_to_none():
+    request = make_request()
+    assert request.html_body is None
+
+
+def test_html_body_can_be_supplied_independently_of_every_other_field():
+    """html_body is purely additive -- it has no pairing/validation
+    relationship with rfc_message_id, threading, or the List-Unsubscribe
+    headers, unlike those fields' own pairing rules above."""
+    request = make_request(html_body="<p>Hi.</p>")
+    assert request.html_body == "<p>Hi.</p>"
+
+
+def test_html_body_does_not_change_message_id_validation_behavior():
+    """The Message-ID validation gate (see the rfc_message_id tests above)
+    must fire identically regardless of whether html_body is present --
+    the two are fully independent checks."""
+    with pytest.raises(MailSendRequestValidationError):
+        make_request(rfc_message_id="not-an-email-shape", html_body="<p>Hi.</p>")

@@ -390,6 +390,13 @@ class MailSendRequest:
     # (MailSendingService.prepare_and_send_step()).
     list_unsubscribe_header: str | None = None
     list_unsubscribe_post_header: str | None = None
+    # Phase C/D: the HTML alternative of `body` above -- same snapshot,
+    # same unsubscribe token/URL, see app/services/
+    # mail_unsubscribe_composition.py's compose_outbound_email() (the only
+    # intended source). None (the default) means "plain-text only,"
+    # producing byte-for-byte the same single-part message as before this
+    # field existed -- see app/google/gmail_mime.py's build_mime_message().
+    html_body: str | None = None
 
     def __post_init__(self) -> None:
         mid = self.rfc_message_id
@@ -1803,6 +1810,7 @@ class MailSendingService:
             to_email=enrollment.email_at_enrollment,
             subject=step.subject,
             body=composed.body,
+            html_body=composed.html_body,
             rfc_message_id=rfc_message_id,
             reply_in_thread=step.reply_in_thread,
             list_unsubscribe_header=composed.list_unsubscribe_header,

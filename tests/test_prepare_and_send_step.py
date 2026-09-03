@@ -1022,3 +1022,24 @@ async def test_successful_send_never_mutates_the_persisted_snapshot_body(svc, ba
     )
     sent_row = await step_store.get(row.enrollment_step_id)
     assert sent_row.body == "Body."  # unchanged -- the footer was never persisted onto the row
+
+
+async def test_successful_send_carries_the_html_alternative_body_too(svc, basic_setup):
+    """Companion to test_successful_send_carries_composed_body_and_headers
+    (Phase C/D): the same request must also carry the HTML alternative,
+    sharing the snapshot content and the same unsubscribe token as the
+    plain-text body -- see mail_unsubscribe_composition.compose_outbound_email()."""
+    row, _ = await _due_step(svc)
+    sender = FakePreparingSender()
+    outcome = await svc.prepare_and_send_step(
+        row, sender=sender, claimed_by="w1", sequence_steps=[make_step()], windows=all_day_windows(),
+        timezone_name=TZ, now=NOW, confirm_leadership=always_leader,
+    )
+    assert outcome.sent is True
+    sent_request = sender.prepare_calls[0]
+    assert sent_request.html_body is not None
+    assert "Body." in sent_request.html_body
+    assert "Unsubscribe</a>" in sent_request.html_body
+    plain_token = sent_request.body.split("token=", 1)[1].strip()
+    html_token = sent_request.html_body.split("token=", 1)[1].split('"', 1)[0]
+    assert plain_token == html_token

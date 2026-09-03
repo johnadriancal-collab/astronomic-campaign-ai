@@ -459,3 +459,60 @@ async def test_no_list_unsubscribe_headers_when_request_omits_them():
 
     decoded = base64.urlsafe_b64decode(api_client.calls[0]["raw_message"].encode("ascii")).decode("utf-8")
     assert "List-Unsubscribe" not in decoded
+
+
+# --- html_body threaded through prepare() (Phase C/D) ---------------------------
+
+
+async def test_html_body_is_threaded_from_request_into_the_prepared_mime_as_multipart_alternative():
+    import base64
+    from email import message_from_bytes, policy
+
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(FakeMailboxService(), api_client)
+    request = make_request(body="Plain version.", html_body="<p>HTML version.</p>")
+
+    prepared = await sender.prepare(request)
+    await sender.send_prepared(prepared)
+
+    decoded = base64.urlsafe_b64decode(api_client.calls[0]["raw_message"].encode("ascii"))
+    parsed = message_from_bytes(decoded, policy=policy.default)
+    assert parsed.get_content_type() == "multipart/alternative"
+    html_part = next(p for p in parsed.iter_parts() if p.get_content_type() == "text/html")
+    assert html_part.get_content().strip() == "<p>HTML version.</p>"
+    plain_part = next(p for p in parsed.iter_parts() if p.get_content_type() == "text/plain")
+    assert plain_part.get_content().strip() == "Plain version."
+
+
+async def test_no_html_body_on_the_request_still_produces_the_original_single_part_mime():
+    import base64
+    from email import message_from_bytes, policy
+
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(FakeMailboxService(), api_client)
+
+    await sender.send(make_request(body="Plain only."))
+
+    decoded = base64.urlsafe_b64decode(api_client.calls[0]["raw_message"].encode("ascii"))
+    parsed = message_from_bytes(decoded, policy=policy.default)
+    assert parsed.is_multipart() is False
+    assert parsed.get_content_type() == "text/plain"
+
+
+async def test_html_body_does_not_change_the_message_id_or_idempotency_behavior():
+    """The exact same Message-ID/retry-determinism guarantee already
+    covered above (test_two_calls_with_the_same_persisted_request_use_the_same_message_id)
+    must hold identically when html_body is present -- composition of the
+    HTML alternative is fully independent of Message-ID handling."""
+    api_client = FakeGmailApiClient()
+    sender = GmailSender(FakeMailboxService(), api_client)
+    request = make_request(
+        rfc_message_id="same-id-with-html@astronomic.com",
+        body="Plain version.",
+        html_body="<p>HTML version.</p>",
+    )
+
+    result1 = await sender.send(request)
+    result2 = await sender.send(request)
+
+    assert result1.rfc_message_id == result2.rfc_message_id == "same-id-with-html@astronomic.com"
