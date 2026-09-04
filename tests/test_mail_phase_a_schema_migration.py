@@ -342,6 +342,38 @@ async def test_opening_every_store_against_the_legacy_db_is_behaviorally_inert(l
             await store.close()
 
 
+# --- Trigger foundation (Stage 5A, 2026-09-04): lead_start_mode /
+# execution_active_since backward compatibility -----------------------------
+
+
+async def test_legacy_campaign_blob_without_trigger_fields_deserializes_as_immediate_and_null(legacy_db_path):
+    """The CRITICAL assertion for Stage 5A: `_pre_phase_a_campaign_blob()`
+    (used by every fixture in this file) has NEVER contained
+    `lead_start_mode` or `execution_active_since` keys at all -- exactly
+    what real, already-deployed production campaign rows look like right
+    now. Confirms both new fields apply their Pydantic defaults
+    (lead_start_mode="immediate", execution_active_since=None) with zero
+    migration/backfill write required -- the same JSON-blob-default
+    mechanism this whole file already documents for assigned_mailbox_id."""
+    store = SQLiteMailCampaignStore(legacy_db_path)
+    await store.connect()
+    try:
+        campaign = await store.get("camp-1")
+        assert campaign is not None
+        assert campaign.lead_start_mode == "immediate"
+        assert campaign.execution_active_since is None
+
+        # Confirm the on-disk blob genuinely lacks both keys -- this is the
+        # actual legacy shape, not something re-written by connect().
+        cursor = await store._connection.execute("SELECT data FROM mail_campaigns WHERE mail_campaign_id = 'camp-1'")
+        row = await cursor.fetchone()
+        await cursor.close()
+        assert "lead_start_mode" not in row["data"]
+        assert "execution_active_since" not in row["data"]
+    finally:
+        await store.close()
+
+
 async def test_reopening_the_legacy_db_a_second_time_is_still_inert_and_idempotent(legacy_db_path):
     """Simulates a second app restart against the same, now-upgraded file
     (the common real-world case of a redeploy) -- confirms the upgrade

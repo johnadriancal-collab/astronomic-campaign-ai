@@ -603,6 +603,32 @@ async def test_add_prospects_reopens_a_completed_campaign_with_a_genuinely_new_e
     assert any("reactivated" in e.summary.lower() for e in activated_events)
 
 
+async def test_add_prospects_reopen_sets_execution_active_since(service, crm, campaign_store):
+    """Stage 5A: the legacy COMPLETED -> ACTIVE reopen branch inside
+    add_prospects() is a THIRD ACTIVE-transition call site (alongside
+    activate_campaign()/resume_campaign()) and must set
+    execution_active_since exactly like the other two, or a reopened
+    campaign would have an ambiguous null floor for a future Trigger
+    scheduler."""
+    active, contact_list = await _make_active_campaign(service, crm, n_contacts=0)
+    completed = await _force_completed(campaign_store, active)
+
+    new_contact = await crm.create_contact({"email": "revive-active-since@example.com"})
+    await crm.bulk_add_to_list(contact_list.list_id, [new_contact.crm_contact_id])
+
+    before = datetime.now(timezone.utc)
+    batch = await service.add_prospects(
+        completed.mail_campaign_id, source=MailEnrollmentBatchSource.CRM_LIST,
+        idempotency_key="k-active-since", source_list_id=contact_list.list_id,
+    )
+    after = datetime.now(timezone.utc)
+    assert batch.enrolled_count == 1
+
+    reopened = await service.get_campaign(completed.mail_campaign_id)
+    assert reopened.execution_active_since is not None
+    assert before <= reopened.execution_active_since <= after
+
+
 async def test_add_prospects_leaves_a_completed_campaign_completed_when_nothing_genuinely_new(
     service, crm, campaign_store
 ):

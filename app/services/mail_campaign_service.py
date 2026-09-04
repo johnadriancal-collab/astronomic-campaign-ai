@@ -1300,7 +1300,9 @@ class MailCampaignService:
             # to finish, rather than treating this as an error condition.
             return campaign
 
-        updated = campaign.model_copy(update={"status": MailCampaignStatus.ACTIVE, "updated_at": now})
+        updated = campaign.model_copy(
+            update={"status": MailCampaignStatus.ACTIVE, "execution_active_since": now, "updated_at": now}
+        )
         await self.campaign_store.save(updated)
         await self.activity_log.record(
             event_type="mail_campaign.activated",
@@ -1373,7 +1375,9 @@ class MailCampaignService:
             raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "pause")
 
         now = datetime.now(timezone.utc)
-        updated = campaign.model_copy(update={"status": MailCampaignStatus.PAUSED, "updated_at": now})
+        updated = campaign.model_copy(
+            update={"status": MailCampaignStatus.PAUSED, "execution_active_since": None, "updated_at": now}
+        )
         await self.campaign_store.save(updated)
         await self.activity_log.record(
             event_type="mail_campaign.paused",
@@ -1416,7 +1420,9 @@ class MailCampaignService:
             )
 
         now = datetime.now(timezone.utc)
-        updated = campaign.model_copy(update={"status": MailCampaignStatus.ACTIVE, "updated_at": now})
+        updated = campaign.model_copy(
+            update={"status": MailCampaignStatus.ACTIVE, "execution_active_since": now, "updated_at": now}
+        )
         await self.campaign_store.save(updated)
         await self.activity_log.record(
             event_type="mail_campaign.resumed",
@@ -1441,7 +1447,14 @@ class MailCampaignService:
             raise MailCampaignInvalidTransitionError(mail_campaign_id, campaign.status, "archive")
 
         now = datetime.now(timezone.utc)
-        updated = campaign.model_copy(update={"status": MailCampaignStatus.ARCHIVED, "archived_at": now, "updated_at": now})
+        updated = campaign.model_copy(
+            update={
+                "status": MailCampaignStatus.ARCHIVED,
+                "execution_active_since": None,
+                "archived_at": now,
+                "updated_at": now,
+            }
+        )
         await self.campaign_store.save(updated)
         await self.activity_log.record(
             event_type="mail_campaign.archived",
@@ -1831,7 +1844,9 @@ class MailCampaignService:
 
         if batch.enrolled_count and batch.enrolled_count > 0 and campaign.status == MailCampaignStatus.COMPLETED:
             now = datetime.now(timezone.utc)
-            reopened = campaign.model_copy(update={"status": MailCampaignStatus.ACTIVE, "updated_at": now})
+            reopened = campaign.model_copy(
+                update={"status": MailCampaignStatus.ACTIVE, "execution_active_since": now, "updated_at": now}
+            )
             await self.campaign_store.save(reopened)
             await self.activity_log.record(
                 event_type="mail_campaign.activated",

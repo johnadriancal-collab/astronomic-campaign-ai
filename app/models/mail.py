@@ -200,6 +200,46 @@ class MailCampaign(BaseModel):
     start_immediately: bool = False
     daily_lead_start_limit: int | None = None
 
+    # Trigger feature foundation (Stage 5A, 2026-09-04) -- see
+    # MailLeadStartTrigger's own docstring for the full feature. Both
+    # fields default such that an old, already-persisted campaign (this
+    # model is stored as a JSON blob -- see SQLiteMailCampaignStore --so an
+    # existing row simply lacks these two keys) deserializes as
+    # "immediate"/None: exactly today's behavior, unchanged, with zero
+    # migration step required. Nothing in this codebase branches on
+    # `lead_start_mode` yet (Stage 5A is deliberately execution-inert --
+    # see mail_campaign_service.py's lifecycle methods for the only
+    # current writers of `execution_active_since`); it exists now purely
+    # so the schema is stable ahead of Stage 5C's actual gating.
+    #
+    # `lead_start_mode`: "immediate" (today's only real behavior -- every
+    # PENDING enrollment starts eagerly at activation / Add Prospects) or
+    # "triggered" (a later stage's gate, once at least one real
+    # MailLeadStartTrigger exists for this campaign -- see the Trigger
+    # design report for why this is a durable, one-way field rather than
+    # inferred from "is the trigger list currently non-empty").
+    lead_start_mode: Literal["immediate", "triggered"] = "immediate"
+
+    # `execution_active_since`: the start of this campaign's CURRENT,
+    # continuous ACTIVE streak -- an authoritative execution-state field, a
+    # deliberate alternative to reading Activity Log (audit/observability
+    # data, not authoritative execution state -- some logging paths in
+    # this system are intentionally best-effort). Maintained ONLY by the
+    # campaign lifecycle transition methods below, nowhere else (ordinary
+    # edits -- e.g. Channels, which stays editable through ACTIVE/PAUSED --
+    # never touch it):
+    #   READY -> ACTIVE (activate_campaign):                 set to now
+    #   PAUSED -> ACTIVE (resume_campaign):                   set to now
+    #   legacy COMPLETED -> ACTIVE (add_prospects() reopen):  set to now
+    #   ACTIVE -> PAUSED (pause_campaign):                    cleared to None
+    #   ACTIVE/PAUSED -> ARCHIVED (archive_campaign):         cleared to None
+    #   DRAFT, READY, and a not-yet-reopened legacy COMPLETED campaign
+    #   simply never have it set: None.
+    # A future Trigger occurrence scheduler uses this as its floor for
+    # "does this scheduled occurrence belong to the campaign's CURRENT
+    # active period" -- not implemented in Stage 5A.
+    execution_active_since: datetime | None = None
+
     created_at: datetime
     updated_at: datetime
     ready_at: datetime | None = None
@@ -1066,3 +1106,137 @@ class MailContactSuppressionStatus(BaseModel):
     notes: str | None
     created_at: datetime | None
     unsuppressed_at: datetime | None
+
+
+# --- Trigger feature: durable foundation only (Stage 5A, 2026-09-04) -------
+#
+# Modeled on QuickMail Triggers: a standing rule controlling WHEN and HOW
+# MANY currently-PENDING (not-yet-started) leads enter the sequence --
+# deliberately separate from MailSendWindow (when SENDING is allowed) and
+# MailboxSendPolicy (a mailbox's own quota/pacing), neither of which this
+# feature changes or replaces. See the approved Trigger design report for
+# the full semantics; Stage 5A implements ONLY the schema below -- no
+# occurrence execution, no freeze/reconciliation, no CRUD endpoints, no
+# worker integration, and nothing anywhere reads MailCampaign.lead_start_mode
+# yet. That all comes in later stages.
+
+
+class MailLeadStartTrigger(BaseModel):
+    """One standing lead-start rule for one campaign, e.g. "Mon-Fri at 9:00
+    AM, start 20 leads." `weekdays`/`local_time` are in the CAMPAIGN's own
+    timezone (MailCampaign.timezone) -- deliberately no per-trigger
+    timezone field, matching MailSendWindow's own established convention
+    (one timezone per campaign, not one per row) rather than introducing
+    new per-row complexity with no product justification.
+
+    A campaign may have more than one trigger (e.g. a second one at 2:00
+    PM) -- both draw from the same PENDING pool; nothing here deduplicates
+    or merges same-time/overlapping triggers, by design (see the approved
+    report's concurrency section).
+
+    Editable/deletable independent of the campaign's own DRAFT-only
+    Schedule lock -- a later stage's own decision, not enforced by this
+    model."""
+
+    trigger_id: str
+    mail_campaign_id: str
+    weekdays: list[int]  # 0=Monday .. 6=Sunday, same convention as MailSendWindow.day_of_week
+    local_time: time
+    leads_to_start: int
+    enabled: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+
+def validate_lead_start_trigger(weekdays: list[int], leads_to_start: int) -> None:
+    """Structural validation for a MailLeadStartTrigger, mirroring
+    validate_send_windows()'s exact conventions (day range 0-6, raise on
+    the first problem found, a plain ValueError since -- like
+    CrmService.create_contact -- there is no dedicated request DTO/service
+    consuming this yet in Stage 5A to warrant a bespoke exception type).
+    Not wired into any endpoint or service in Stage 5A -- ready for the
+    stage that adds Trigger CRUD to call."""
+    if not weekdays:
+        raise ValueError("At least one weekday must be selected.")
+    for day in weekdays:
+        if day < 0 or day > 6:
+            raise ValueError("weekdays must each be 0 (Monday) through 6 (Sunday).")
+    if len(set(weekdays)) != len(weekdays):
+        raise ValueError("weekdays must not contain duplicates.")
+    if leads_to_start < 1:
+        raise ValueError("leads_to_start must be a positive integer.")
+
+
+class MailTriggerOccurrence(BaseModel):
+    """One durable, deterministically-identified firing of one
+    MailLeadStartTrigger -- `(trigger_id, scheduled_for)` IS its identity
+    (see MailTriggerOccurrenceStore), so the SAME logical occurrence (e.g.
+    "this trigger's 9:00 AM slot on 2026-09-07") can only ever exist once,
+    regardless of how many times a worker tick discovers it or restarts
+    mid-processing.
+
+    `status` starts PREPARING the instant the occurrence row is claimed
+    and only reaches COMPLETED once every one of its frozen members has
+    been reconciled (see MailTriggerOccurrenceMember) -- existence of this
+    row alone does NOT mean the occurrence finished; only `status ==
+    COMPLETED` does. `frozen_at` is a SEPARATE marker (set the instant the
+    member cohort is committed) specifically so "not yet frozen" (None) is
+    distinguishable from "frozen with zero eligible members" (set, zero
+    member rows) -- both are real, different states a resumed occurrence
+    needs to tell apart. `target_count` freezes this occurrence's own
+    request (the trigger's `leads_to_start` AT THE TIME this occurrence was
+    claimed) so a later edit to the trigger's own count never retroactively
+    changes an already-in-progress or completed occurrence. `started_count`
+    is populated only at COMPLETED time, always DERIVED from member
+    outcomes (never incremented independently), so it can never drift from
+    the durable member rows it summarizes.
+
+    Stage 5A defines this shape and its persistence only -- no code
+    anywhere creates, freezes, or completes one yet."""
+
+    trigger_id: str
+    mail_campaign_id: str
+    scheduled_for: datetime
+    status: Literal["PREPARING", "COMPLETED"] = "PREPARING"
+    target_count: int
+    frozen_at: datetime | None = None
+    started_count: int | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class MailTriggerOccurrenceMember(BaseModel):
+    """One enrollment frozen into one MailTriggerOccurrence's cohort --
+    `(trigger_id, scheduled_for, enrollment_id)` is its identity, but
+    `enrollment_id` also carries a GLOBAL uniqueness constraint at the
+    store level (see MailTriggerOccurrenceStore): once an enrollment has
+    been frozen into ANY occurrence's cohort, it can never be frozen into a
+    different one, ever again -- even if this member's own outcome ends up
+    SKIPPED_INELIGIBLE. This is a deliberate, verified-safe invariant, not
+    an oversight: the only way a still-PENDING enrollment can become
+    ineligible before reconciliation is SUPPRESSED (confirmed terminal --
+    see MailSendingService.suppress_enrollment()'s own docstring) or one of
+    the other genuinely-terminal statuses (FAILED, COMPLETED) -- a
+    still-PENDING enrollment cannot reach the one PER-ENROLLMENT status
+    that IS sometimes recoverable (MailEnrollmentStatus.PAUSED), since that
+    status requires an already-assigned mailbox, and mailbox assignment
+    only ever happens after activation. So there is no real scenario where
+    a frozen member deserves a second occurrence later -- see the approved
+    Trigger design report's eligibility analysis for the full walk.
+
+    `outcome` starts PENDING_RECONCILE at freeze time (a frozen member is
+    always considered still-PENDING at the moment its row is created --
+    freezing never re-checks eligibility itself, only reconciliation does)
+    and becomes terminal (STARTED or SKIPPED_INELIGIBLE) exactly once, at
+    `reconciled_at`. A cohort is frozen, not resupplied: a member that
+    reconciles as SKIPPED_INELIGIBLE is never replaced by a different,
+    later-enrolled lead within the SAME occurrence.
+
+    Stage 5A defines this shape and its persistence only -- no code
+    anywhere freezes or reconciles a member yet."""
+
+    trigger_id: str
+    scheduled_for: datetime
+    enrollment_id: str
+    outcome: Literal["PENDING_RECONCILE", "STARTED", "SKIPPED_INELIGIBLE"] = "PENDING_RECONCILE"
+    reconciled_at: datetime | None = None

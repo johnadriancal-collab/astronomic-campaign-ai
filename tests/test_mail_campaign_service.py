@@ -213,6 +213,24 @@ async def test_create_draft_campaign(service):
     assert campaign.source_list_id is None
 
 
+# --- Trigger foundation (Stage 5A, 2026-09-04): lead_start_mode /
+# execution_active_since -- durable schema only, nothing branches on
+# lead_start_mode yet, and no Trigger row is ever created automatically. --
+
+
+async def test_new_campaign_defaults_to_immediate_lead_start_mode_and_null_active_since(service):
+    campaign = await service.create_campaign("My Campaign")
+    assert campaign.lead_start_mode == "immediate"
+    assert campaign.execution_active_since is None
+
+
+async def test_ready_campaign_still_has_null_execution_active_since(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    assert ready.execution_active_since is None
+    assert ready.lead_start_mode == "immediate"
+
+
 async def test_get_campaign_not_found(service):
     with pytest.raises(MailCampaignNotFound):
         await service.get_campaign("does-not-exist")
@@ -430,6 +448,26 @@ async def test_archive_from_ready(service, crm):
     assert archived.status == MailCampaignStatus.ARCHIVED
 
 
+async def test_archive_clears_execution_active_since_from_active(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    activated = await service.activate_campaign(ready.mail_campaign_id)
+    assert activated.execution_active_since is not None
+
+    archived = await service.archive_campaign(ready.mail_campaign_id)
+    assert archived.execution_active_since is None
+
+
+async def test_archive_clears_execution_active_since_from_paused(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    await service.pause_campaign(ready.mail_campaign_id)  # already None here, confirming archive keeps it None too
+
+    archived = await service.archive_campaign(ready.mail_campaign_id)
+    assert archived.execution_active_since is None
+
+
 async def test_archive_twice_raises_invalid_transition(service):
     campaign = await service.create_campaign("Draft")
     await service.archive_campaign(campaign.mail_campaign_id)
@@ -518,12 +556,29 @@ async def test_activate_creates_exactly_one_step1_execution_per_eligible_enrollm
     ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
     await service.activate_campaign(ready.mail_campaign_id)
 
+    # Stage 5A regression: activation still eagerly activates EVERY
+    # eligible PENDING enrollment, unconditionally, exactly as before --
+    # lead_start_mode stays "immediate" (nothing sets it to "triggered" on
+    # its own) and nothing here gates on it.
     rows = await service.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
     assert len(rows) == 3
     assert all(r.step_number == 1 for r in rows)
 
     enrollments = await service.enrollment_store.list_for_campaign(campaign.mail_campaign_id)
     assert all(e.status == MailEnrollmentStatus.ACTIVE for e in enrollments)
+
+    activated = await service.get_campaign(campaign.mail_campaign_id)
+    assert activated.lead_start_mode == "immediate"
+
+
+async def test_activate_sets_execution_active_since(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    before = datetime.now(timezone.utc)
+    activated = await service.activate_campaign(ready.mail_campaign_id)
+    after = datetime.now(timezone.utc)
+    assert activated.execution_active_since is not None
+    assert before <= activated.execution_active_since <= after
 
 
 async def test_repeated_activation_cannot_duplicate_step1_rows(service, crm):
@@ -595,6 +650,59 @@ async def test_pause_does_not_touch_enrollment_or_step_rows(service, crm):
 
     after = await service.enrollment_step_store.list_for_campaign(ready.mail_campaign_id)
     assert [r.status for r in before] == [r.status for r in after]
+
+
+async def test_pause_clears_execution_active_since(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    activated = await service.activate_campaign(ready.mail_campaign_id)
+    assert activated.execution_active_since is not None
+
+    paused = await service.pause_campaign(ready.mail_campaign_id)
+    assert paused.execution_active_since is None
+
+
+async def test_resume_sets_a_fresh_execution_active_since(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    activated = await service.activate_campaign(ready.mail_campaign_id)
+    first_active_since = activated.execution_active_since
+    await service.pause_campaign(ready.mail_campaign_id)
+
+    before = datetime.now(timezone.utc)
+    resumed = await service.resume_campaign(ready.mail_campaign_id)
+    after = datetime.now(timezone.utc)
+
+    assert resumed.execution_active_since is not None
+    assert before <= resumed.execution_active_since <= after
+    assert resumed.execution_active_since != first_active_since
+
+
+async def test_unrelated_active_campaign_edit_does_not_touch_execution_active_since(service, crm):
+    """add_prospects() on an ALREADY-ACTIVE (not legacy-COMPLETED)
+    campaign is a real, legitimate operation that never changes campaign
+    lifecycle status at all -- only its own dedicated legacy-COMPLETED
+    reopen branch may ever set execution_active_since; ordinary Add
+    Prospects onto a campaign that's already ACTIVE must never touch it."""
+    from app.models.mail import MailEnrollmentBatchSource
+
+    campaign, contact_list = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    activated = await service.activate_campaign(ready.mail_campaign_id)
+    original_active_since = activated.execution_active_since
+    assert original_active_since is not None
+
+    new_contact = await crm.create_contact({"email": "unrelated-edit@example.com"})
+    await crm.bulk_add_to_list(contact_list.list_id, [new_contact.crm_contact_id])
+    batch = await service.add_prospects(
+        activated.mail_campaign_id, source=MailEnrollmentBatchSource.CRM_LIST,
+        idempotency_key="unrelated-edit-key", source_list_id=contact_list.list_id,
+    )
+    assert batch.enrolled_count == 1  # confirms this really did something, not a no-op
+
+    unchanged = await service.get_campaign(activated.mail_campaign_id)
+    assert unchanged.status == MailCampaignStatus.ACTIVE  # never touched lifecycle status
+    assert unchanged.execution_active_since == original_active_since
 
 
 async def test_resume_requires_paused(service):

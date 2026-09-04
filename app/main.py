@@ -89,8 +89,10 @@ from app.repositories.sqlite_mail_enrollment_batch_member_store import SQLiteMai
 from app.repositories.sqlite_mail_enrollment_batch_store import SQLiteMailEnrollmentBatchStore
 from app.repositories.sqlite_mail_enrollment_step_store import SQLiteMailEnrollmentStepStore
 from app.repositories.sqlite_mail_enrollment_store import SQLiteMailEnrollmentStore
+from app.repositories.sqlite_mail_lead_start_trigger_store import SQLiteMailLeadStartTriggerStore
 from app.repositories.sqlite_mail_send_window_store import SQLiteMailSendWindowStore
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
+from app.repositories.sqlite_mail_trigger_occurrence_store import SQLiteMailTriggerOccurrenceStore
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
 from app.repositories.sqlite_mailbox_send_policy_store import SQLiteMailboxSendPolicyStore
@@ -160,6 +162,12 @@ async def lifespan(app: FastAPI):
     mail_enrollment_batch_store = SQLiteMailEnrollmentBatchStore(settings.database_path)
     mail_enrollment_batch_member_store = SQLiteMailEnrollmentBatchMemberStore(settings.database_path)
     mail_campaign_csv_prospect_link_store = SQLiteMailCampaignCsvProspectLinkStore(settings.database_path)
+    # Trigger feature foundation (Stage 5A, 2026-09-04) -- schema/persistence
+    # only, connected here so the tables exist, but not yet injected into any
+    # service/route: nothing in this codebase creates, reads, or executes a
+    # trigger/occurrence yet. See app/models/mail.py's Trigger docstrings.
+    mail_lead_start_trigger_store = SQLiteMailLeadStartTriggerStore(settings.database_path)
+    mail_trigger_occurrence_store = SQLiteMailTriggerOccurrenceStore(settings.database_path)
     mailbox_send_policy_store = SQLiteMailboxSendPolicyStore(settings.database_path)
     mailbox_store = SQLiteMailboxStore(settings.database_path)
     mailbox_credential_store = SQLiteMailboxCredentialStore(settings.database_path)
@@ -194,6 +202,8 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_batch_store.connect()
     await mail_enrollment_batch_member_store.connect()
     await mail_campaign_csv_prospect_link_store.connect()
+    await mail_lead_start_trigger_store.connect()
+    await mail_trigger_occurrence_store.connect()
     await mailbox_send_policy_store.connect()
     await mailbox_store.connect()
     await mailbox_credential_store.connect()
@@ -461,6 +471,8 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_batch_store.close()
     await mail_enrollment_batch_member_store.close()
     await mail_campaign_csv_prospect_link_store.close()
+    await mail_lead_start_trigger_store.close()
+    await mail_trigger_occurrence_store.close()
     await mailbox_send_policy_store.close()
     await mailbox_store.close()
     await mailbox_credential_store.close()
