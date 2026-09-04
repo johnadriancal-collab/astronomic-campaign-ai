@@ -19,7 +19,7 @@ occurrences and members are owned by ONE store/ONE connection rather than
 two separate stores.
 """
 
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 
 import aiosqlite
 import pytest
@@ -350,6 +350,134 @@ async def test_occurrence_and_member_persistence_survives_reconnect(tmp_path):
     members = {m.enrollment_id for m in await store2.list_members("t1", SLOT_A)}
     assert members == {"e1", "e2"}
     await store2.close()
+
+
+# --- list_preparing_occurrences_for_campaign (Stage 5E) --------------------
+
+
+async def test_memory_list_preparing_occurrences_for_campaign_scoped_and_status_filtered():
+    store = MemoryMailTriggerOccurrenceStore()
+    await store.create_occurrence(_occurrence(trigger_id="t1", mail_campaign_id="c1", scheduled_for=SLOT_A))
+    await store.create_occurrence(_occurrence(trigger_id="t2", mail_campaign_id="c1", scheduled_for=SLOT_B))
+    await store.create_occurrence(_occurrence(trigger_id="t3", mail_campaign_id="c-other", scheduled_for=SLOT_A))
+    await store.freeze_members("t2", SLOT_B, [], NOW)
+    await store.complete_occurrence("t2", SLOT_B, 0, NOW)
+
+    preparing = await store.list_preparing_occurrences_for_campaign("c1")
+    assert {(o.trigger_id, o.scheduled_for) for o in preparing} == {("t1", SLOT_A)}
+    assert await store.list_preparing_occurrences_for_campaign("c-other") == [
+        (await store.get_occurrence("t3", SLOT_A))
+    ]
+    assert await store.list_preparing_occurrences_for_campaign("c-nonexistent") == []
+
+
+async def test_memory_get_latest_occurrence_for_campaign_between_scoped_by_range_and_campaign():
+    store = MemoryMailTriggerOccurrenceStore()
+    await store.create_occurrence(_occurrence(trigger_id="t1", mail_campaign_id="c1", scheduled_for=SLOT_A))
+    await store.create_occurrence(_occurrence(trigger_id="t2", mail_campaign_id="c1", scheduled_for=SLOT_B))
+    await store.create_occurrence(_occurrence(trigger_id="t3", mail_campaign_id="c-other", scheduled_for=SLOT_B + timedelta(hours=1)))
+
+    day_start = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    latest = await store.get_latest_occurrence_for_campaign_between("c1", day_start, day_end)
+    assert latest is not None and latest.trigger_id == "t2" and latest.scheduled_for == SLOT_B
+
+    assert await store.get_latest_occurrence_for_campaign_between("c1", day_end, day_end + timedelta(days=1)) is None
+    assert await store.get_latest_occurrence_for_campaign_between("c-nonexistent", day_start, day_end) is None
+
+
+async def test_sqlite_get_latest_occurrence_for_campaign_between_scoped_by_range_and_campaign(occurrence_store):
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t1", mail_campaign_id="c1", scheduled_for=SLOT_A))
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t2", mail_campaign_id="c1", scheduled_for=SLOT_B))
+    await occurrence_store.create_occurrence(
+        _occurrence(trigger_id="t3", mail_campaign_id="c-other", scheduled_for=SLOT_B + timedelta(hours=1))
+    )
+
+    day_start = datetime(2026, 9, 7, tzinfo=timezone.utc)
+    day_end = day_start + timedelta(days=1)
+    latest = await occurrence_store.get_latest_occurrence_for_campaign_between("c1", day_start, day_end)
+    assert latest is not None and latest.trigger_id == "t2" and latest.scheduled_for == SLOT_B
+    assert await occurrence_store.get_latest_occurrence_for_campaign_between("c1", day_end, day_end + timedelta(days=1)) is None
+
+
+async def test_memory_supersede_occurrence_requires_preparing_and_unfrozen():
+    store = MemoryMailTriggerOccurrenceStore()
+    await store.create_occurrence(_occurrence(trigger_id="t1", scheduled_for=SLOT_A))
+    assert await store.supersede_occurrence("t1", SLOT_A, NOW) is True
+    occ = await store.get_occurrence("t1", SLOT_A)
+    assert occ.status == "SUPERSEDED" and occ.completed_at == NOW
+
+    # Terminal: a second attempt is a safe no-op, not a re-transition.
+    assert await store.supersede_occurrence("t1", SLOT_A, NOW + timedelta(minutes=1)) is False
+    assert (await store.get_occurrence("t1", SLOT_A)).completed_at == NOW
+
+    # Missing occurrence: no-op, not an error.
+    assert await store.supersede_occurrence("t-missing", SLOT_A, NOW) is False
+
+
+async def test_sqlite_supersede_occurrence_requires_preparing_and_unfrozen(occurrence_store):
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t1", scheduled_for=SLOT_A))
+    assert await occurrence_store.supersede_occurrence("t1", SLOT_A, NOW) is True
+    occ = await occurrence_store.get_occurrence("t1", SLOT_A)
+    assert occ.status == "SUPERSEDED" and occ.completed_at == NOW
+    assert await occurrence_store.supersede_occurrence("t1", SLOT_A, NOW + timedelta(minutes=1)) is False
+
+
+async def test_memory_freeze_and_supersede_are_mutually_exclusive_race_proof():
+    """The core Stage 5E race guarantee, proven directly at the store's
+    own CAS predicates rather than via process-local locking (this
+    codebase's established convention -- see e.g. freeze_members' own
+    global UNIQUE(enrollment_id) reliance). Whichever of the two writes
+    reaches the row first durably changes either `frozen_at` or `status`,
+    which makes the OTHER call's own predicate stop matching -- so
+    exactly one of the two ever succeeds, never both, regardless of call
+    order."""
+    store = MemoryMailTriggerOccurrenceStore()
+
+    # Order 1: freeze wins the race -- supersede must then be rejected.
+    await store.create_occurrence(_occurrence(trigger_id="t1", scheduled_for=SLOT_A))
+    assert await store.freeze_members("t1", SLOT_A, ["e1"], NOW) is True
+    assert await store.supersede_occurrence("t1", SLOT_A, NOW) is False
+    occ = await store.get_occurrence("t1", SLOT_A)
+    assert occ.status == "PREPARING" and occ.frozen_at == NOW  # unchanged by the rejected supersede
+
+    # Order 2: supersede wins the race -- freeze must then be rejected,
+    # and critically must NOT attach any member rows to the SUPERSEDED row.
+    await store.create_occurrence(_occurrence(trigger_id="t2", scheduled_for=SLOT_A))
+    assert await store.supersede_occurrence("t2", SLOT_A, NOW) is True
+    assert await store.freeze_members("t2", SLOT_A, ["e2"], NOW) is False
+    occ2 = await store.get_occurrence("t2", SLOT_A)
+    assert occ2.status == "SUPERSEDED" and occ2.frozen_at is None
+    assert await store.list_members("t2", SLOT_A) == []
+    assert "e2" not in store._claimed_enrollment_ids  # never claimed -- the freeze truly never happened
+
+
+async def test_sqlite_freeze_and_supersede_are_mutually_exclusive_race_proof(occurrence_store):
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t1", scheduled_for=SLOT_A))
+    assert await occurrence_store.freeze_members("t1", SLOT_A, ["e1"], NOW) is True
+    assert await occurrence_store.supersede_occurrence("t1", SLOT_A, NOW) is False
+    occ = await occurrence_store.get_occurrence("t1", SLOT_A)
+    assert occ.status == "PREPARING" and occ.frozen_at == NOW
+
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t2", scheduled_for=SLOT_A))
+    assert await occurrence_store.supersede_occurrence("t2", SLOT_A, NOW) is True
+    assert await occurrence_store.freeze_members("t2", SLOT_A, ["e2"], NOW) is False
+    occ2 = await occurrence_store.get_occurrence("t2", SLOT_A)
+    assert occ2.status == "SUPERSEDED" and occ2.frozen_at is None
+    assert await occurrence_store.list_members("t2", SLOT_A) == []
+
+
+async def test_sqlite_list_preparing_occurrences_for_campaign_scoped_and_status_filtered(occurrence_store):
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t1", mail_campaign_id="c1", scheduled_for=SLOT_A))
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t2", mail_campaign_id="c1", scheduled_for=SLOT_B))
+    await occurrence_store.create_occurrence(_occurrence(trigger_id="t3", mail_campaign_id="c-other", scheduled_for=SLOT_A))
+    await occurrence_store.freeze_members("t2", SLOT_B, [], NOW)
+    await occurrence_store.complete_occurrence("t2", SLOT_B, 0, NOW)
+
+    preparing = await occurrence_store.list_preparing_occurrences_for_campaign("c1")
+    assert {(o.trigger_id, o.scheduled_for) for o in preparing} == {("t1", SLOT_A)}
+    assert len(await occurrence_store.list_preparing_occurrences_for_campaign("c-other")) == 1
+    assert await occurrence_store.list_preparing_occurrences_for_campaign("c-nonexistent") == []
 
 
 # --- No Trigger execution/CRUD exists yet ----------------------------------

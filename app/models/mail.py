@@ -1222,12 +1222,34 @@ class MailTriggerOccurrence(BaseModel):
     the durable member rows it summarizes.
 
     Stage 5A defines this shape and its persistence only -- no code
-    anywhere creates, freezes, or completes one yet."""
+    anywhere creates, freezes, or completes one yet.
+
+    Stage 5E (2026-09-04) adds the terminal status SUPERSEDED, alongside
+    COMPLETED -- both are terminal, but mean different things. SUPERSEDED
+    means specifically: this row was durably created (an attempt started),
+    but never crossed the cohort-commitment boundary (`frozen_at` never
+    got set) before a LATER occurrence was recognized as the campaign's
+    actual latest-due winner for that day -- i.e. genuine crash-recovery
+    preemption, never a routine "this trigger simply wasn't selected"
+    outcome (a never-selected trigger gets no row at all -- see
+    MailTriggerService.process_due_occurrences's own docstring for the
+    "latest-selected-today" derivation that makes this possible without
+    inventing rows for every losing schedule). COMPLETED with
+    `started_count == 0` remains reserved for a real execution attempt
+    that genuinely found zero eligible candidates -- the two are never
+    conflated; durable state alone (not the Activity Log, which stays
+    observability-only) distinguishes them. See
+    MailTriggerOccurrenceStore.supersede_occurrence()'s own docstring for
+    the CAS that enforces SUPERSEDED can only ever apply to a row that has
+    not yet frozen -- once frozen, an occurrence has crossed the
+    commitment boundary and can never become SUPERSEDED, matching
+    `frozen_at`'s own existing meaning: set means committed, even with a
+    zero-member freeze (Stage 5A's own documented, legitimate shape)."""
 
     trigger_id: str
     mail_campaign_id: str
     scheduled_for: datetime
-    status: Literal["PREPARING", "COMPLETED"] = "PREPARING"
+    status: Literal["PREPARING", "COMPLETED", "SUPERSEDED"] = "PREPARING"
     target_count: int
     frozen_at: datetime | None = None
     started_count: int | None = None

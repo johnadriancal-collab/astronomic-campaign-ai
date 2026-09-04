@@ -148,9 +148,22 @@ class SQLiteMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
             raise ValueError(f"No occurrence exists for ({trigger_id!r}, {scheduled_for!r}) -- create it first.")
 
         async with sqlite_write(self._connection):
+            # Stage 5E (2026-09-04): the predicate ALSO requires
+            # status='PREPARING', not just frozen_at IS NULL -- added
+            # specifically so this can never win a race against a
+            # concurrent supersede_occurrence() call. Before SUPERSEDED
+            # existed, frozen_at IS NULL alone was a sufficient CAS guard,
+            # since PREPARING was the only status with frozen_at ever
+            # unset. Once SUPERSEDED (also reachable only from PREPARING
+            # with frozen_at IS NULL) exists, a freeze that raced a
+            # supersede and lost must ALSO see its own predicate stop
+            # matching -- otherwise it would durably attach real member
+            # rows to an already-SUPERSEDED occurrence. See
+            # supersede_occurrence()'s own comment for the other half of
+            # this mutual-exclusion guarantee.
             cursor = await self._connection.execute(
                 "UPDATE mail_trigger_occurrences SET frozen_at = ? "
-                "WHERE trigger_id = ? AND scheduled_for = ? AND frozen_at IS NULL",
+                "WHERE trigger_id = ? AND scheduled_for = ? AND frozen_at IS NULL AND status = 'PREPARING'",
                 (now.isoformat(), trigger_id, scheduled_for.isoformat()),
             )
             if cursor.rowcount == 0:
@@ -195,5 +208,45 @@ class SQLiteMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
                 "UPDATE mail_trigger_occurrences SET status = 'COMPLETED', started_count = ?, completed_at = ? "
                 "WHERE trigger_id = ? AND scheduled_for = ? AND status = 'PREPARING'",
                 (started_count, completed_at.isoformat(), trigger_id, scheduled_for.isoformat()),
+            )
+        return cursor.rowcount > 0
+
+    async def list_preparing_occurrences_for_campaign(self, mail_campaign_id: str) -> list[MailTriggerOccurrence]:
+        cursor = await self._connection.execute(
+            "SELECT * FROM mail_trigger_occurrences WHERE mail_campaign_id = ? AND status = 'PREPARING'",
+            (mail_campaign_id,),
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [_row_to_occurrence(row) for row in rows]
+
+    async def get_latest_occurrence_for_campaign_between(
+        self, mail_campaign_id: str, start_utc: datetime, end_utc: datetime
+    ) -> MailTriggerOccurrence | None:
+        cursor = await self._connection.execute(
+            "SELECT * FROM mail_trigger_occurrences WHERE mail_campaign_id = ? AND scheduled_for >= ? "
+            "AND scheduled_for < ? ORDER BY scheduled_for DESC LIMIT 1",
+            (mail_campaign_id, start_utc.isoformat(), end_utc.isoformat()),
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return _row_to_occurrence(row) if row else None
+
+    async def supersede_occurrence(self, trigger_id: str, scheduled_for: datetime, now: datetime) -> bool:
+        # The CAS predicate -- status='PREPARING' AND frozen_at IS NULL --
+        # is enforced by SQLite atomically in this one UPDATE, not merely
+        # pre-checked in Python: whichever of this statement or a racing
+        # freeze_members() UPDATE actually commits first (this store's own
+        # single connection/single-writer semantics make "first" well-
+        # defined -- see sqlite_txn.py) durably changes `status` or
+        # `frozen_at`, so the other statement's WHERE clause simply stops
+        # matching and affects zero rows. Mutual exclusion by construction,
+        # not by a process-local lock -- see this method's own ABC
+        # docstring.
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE mail_trigger_occurrences SET status = 'SUPERSEDED', completed_at = ? "
+                "WHERE trigger_id = ? AND scheduled_for = ? AND status = 'PREPARING' AND frozen_at IS NULL",
+                (now.isoformat(), trigger_id, scheduled_for.isoformat()),
             )
         return cursor.rowcount > 0

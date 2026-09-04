@@ -98,6 +98,75 @@ class MailTriggerOccurrenceStore(ABC):
         safe no-op -- e.g. a retry after the transition already landed but
         before the caller observed success)."""
 
+    @abstractmethod
+    async def get_latest_occurrence_for_campaign_between(
+        self, mail_campaign_id: str, start_utc: datetime, end_utc: datetime
+    ) -> MailTriggerOccurrence | None:
+        """The single occurrence (any status -- PREPARING never reaches
+        this call in practice, see below; COMPLETED and SUPERSEDED both
+        count) with the LARGEST `scheduled_for` in `[start_utc, end_utc)`
+        for this campaign, across ALL of its triggers, or None if no
+        occurrence exists in that range yet. Added Stage 5E (2026-09-04)
+        as the durable-history read behind "latest-selected-today":
+        `start_utc`/`end_utc` are the caller's own campaign-local calendar
+        day boundaries, already converted to UTC (this store stays
+        timezone-naive by design -- see MailTriggerService's own
+        docstring for why that conversion belongs in the service layer).
+
+        Deliberately NOT filtered by status: a SUPERSEDED row's own
+        scheduled_for is, by construction, never later than the
+        occurrence that actually preempted it (see
+        MailTriggerOccurrence's own docstring), so including it can never
+        cause an eligible later candidate to be wrongly excluded -- and
+        excluding it would let discovery briefly disagree with itself
+        about "the latest row for today" depending on ordering. Callers
+        should not expect this to return a PREPARING row in ordinary
+        operation: fresh discovery only ever runs once
+        process_due_occurrences() has already resolved any outstanding
+        PREPARING occurrence for the campaign (see that method's own
+        docstring) -- so by the time this is called, every existing row
+        for today is terminal (COMPLETED or SUPERSEDED)."""
+
+    @abstractmethod
+    async def supersede_occurrence(self, trigger_id: str, scheduled_for: datetime, now: datetime) -> bool:
+        """CAS-guarded, terminal, one-way: PREPARING -> SUPERSEDED, and
+        ONLY while `frozen_at IS NULL` -- once a cohort has been frozen
+        (committed), even a deliberately empty one (Stage 5A's own
+        legitimate "frozen with zero eligible members" shape), this
+        occurrence has crossed the commitment boundary and can never be
+        superseded, matching `frozen_at`'s own existing meaning
+        everywhere else in this store. This predicate is enforced BY THE
+        STORE itself, in the same atomic statement as the status
+        transition -- not merely pre-checked by the caller -- specifically
+        so that a freeze_members() call and a supersede_occurrence() call
+        racing for the same row can never both succeed: whichever of the
+        two atomic writes actually lands first durably changes either
+        `frozen_at` or `status`, which makes the other's own WHERE
+        predicate stop matching. See this store's own module docstring
+        for why one connection per store (no separate process-local lock)
+        is what makes this a genuine mutual-exclusion guarantee, not just
+        a best-effort ordering.
+
+        Returns True if this call performed the transition, False if it
+        was already SUPERSEDED (safe no-op retry), already COMPLETED, or
+        already frozen (the race case above) -- in every False case, the
+        occurrence's own durable state, not this return value, is what
+        the caller must re-read to decide what happened."""
+
+    @abstractmethod
+    async def list_preparing_occurrences_for_campaign(self, mail_campaign_id: str) -> list[MailTriggerOccurrence]:
+        """Every occurrence for this campaign (across ALL of its triggers)
+        still in status PREPARING -- i.e. discovered/created but not yet
+        completed. Added Stage 5E (2026-09-04) to let the worker find and
+        resume an in-flight occurrence BEFORE evaluating whether a new one
+        should be discovered, without needing to know which trigger or
+        which scheduled_for it belongs to in advance. Pure additive read
+        method against Stage 5A's existing `status` column -- no schema
+        change. Under normal operation there is at most one such row per
+        campaign at a time (see MailTriggerService.process_due_occurrences
+        for the invariant that keeps it that way); callers should not
+        assume the list is empty or singleton, only handle it generically."""
+
 
 class MemoryMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
     """Dict-backed -- not persistent, for tests/local dev. Enforces the
@@ -128,7 +197,11 @@ class MemoryMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
         occurrence = self._occurrences.get(key)
         if occurrence is None:
             raise ValueError(f"No occurrence exists for ({trigger_id!r}, {scheduled_for!r}) -- create it first.")
-        if occurrence.frozen_at is not None:
+        # Stage 5E: status='PREPARING' is now also required, matching the
+        # SQLite store's own predicate -- see its freeze_members() comment
+        # for why frozen_at IS NULL alone is no longer a sufficient CAS
+        # guard once SUPERSEDED exists.
+        if occurrence.frozen_at is not None or occurrence.status != "PREPARING":
             return False
         self._occurrences[key] = occurrence.model_copy(update={"frozen_at": now})
         for enrollment_id in enrollment_ids:
@@ -163,4 +236,31 @@ class MemoryMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
         self._occurrences[key] = occurrence.model_copy(
             update={"status": "COMPLETED", "started_count": started_count, "completed_at": completed_at}
         )
+        return True
+
+    async def list_preparing_occurrences_for_campaign(self, mail_campaign_id: str) -> list[MailTriggerOccurrence]:
+        return [
+            occurrence
+            for occurrence in self._occurrences.values()
+            if occurrence.mail_campaign_id == mail_campaign_id and occurrence.status == "PREPARING"
+        ]
+
+    async def get_latest_occurrence_for_campaign_between(
+        self, mail_campaign_id: str, start_utc: datetime, end_utc: datetime
+    ) -> MailTriggerOccurrence | None:
+        candidates = [
+            occurrence
+            for occurrence in self._occurrences.values()
+            if occurrence.mail_campaign_id == mail_campaign_id and start_utc <= occurrence.scheduled_for < end_utc
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda occurrence: occurrence.scheduled_for)
+
+    async def supersede_occurrence(self, trigger_id: str, scheduled_for: datetime, now: datetime) -> bool:
+        key = (trigger_id, scheduled_for)
+        occurrence = self._occurrences.get(key)
+        if occurrence is None or occurrence.status != "PREPARING" or occurrence.frozen_at is not None:
+            return False
+        self._occurrences[key] = occurrence.model_copy(update={"status": "SUPERSEDED", "completed_at": now})
         return True

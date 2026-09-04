@@ -30,7 +30,7 @@ TODAY's (campaign-local) scheduled occurrence per trigger.
 """
 
 import uuid
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from app.models.activity import ActivityCategory, ActivitySource
@@ -125,6 +125,44 @@ class MailTriggerService:
         if campaign.status not in _TRIGGER_CONFIGURABLE_STATUSES:
             raise MailCampaignNotEligibleForTriggersError(campaign.mail_campaign_id, campaign.status)
 
+    @staticmethod
+    async def _require_no_schedule_collision(
+        trigger_store: MailLeadStartTriggerStore,
+        mail_campaign_id: str,
+        weekdays: list[int],
+        local_time: time,
+        enabled: bool,
+        exclude_trigger_id: str | None,
+    ) -> None:
+        """Stage 5E duplicate-schedule validation: two ENABLED triggers on
+        the same campaign collide iff they share the exact same
+        `local_time` AND their `weekdays` sets intersect on at least one
+        day -- i.e. there would be a campaign-local day both are
+        simultaneously due, which process_due_occurrences()'s "latest-due-
+        only" tie-break can't even distinguish (same scheduled_for, same
+        instant). A disabled trigger never collides with anything (it can
+        never become due), and this check only runs at all when the
+        trigger being created/updated is itself enabled -- an operator
+        temporarily disabling one of two identically-scheduled triggers is
+        exactly how a collision gets resolved, not something to reject.
+        No schema change: a plain read via the existing list_for_campaign()."""
+        if not enabled:
+            return
+        existing = await trigger_store.list_for_campaign(mail_campaign_id)
+        new_weekdays = set(weekdays)
+        for other in existing:
+            if other.trigger_id == exclude_trigger_id:
+                continue
+            if not other.enabled:
+                continue
+            if other.local_time != local_time:
+                continue
+            if new_weekdays & set(other.weekdays):
+                raise ValueError(
+                    f"Another enabled trigger already runs at {local_time.isoformat()} on an overlapping "
+                    "weekday for this campaign -- disable or reschedule one of them first."
+                )
+
     # =====================================================================
     # Trigger CRUD
     # =====================================================================
@@ -154,6 +192,9 @@ class MailTriggerService:
         self._require_configurable(campaign)
         validate_lead_start_trigger(weekdays, leads_to_start)
         parsed_time = parse_local_time(local_time)
+        await self._require_no_schedule_collision(
+            self.trigger_store, mail_campaign_id, weekdays, parsed_time, enabled, exclude_trigger_id=None
+        )
 
         now = datetime.now(timezone.utc)
         trigger = MailLeadStartTrigger(
@@ -211,6 +252,14 @@ class MailTriggerService:
         validate_lead_start_trigger(new_weekdays, new_leads_to_start)
         new_local_time = parse_local_time(local_time) if local_time is not None else trigger.local_time
         new_enabled = trigger.enabled if enabled is None else enabled
+        await self._require_no_schedule_collision(
+            self.trigger_store,
+            mail_campaign_id,
+            new_weekdays,
+            new_local_time,
+            new_enabled,
+            exclude_trigger_id=trigger_id,
+        )
 
         updated = trigger.model_copy(
             update={
@@ -270,10 +319,117 @@ class MailTriggerService:
         """Deterministic occurrence identity component -- see
         MailTriggerOccurrence's own docstring: `(trigger_id, scheduled_for)`
         must be computable identically regardless of WHEN a worker tick
-        happens to observe it. Never derived from worker-run time."""
+        happens to observe it. Never derived from worker-run time.
+
+        DST V1 product policy (Stage 5E, 2026-09-04, deliberately adopted
+        rather than inherited by accident -- confirmed by direct empirical
+        testing against America/New_York's 2027 transitions before this
+        was written down): `datetime.combine(..., tzinfo=ZoneInfo(...))`
+        uses Python's default `fold=0`.
+          - A NONEXISTENT local time (spring-forward gap, e.g. 02:30 when
+            clocks jump 02:00->03:00) is resolved using the UTC offset
+            that was in effect BEFORE the jump -- the resulting UTC
+            instant, read back in real local time, lands exactly on "the
+            wall-clock time that would exist after the jump if the clock
+            had kept counting through the gap" (02:30 effectively becomes
+            due at what is really 03:30 local, one hour later than
+            configured). It is never skipped, and never raises.
+          - An AMBIGUOUS local time (fall-back, e.g. 01:30 occurring
+            twice) resolves to the FIRST occurrence (the pre-transition,
+            earlier-UTC-instant one).
+        This is intentionally left unconfigurable in V1 -- see this
+        method's own callers for the day-boundary computation, which
+        applies the exact same policy for consistency (a campaign-local
+        midnight is itself a local-time value and could theoretically
+        fall in a gap/fold in some timezone's history too)."""
         tz = ZoneInfo(timezone_name)
         local_dt = datetime.combine(local_date, local_time, tzinfo=tz)
         return local_dt.astimezone(timezone.utc)
+
+    @staticmethod
+    def _local_day_bounds_utc(local_date: date, timezone_name: str) -> tuple[datetime, datetime]:
+        """[start_utc, end_utc) for one campaign-local calendar day --
+        used ONLY to scope the durable-history read behind "latest-
+        selected-today" (get_latest_occurrence_for_campaign_between).
+        Computed via the exact same `_scheduled_for` machinery (midnight
+        as a local_time), so it inherits the exact same DST V1 policy
+        rather than a second, potentially-inconsistent implementation."""
+        start_utc = MailTriggerService._scheduled_for(local_date, time(0, 0), timezone_name)
+        end_utc = MailTriggerService._scheduled_for(local_date + timedelta(days=1), time(0, 0), timezone_name)
+        return start_utc, end_utc
+
+    async def _current_due_candidates(self, campaign, now: datetime) -> list[tuple[MailLeadStartTrigger, datetime]]:
+        """Every ENABLED trigger whose (freshly recomputed, from its
+        CURRENT definition) campaign-local occurrence today is due
+        (scheduled_for <= now) and within the campaign's current active
+        streak (scheduled_for >= execution_active_since) -- the raw due
+        set, with NO durable-history filtering applied yet. Never a
+        future occurrence, and never a prior day's (no catch-up invented
+        here -- Stage 5E's own "no prior-day debt" policy). Shared by
+        _find_current_winner() (fresh discovery, which additionally
+        filters this against durable history) and by
+        _recover_preparing_occurrence()'s own narrower re-derivation
+        (which only needs to know whether anything else currently due is
+        LATER than one specific occurrence already in hand)."""
+        if campaign.execution_active_since is None or not campaign.timezone:
+            return []
+        triggers = await self.trigger_store.list_for_campaign(campaign.mail_campaign_id)
+        enabled_triggers = [t for t in triggers if t.enabled]
+        if not enabled_triggers:
+            return []
+
+        tz = ZoneInfo(campaign.timezone)
+        today_local = now.astimezone(tz).date()
+        today_weekday = today_local.weekday()
+
+        due: list[tuple[MailLeadStartTrigger, datetime]] = []
+        for trigger in enabled_triggers:
+            if today_weekday not in trigger.weekdays:
+                continue
+            scheduled_for = self._scheduled_for(today_local, trigger.local_time, campaign.timezone)
+            if scheduled_for > now:
+                continue
+            if scheduled_for < campaign.execution_active_since:
+                continue
+            due.append((trigger, scheduled_for))
+        return due
+
+    async def _find_current_winner(self, campaign, now: datetime) -> tuple[MailLeadStartTrigger, datetime] | None:
+        """The single (trigger, scheduled_for) fresh discovery should
+        execute right now, or None if nothing is currently eligible.
+        ONLY called from process_due_occurrences()'s own fresh-discovery
+        step, which the campaign-level invariant guarantees never runs
+        while a PREPARING occurrence still exists for this campaign -- so
+        every occurrence row that already exists for today is terminal
+        (COMPLETED or SUPERSEDED), which is what makes "the durable
+        history's own latest scheduled_for today" an unambiguous floor
+        (see get_latest_occurrence_for_campaign_between's own docstring
+        for why including SUPERSEDED rows in that floor is provably safe,
+        never wrongly exclusionary). A candidate at or before that floor
+        is permanently obsolete for today -- Stage 5E's "no prior-day/
+        no accumulated-missed-debt" policy applied within a single day.
+
+        Deliberately NOT used to re-derive an unfrozen PREPARING
+        occurrence's own status (see _recover_preparing_occurrence) --
+        this method's own durable-history floor would incorrectly
+        compare that occurrence's row against itself, since the row
+        already durably exists by the time that re-derivation runs."""
+        due = await self._current_due_candidates(campaign, now)
+        if not due:
+            return None
+
+        tz = ZoneInfo(campaign.timezone)
+        today_local = now.astimezone(tz).date()
+        day_start_utc, day_end_utc = self._local_day_bounds_utc(today_local, campaign.timezone)
+        latest_selected = await self.occurrence_store.get_latest_occurrence_for_campaign_between(
+            campaign.mail_campaign_id, day_start_utc, day_end_utc
+        )
+        floor = latest_selected.scheduled_for if latest_selected is not None else None
+
+        eligible = [pair for pair in due if floor is None or pair[1] > floor]
+        if not eligible:
+            return None
+        return max(eligible, key=lambda pair: pair[1])
 
     async def process_due_occurrences(self, now: datetime) -> None:
         """Called once per MailExecutionWorker tick, only while this
@@ -284,16 +440,28 @@ class MailTriggerService:
         SAME engine flag that gates send execution therefore also gates
         every Trigger lead-start, with no separate check needed here.
 
-        Stage 5D's MINIMUM due-occurrence discovery (Stage 5E owns
-        multi-day catch-up / "most recent of several" semantics): for
-        each ACTIVE, "triggered" campaign, each ENABLED trigger, consider
-        ONLY today's (campaign-local) scheduled occurrence. If it's due
-        (scheduled_for <= now) and within the campaign's current active
-        streak (scheduled_for >= execution_active_since), execute it
-        exactly once via the freeze-then-reconcile flow below. A trigger
-        whose scheduled time hasn't arrived yet today is simply not
-        considered -- never a future occurrence, and never a prior day's
-        (no catch-up invented here)."""
+        Stage 5E due-occurrence discovery. Per ACTIVE, "triggered"
+        campaign with a valid execution_active_since/timezone:
+
+          1. PREPARING-occurrence priority: if this campaign already has
+             ANY occurrence (across all its triggers) still PREPARING,
+             resolve/finish ONLY that one this tick -- see
+             _recover_preparing_occurrence()'s own docstring. This is also
+             what makes fresh discovery's own durable-history floor
+             (_find_current_winner) safe to treat as unambiguous: by the
+             time fresh discovery ever runs, no PREPARING row can exist.
+
+          2. Only once no PREPARING occurrence remains: _find_current_winner()
+             derives today's single latest-due, not-yet-decided occurrence
+             directly from durable history (get_latest_occurrence_for_
+             campaign_between) -- no synthetic row is ever created for a
+             schedule that was never selected. A trigger that loses this
+             comparison gets NO occurrence row, NO member rows, NO
+             Activity Log event -- it remains permanently nonexistent for
+             today, which durable history alone (via the floor derived
+             from whatever DID get selected) continues to correctly
+             exclude on every later tick and across restarts, with no
+             synthetic bookkeeping required."""
         campaigns = await self.campaign_store.list()
         for campaign in campaigns:
             if campaign.status != MailCampaignStatus.ACTIVE:
@@ -303,26 +471,91 @@ class MailTriggerService:
             if campaign.execution_active_since is None or not campaign.timezone:
                 continue  # defensive -- ACTIVE always has both; never crash a whole tick over one bad row
 
-            triggers = await self.trigger_store.list_for_campaign(campaign.mail_campaign_id)
-            if not triggers:
+            preparing = await self.occurrence_store.list_preparing_occurrences_for_campaign(campaign.mail_campaign_id)
+            if preparing:
+                await self._recover_preparing_occurrence(campaign, preparing[0], now)
+                continue  # one campaign-level decision per tick -- a later tick re-evaluates fresh
+
+            winner = await self._find_current_winner(campaign, now)
+            if winner is None:
                 continue
+            winner_trigger, winner_scheduled_for = winner
+            await self._execute_occurrence(campaign, winner_trigger, winner_scheduled_for, now)
 
-            tz = ZoneInfo(campaign.timezone)
-            today_local = now.astimezone(tz).date()
-            today_weekday = today_local.weekday()
+    async def _recover_preparing_occurrence(self, campaign, occurrence: MailTriggerOccurrence, now: datetime) -> None:
+        """Resolves a durably-PREPARING occurrence found at the top of
+        process_due_occurrences(), before any fresh discovery runs this
+        tick.
 
-            for trigger in triggers:
-                if not trigger.enabled:
-                    continue
-                if today_weekday not in trigger.weekdays:
-                    continue
-                scheduled_for = self._scheduled_for(today_local, trigger.local_time, campaign.timezone)
-                if scheduled_for > now:
-                    continue  # not due yet -- never execute a future occurrence
-                if scheduled_for < campaign.execution_active_since:
-                    continue  # outside the campaign's current active streak
+        Frozen (`frozen_at != None`) -- your approved recovery exception:
+        real (or deliberately empty) candidates are ALREADY durably
+        committed. This represents crossed the cohort-commitment
+        boundary, so it is ALWAYS finished via the same idempotent
+        _execute_occurrence() every fresh winner uses, regardless of
+        whether it would still "win" against today's current due set --
+        never re-litigated, never compared against execution_active_since
+        or any newer schedule. Abandoning committed candidates would
+        permanently strand them (the store's global UNIQUE(enrollment_id)
+        constraint means they can never join a different occurrence).
 
-                await self._execute_occurrence(campaign, trigger, scheduled_for, now)
+        Unfrozen (`frozen_at is None`) -- nothing committed yet, so this
+        is re-evaluated fresh against the CURRENT trigger definition and
+        CURRENT due set (_current_due_candidates), NOT against durable
+        history (see _find_current_winner's own docstring for why that
+        specific check would be wrong here -- it would compare this row
+        against itself, since the row already exists). It remains valid
+        only if (a) the current trigger definition still produces this
+        EXACT (trigger_id, scheduled_for) as a currently-due candidate
+        (catches an edit/disable that moved or removed its schedule) AND
+        (b) nothing else currently due is LATER than it (catches the
+        crash-mid-contention case: a later trigger became due while this
+        one sat uncommitted). If either fails, it is superseded via the
+        store's own CAS (PREPARING -> SUPERSEDED, rejected if somehow
+        already frozen by a concurrent freeze -- see
+        MailTriggerOccurrenceStore.supersede_occurrence()) and fresh
+        discovery picks up the actual current winner on a later tick."""
+        trigger = await self.trigger_store.get(occurrence.trigger_id)
+        if trigger is None:
+            return  # defensive: trigger deleted mid-flight -- leave PREPARING for now, nothing safe to resume with
+
+        if occurrence.frozen_at is not None:
+            await self._execute_occurrence(campaign, trigger, occurrence.scheduled_for, now)
+            return
+
+        due = await self._current_due_candidates(campaign, now)
+        still_matches_current_definition = any(
+            t.trigger_id == trigger.trigger_id and scheduled_for == occurrence.scheduled_for for t, scheduled_for in due
+        )
+        nothing_later_is_due = all(scheduled_for <= occurrence.scheduled_for for _t, scheduled_for in due)
+
+        if still_matches_current_definition and nothing_later_is_due:
+            await self._execute_occurrence(campaign, trigger, occurrence.scheduled_for, now)
+            return
+
+        superseded = await self.occurrence_store.supersede_occurrence(trigger.trigger_id, occurrence.scheduled_for, now)
+        if superseded:
+            await self._log_superseded(campaign, trigger, occurrence.scheduled_for)
+
+    async def _log_superseded(self, campaign, trigger: MailLeadStartTrigger, scheduled_for: datetime) -> None:
+        """Observability only (never read back for correctness) -- a real
+        PREPARING -> SUPERSEDED transition happened. Never called for a
+        schedule that never got a row in the first place (see
+        process_due_occurrences's own docstring: a never-selected losing
+        schedule gets no row and no event)."""
+        await self.activity_log.record(
+            event_type="mail_trigger_occurrence.superseded",
+            category=ActivityCategory.MAIL,
+            source=ActivitySource.MAIL_SYSTEM,
+            summary=(
+                f'A lead-start trigger occurrence for campaign "{campaign.name}" was superseded during '
+                f"crash recovery by a later occurrence recognized as the campaign's actual latest-due "
+                f"winner before this one crossed the cohort-commitment boundary."
+            ),
+            entity_type="mail_campaign",
+            entity_id=campaign.mail_campaign_id,
+            entity_name=campaign.name,
+            metadata={"trigger_id": trigger.trigger_id, "scheduled_for": scheduled_for.isoformat()},
+        )
 
     async def _execute_occurrence(self, campaign, trigger: MailLeadStartTrigger, scheduled_for: datetime, now: datetime) -> None:
         """Steps 1-4 of the approved freeze-before-mutation contract:
@@ -332,10 +565,19 @@ class MailTriggerService:
         step here is idempotent/resumable from durable state alone, so
         re-running this for the SAME (trigger_id, scheduled_for) -- from
         a second tick, a crash-retry, or rediscovery of an
-        already-COMPLETED occurrence -- is always safe."""
+        already-COMPLETED occurrence -- is always safe.
+
+        Defensively also treats SUPERSEDED as terminal here, exactly like
+        COMPLETED, even though no current call site is expected to ever
+        reach this method with a SUPERSEDED occurrence (fresh discovery
+        only ever selects a candidate with no existing row at all; the
+        PREPARING-recovery path only ever calls this when the row is
+        still frozen-or-still-the-current-winner) -- SUPERSEDED must
+        never freeze members or start leads, full stop, regardless of how
+        it was reached."""
         occurrence = await self.occurrence_store.get_occurrence(trigger.trigger_id, scheduled_for)
-        if occurrence is not None and occurrence.status == "COMPLETED":
-            return  # idempotent rediscovery -- nothing left to do
+        if occurrence is not None and occurrence.status in ("COMPLETED", "SUPERSEDED"):
+            return  # idempotent rediscovery -- nothing left to do, and SUPERSEDED is terminal
 
         if occurrence is None:
             candidate_occurrence = MailTriggerOccurrence(
@@ -352,7 +594,7 @@ class MailTriggerService:
             occurrence = await self.occurrence_store.get_occurrence(trigger.trigger_id, scheduled_for)
             if occurrence is None:
                 return  # defensive: should be unreachable, nothing to recover into
-            if occurrence.status == "COMPLETED":
+            if occurrence.status in ("COMPLETED", "SUPERSEDED"):
                 return
 
         if occurrence.frozen_at is None:
