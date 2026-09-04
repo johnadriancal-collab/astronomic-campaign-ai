@@ -465,7 +465,7 @@ async def test_commit_gate_refuses_to_activate_when_completeness_check_finds_a_g
     assert result.status == MailCampaignStatus.READY, "COMMIT must refuse to transition while the invariant doesn't hold"
 
     steps = await service.step_store.list_for_campaign(ready.mail_campaign_id)
-    incomplete = await service._find_incomplete_activation(ready.mail_campaign_id, steps[0])
+    incomplete = await service._find_incomplete_activation(ready.mail_campaign_id, steps[0], "immediate")
     assert tampered.enrollment_id in incomplete
 
 

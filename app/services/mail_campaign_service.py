@@ -1315,10 +1315,12 @@ class MailCampaignService:
         now = datetime.now(timezone.utc)
 
         # --- PREPARE ---
-        activated = await self._prepare_activation(mail_campaign_id, step1, resolved_windows, campaign.timezone, now)
+        activated = await self._prepare_activation(
+            mail_campaign_id, step1, resolved_windows, campaign.timezone, now, campaign.lead_start_mode
+        )
 
         # --- COMMIT: explicit completeness verification ---
-        incomplete = await self._find_incomplete_activation(mail_campaign_id, step1)
+        incomplete = await self._find_incomplete_activation(mail_campaign_id, step1, campaign.lead_start_mode)
         if incomplete:
             # PREPARE is not (yet) complete -- refuse to commit. Returning
             # the still-READY campaign (never raising here) is what makes
@@ -1344,14 +1346,29 @@ class MailCampaignService:
         return updated
 
     async def _prepare_activation(
-        self, mail_campaign_id: str, step1: MailSequenceStep, windows: list[MailSendWindow], timezone_name: str, now: datetime
+        self,
+        mail_campaign_id: str,
+        step1: MailSequenceStep,
+        windows: list[MailSendWindow],
+        timezone_name: str,
+        now: datetime,
+        lead_start_mode: str,
     ) -> int:
         """PREPARE phase of activate_campaign() -- see that method's own
-        docstring for the full PREPARE/COMMIT contract. Every currently-
-        PENDING enrollment is processed idempotently; the campaign's own
+        docstring for the full PREPARE/COMMIT contract. The campaign's own
         status is never touched here. Returns how many enrollments this
         specific call newly activated (for the activity log summary --
-        0 on a pure retry/no-op call)."""
+        0 on a pure retry/no-op call, and ALWAYS 0 for a "triggered"
+        campaign, by design).
+
+        Stage 5C (2026-09-04): gated on `lead_start_mode`, exactly --
+        never inferred from whether any MailLeadStartTrigger row exists,
+        so a "triggered" campaign with zero triggers still leaves every
+        PENDING enrollment genuinely PENDING/no-Step1 indefinitely (its
+        eventual Not Started pool for Stage 5D). "immediate" preserves the
+        exact prior unconditional behavior."""
+        if lead_start_mode != "immediate":
+            return 0
         enrollments = await self.enrollment_store.list_for_campaign(mail_campaign_id)
         activated = 0
         for enrollment in enrollments:
@@ -1364,28 +1381,55 @@ class MailCampaignService:
             activated += 1
         return activated
 
-    async def _find_incomplete_activation(self, mail_campaign_id: str, step1: MailSequenceStep) -> list[str]:
+    async def _find_incomplete_activation(
+        self, mail_campaign_id: str, step1: MailSequenceStep, lead_start_mode: str
+    ) -> list[str]:
         """COMMIT-gate of activate_campaign() -- an explicit, freshly-
         re-queried verification of the activation invariant, never
         inferred from "the PREPARE loop above didn't raise." Returns the
         enrollment_ids of every enrollment that is NOT SUPPRESSED (i.e. is
-        "applicable") but does not YET satisfy "ACTIVE with exactly one
-        Step 1 MailEnrollmentStep row" -- empty means PREPARE is fully
-        complete and COMMIT may proceed. Re-reads both stores directly
-        rather than reusing anything the PREPARE loop computed, so a
-        future change to that loop's logic can never silently violate this
-        invariant without this check catching it."""
+        "applicable") but does not YET satisfy the mode's own definition
+        of successfully prepared -- empty means PREPARE is fully complete
+        and COMMIT may proceed. Re-reads both stores directly rather than
+        reusing anything the PREPARE loop computed, so a future change to
+        that loop's logic can never silently violate this invariant
+        without this check catching it.
+
+        Stage 5C (2026-09-04): the definition of "successfully prepared"
+        is now mode-dependent, matching _prepare_activation()'s own gate
+        exactly:
+          "immediate" -- UNCHANGED: ACTIVE with exactly one Step 1
+            MailEnrollmentStep row.
+          "triggered" -- PENDING with NO Step 1 row materialized yet --
+            genuinely Not Started, not merely "status happens to say
+            PENDING." An enrollment that is PENDING but ALREADY has a
+            Step 1 row (a corrupted/inconsistent state -- e.g. some other
+            code path materialized one) is deliberately treated as
+            INCOMPLETE here, not silently accepted -- this stage does not
+            invent automatic repair for that state; activation simply
+            fails closed (activate_campaign() returns the still-READY
+            campaign, same as any other incomplete case) until whatever
+            produced that inconsistency is fixed."""
         enrollments = await self.enrollment_store.list_for_campaign(mail_campaign_id)
         incomplete: list[str] = []
         for enrollment in enrollments:
             if enrollment.status == MailEnrollmentStatus.SUPPRESSED:
                 continue  # never applicable -- correctly excluded at mark_ready() snapshot time
-            if enrollment.status != MailEnrollmentStatus.ACTIVE:
-                incomplete.append(enrollment.enrollment_id)
-                continue
-            row = await self.enrollment_step_store.get_by_enrollment_and_step(enrollment.enrollment_id, step1.step_id)
-            if row is None:
-                incomplete.append(enrollment.enrollment_id)
+
+            if lead_start_mode == "immediate":
+                if enrollment.status != MailEnrollmentStatus.ACTIVE:
+                    incomplete.append(enrollment.enrollment_id)
+                    continue
+                row = await self.enrollment_step_store.get_by_enrollment_and_step(enrollment.enrollment_id, step1.step_id)
+                if row is None:
+                    incomplete.append(enrollment.enrollment_id)
+            else:  # "triggered"
+                if enrollment.status != MailEnrollmentStatus.PENDING:
+                    incomplete.append(enrollment.enrollment_id)
+                    continue
+                row = await self.enrollment_step_store.get_by_enrollment_and_step(enrollment.enrollment_id, step1.step_id)
+                if row is not None:
+                    incomplete.append(enrollment.enrollment_id)  # PENDING-with-a-Step1 is corrupt, not complete
         return incomplete
 
     async def pause_campaign(self, mail_campaign_id: str, actor: str | None = None) -> MailCampaign:
@@ -1824,19 +1868,40 @@ class MailCampaignService:
             members = await self.batch_member_store.list_for_batch(batch_id)
             pending_members = [m for m in members if m.state == MailEnrollmentBatchMemberState.ENROLLED_PENDING]
             if pending_members:
-                steps = await self.step_store.list_for_campaign(batch.mail_campaign_id)
-                step1 = next(s for s in steps if s.step_number == 1)  # guaranteed: this campaign was READY once
-                resolved_windows, _source = await self._resolve_schedule(batch.mail_campaign_id, campaign)
-                assert campaign.timezone is not None  # guaranteed by the same readiness check activation required
+                # Stage 5C (2026-09-04): gated on lead_start_mode ONLY --
+                # deliberately no branch on campaign.status here (ACTIVE vs
+                # PAUSED). This is unchanged from before Stage 5C: nothing
+                # sends while PAUSED regardless, via the separate
+                # campaign.status==ACTIVE gate in prepare_and_send_step()
+                # (see add_prospects()'s own docstring) -- that invariant
+                # is preserved exactly, not touched, by this mode gate.
+                #
+                # "immediate": unchanged -- Step 1 materialized, enrollment
+                # flipped to ACTIVE. "triggered": the enrollment stays
+                # PENDING with no Step 1 row -- the future Not Started pool
+                # Stage 5D's trigger occurrences will consume. Either way,
+                # the member itself still reaches PREPARED (this member's
+                # own suppression/dedupe resolution IS complete -- state
+                # names "prepared for this campaign's mode," not
+                # literally "Step 1 materialized") -- this is what keeps
+                # enrolled_count/batch completion semantics byte-identical
+                # regardless of mode: a "triggered" lead genuinely became a
+                # real MailEnrollment, it just hasn't started yet.
                 now = datetime.now(timezone.utc)
+                if campaign.lead_start_mode == "immediate":
+                    steps = await self.step_store.list_for_campaign(batch.mail_campaign_id)
+                    step1 = next(s for s in steps if s.step_number == 1)  # guaranteed: this campaign was READY once
+                    resolved_windows, _source = await self._resolve_schedule(batch.mail_campaign_id, campaign)
+                    assert campaign.timezone is not None  # guaranteed by the same readiness check activation required
                 for member in pending_members:
                     enrollment = await self.enrollment_store.get(member.enrollment_id)
                     if enrollment is None:
                         continue  # defensive only -- this member's own create() call above guarantees it exists
-                    await self.sending_service.create_step1_execution(
-                        enrollment=enrollment, step1=step1, windows=resolved_windows, timezone_name=campaign.timezone, now=now
-                    )
-                    await self.enrollment_store.save(enrollment.model_copy(update={"status": MailEnrollmentStatus.ACTIVE}))
+                    if campaign.lead_start_mode == "immediate":
+                        await self.sending_service.create_step1_execution(
+                            enrollment=enrollment, step1=step1, windows=resolved_windows, timezone_name=campaign.timezone, now=now
+                        )
+                        await self.enrollment_store.save(enrollment.model_copy(update={"status": MailEnrollmentStatus.ACTIVE}))
                     await self.batch_member_store.save(
                         member.model_copy(update={"state": MailEnrollmentBatchMemberState.PREPARED, "updated_at": now})
                     )
