@@ -67,7 +67,7 @@ export function campaignLockedBannerTitle(status: MailCampaignStatus): string {
 export function campaignLockedBannerDescription(status: MailCampaignStatus): string {
   switch (status) {
     case "ready":
-      return "The audience was snapshotted when this campaign was marked ready. Unlock it to make changes -- this clears the snapshot so it can be re-created fresh.";
+      return "The initial audience was snapshotted when this campaign was marked ready. More prospects can be added after the campaign is activated. Unlock it to make changes -- this clears the initial snapshot so it can be re-created fresh.";
     case "active":
       return "This campaign is actively sending. Audience, sequence, and schedule are locked while it executes.";
     case "paused":

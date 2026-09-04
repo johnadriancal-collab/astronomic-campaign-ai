@@ -12,7 +12,7 @@ import {
   formatHourMark,
   formatMinutesOfDay,
   formatWindowRange,
-  isLocalWindowId,
+  isUnsavedWindowId,
   isValidWindow,
   minutesFromTimeString,
   neighborBounds,
@@ -251,19 +251,74 @@ test("defaultNewWindow returns null when the day has no room left at all", () =>
   assert.equal(defaultNewWindow(dayWindows, null), null);
 });
 
-// --- local vs. server window id ---------------------------------------
+// --- synthetic (unsaved) vs. real server window id ---------------------
+//
+// Two independent things can put a window in component state without it
+// ever having been a real, persisted MailSendWindow row: the user clicking
+// "+ Send time" just now (a "new-..." id, minted client-side -- see
+// newLocalWindowId), or the backend's own read-time fallback for a legacy
+// campaign with no real window rows yet (a "legacy-..." id, fabricated
+// fresh by _synthesize_legacy_windows() on every GET .../schedule, per its
+// own docstring "NEVER persisted"). Echoing either one back as `window_id`
+// on save is exactly the production bug this covers: the backend
+// correctly 400s an id it never told window_store about.
 
-test("newLocalWindowId always produces an id isLocalWindowId recognizes", () => {
-  assert.equal(isLocalWindowId(newLocalWindowId(0, 0)), true);
-  assert.equal(isLocalWindowId(newLocalWindowId(6, 42)), true);
+test("newLocalWindowId always produces an id isUnsavedWindowId recognizes", () => {
+  assert.equal(isUnsavedWindowId(newLocalWindowId(0, 0)), true);
+  assert.equal(isUnsavedWindowId(newLocalWindowId(6, 42)), true);
 });
 
-test("isLocalWindowId is false for a real server-issued id (a UUID)", () => {
-  assert.equal(isLocalWindowId("3f6b8f2a-1c2d-4e5f-9a8b-7c6d5e4f3a2b"), false);
+test("isUnsavedWindowId is true for the backend's legacy-schedule fallback id shape", () => {
+  assert.equal(isUnsavedWindowId("legacy-288680b9-dd39-4a45-93c1-dc2ac1b8dc82-4"), true);
+  assert.equal(isUnsavedWindowId("legacy-some-campaign-id-0"), true);
+});
+
+test("isUnsavedWindowId is false for a real server-issued id (a UUID)", () => {
+  assert.equal(isUnsavedWindowId("3f6b8f2a-1c2d-4e5f-9a8b-7c6d5e4f3a2b"), false);
 });
 
 test("newLocalWindowId produces distinct ids for distinct counters", () => {
   assert.notEqual(newLocalWindowId(0, 0), newLocalWindowId(0, 1));
+});
+
+// This mirrors the exact `window_id: isUnsavedWindowId(w.id) ? undefined :
+// w.id` mapping in the Schedule tab's handleSaveSchedule (see
+// mail-campaign-schedule.test.ts's own source-level assertion that the
+// page really does use this expression) -- proving the payload behavior
+// directly, at the unit level, rather than only checking the page's source
+// text matches a pattern.
+function toSavePayloadWindowId(id: string): string | undefined {
+  return isUnsavedWindowId(id) ? undefined : id;
+}
+
+test("a legacy campaign's fallback windows are omitted (window_id: undefined) from the save payload, not echoed back", () => {
+  const legacyLoadedWindows = [
+    "legacy-288680b9-dd39-4a45-93c1-dc2ac1b8dc82-1",
+    "legacy-288680b9-dd39-4a45-93c1-dc2ac1b8dc82-3",
+    "legacy-288680b9-dd39-4a45-93c1-dc2ac1b8dc82-5",
+  ];
+  for (const id of legacyLoadedWindows) {
+    assert.equal(toSavePayloadWindowId(id), undefined);
+  }
+});
+
+test("a genuinely new, not-yet-saved window is likewise omitted from the save payload", () => {
+  assert.equal(toSavePayloadWindowId(newLocalWindowId(2, 0)), undefined);
+});
+
+test("a real, previously-persisted window's id IS sent back unchanged, preserving its identity", () => {
+  const realId = "3f6b8f2a-1c2d-4e5f-9a8b-7c6d5e4f3a2b";
+  assert.equal(toSavePayloadWindowId(realId), realId);
+});
+
+test("mixing a real window with legacy fallback windows in one save sends undefined ONLY for the synthetic ones -- this is what lets the backend's tested legacy-to-windows transition succeed instead of 400ing", () => {
+  const mixed = [
+    { id: "legacy-campaign-x-0", start: 8 * 60, end: 12 * 60 },
+    { id: "3f6b8f2a-1c2d-4e5f-9a8b-7c6d5e4f3a2b", start: 9 * 60, end: 17 * 60 },
+  ];
+  const payload = mixed.map((w) => ({ window_id: toSavePayloadWindowId(w.id), start: w.start, end: w.end }));
+  assert.equal(payload[0].window_id, undefined);
+  assert.equal(payload[1].window_id, "3f6b8f2a-1c2d-4e5f-9a8b-7c6d5e4f3a2b");
 });
 
 // --- timeline hour marks (hourly gridlines/labels) -----------------------

@@ -233,6 +233,47 @@ test("the page wires Schedule's editable flag to the same DRAFT-only flag every 
   assert.match(PAGE_SOURCE, /editable=\{editable\}/);
 });
 
+test("editable is literally false for a READY campaign -- the flag is a plain draft-only equality check, not a broader allow-list", () => {
+  assert.match(PAGE_SOURCE, /const editable = campaign\?\.status === "draft";/);
+});
+
+// --- Loading/viewing Schedule can never itself reach the mutation endpoint --
+
+test("setMailCampaignSchedule is called from exactly one place: the explicit Save Schedule handler", () => {
+  const callSites = [...PAGE_SOURCE.matchAll(/setMailCampaignSchedule\(/g)];
+  assert.equal(callSites.length, 1, `expected exactly 1 call site, found ${callSites.length}`);
+});
+
+test("the page's mount-time load() never references the schedule write function", () => {
+  const loadMatch = PAGE_SOURCE.match(/async function load\(\)[\s\S]*?\n  \}/);
+  assert.ok(loadMatch, "load() function not found");
+  assert.doesNotMatch(loadMatch[0], /setMailCampaignSchedule/);
+});
+
+test("no useEffect in the page calls the schedule write function -- only a user's own Save Schedule click can", () => {
+  const effectBodies = [...PAGE_SOURCE.matchAll(/useEffect\(\(\) => \{[\s\S]*?\n  \}, \[[^\]]*\]\);/g)];
+  assert.ok(effectBodies.length > 0, "expected at least one useEffect in the page");
+  for (const match of effectBodies) {
+    assert.doesNotMatch(match[0], /setMailCampaignSchedule/);
+  }
+});
+
+// --- Stale scheduleError cleared on lifecycle transitions (production bug) -
+
+test("scheduleError is cleared on successful Mark Ready, Unlock, and Archive -- a stale error from a prior DRAFT-time Save Schedule must not survive a lifecycle transition", () => {
+  for (const handlerName of ["handleMarkReady", "handleUnlock", "handleArchive"]) {
+    const match = PAGE_SOURCE.match(new RegExp(`async function ${handlerName}\\(\\)[\\s\\S]*?\\n  \\}`));
+    assert.ok(match, `${handlerName} not found`);
+    assert.match(match[0], /setScheduleError\(null\)/);
+  }
+});
+
+test("scheduleError is cleared before a fresh Save Schedule attempt, so a successful save never leaves a stale error behind either", () => {
+  const match = PAGE_SOURCE.match(/async function handleSaveSchedule\(\)[\s\S]*?\n  \}/);
+  assert.ok(match, "handleSaveSchedule not found");
+  assert.match(match[0], /setSavingSchedule\(true\);\s*\n\s*setScheduleError\(null\);/);
+});
+
 // --- Timezone always visible -------------------------------------------------
 
 test("the timezone selector is always rendered, not conditionally hidden", () => {
@@ -261,13 +302,43 @@ test("the Schedule UI never references sending-engine concepts (Gmail, workers, 
 // --- Stable window IDs across saves -----------------------------------
 
 test("the page sends window_id for real windows, letting the backend preserve their identity", () => {
-  assert.match(PAGE_SOURCE, /window_id:\s*isLocalWindowId\(w\.id\)\s*\?\s*undefined\s*:\s*w\.id/);
+  assert.match(PAGE_SOURCE, /window_id:\s*isUnsavedWindowId\(w\.id\)\s*\?\s*undefined\s*:\s*w\.id/);
 });
 
 test("a local (not-yet-saved) window's id is recognizable and excluded from the save payload", () => {
-  assert.match(SCHEDULE_LIB_SOURCE, /export function isLocalWindowId/);
+  assert.match(SCHEDULE_LIB_SOURCE, /export function isUnsavedWindowId/);
   assert.match(SCHEDULE_LIB_SOURCE, /export function newLocalWindowId/);
   assert.match(DAY_ROW_SOURCE, /newLocalWindowId/);
+});
+
+// --- Production bug fix: the backend's legacy-schedule fallback id is ALSO
+// synthetic, and must never be echoed back as an existing window_id -------
+//
+// 2026-09-04 production incident: a legacy campaign's GET .../schedule
+// fallback (backend's _synthesize_legacy_windows(), "legacy-<campaign_id>-
+// <day>", explicitly never persisted) was round-tripped back on Save as if
+// it were a real window_id -- the backend correctly 400s an id it never
+// told window_store about ("... is not an existing send window on this
+// campaign"), since the whole point of that synthesis is that it's
+// recomputed fresh on every read, never stored. The frontend's own
+// "unsaved id" classification simply didn't know about this second,
+// backend-owned synthetic-id convention -- see isUnsavedWindowId's own
+// docstring in lib/schedule.ts.
+
+test("isUnsavedWindowId recognizes the backend's exact legacy-window-id shape, not just its own new- prefix", () => {
+  assert.match(SCHEDULE_LIB_SOURCE, /LEGACY_WINDOW_ID_PREFIX = "legacy-"/);
+  assert.match(SCHEDULE_LIB_SOURCE, /startsWith\(LOCAL_WINDOW_ID_PREFIX\) \|\| id\.startsWith\(LEGACY_WINDOW_ID_PREFIX\)/);
+});
+
+test("the backend's own legacy-window-id template matches what the frontend now recognizes as unsaved", () => {
+  // f"legacy-{campaign.mail_campaign_id}-{day}" -- confirms the frontend's
+  // hardcoded "legacy-" prefix isn't a guess; it mirrors the ACTUAL backend
+  // template, read directly from the service source.
+  assert.match(SERVICE_SOURCE, /window_id=f"legacy-\{campaign\.mail_campaign_id\}-\{day\}"/);
+});
+
+test("the backend's legacy-schedule synthesis is documented as read-only/never-persisted -- the frontend fix doesn't change that contract", () => {
+  assert.match(SERVICE_SOURCE, /NEVER persisted/);
 });
 
 test("the API client's schedule window type carries an optional window_id, not a required one", () => {

@@ -56,8 +56,8 @@ export function MailCampaignLeadsTab({
       {campaign.status === "draft" ? (
         <Card>
           <CardContent className="py-10 text-center text-sm text-muted-foreground">
-            No leads yet -- enrollments are created when this campaign is marked Ready, as a one-time snapshot of its
-            audience at that moment.
+            No leads yet -- an initial batch of enrollments is created when this campaign is marked Ready, as a
+            snapshot of its audience at that moment. More prospects can be added after the campaign is activated.
           </CardContent>
         </Card>
       ) : enrollments.length === 0 ? (

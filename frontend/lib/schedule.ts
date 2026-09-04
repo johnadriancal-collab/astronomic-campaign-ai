@@ -22,20 +22,35 @@ export const MIN_WINDOW_DURATION_MINUTES = SNAP_MINUTES;
 
 // A window not yet saved through PUT .../schedule (created client-side by
 // "+ Send time") gets a local placeholder id in this exact shape -- see
-// schedule-day-row.tsx's addWindow(). The Schedule tab's save handler uses
-// this same check to decide which windows' ids are real server ids worth
-// sending back (to preserve identity across the edit) versus which are
-// local-only and must be omitted so the backend mints a real id for them.
-// One shared prefix convention, not duplicated as a string literal in two
-// places.
+// schedule-day-row.tsx's addWindow().
 const LOCAL_WINDOW_ID_PREFIX = "new-";
 
 export function newLocalWindowId(day: number, counter: number): string {
   return `${LOCAL_WINDOW_ID_PREFIX}${day}-${counter}`;
 }
 
-export function isLocalWindowId(id: string): boolean {
-  return id.startsWith(LOCAL_WINDOW_ID_PREFIX);
+// The backend's OWN synthetic-id convention for a legacy campaign's
+// fallback schedule -- see _synthesize_legacy_windows() in
+// mail_campaign_service.py: `f"legacy-{campaign_id}-{day}"`, generated
+// fresh on every GET .../schedule for a campaign with no real MailSendWindow
+// rows yet, explicitly documented there as "NEVER persisted". A window
+// loaded with one of these ids is exactly as unreal as a brand-new
+// "new-..." one -- neither exists as a row in window_store.
+const LEGACY_WINDOW_ID_PREFIX = "legacy-";
+
+// Whether `id` is synthetic -- never a real, persisted MailSendWindow row --
+// covering BOTH ways a window can reach component state without ever
+// having been saved: minted client-side just now ("new-...") or fabricated
+// by the backend's legacy-schedule fallback ("legacy-...", see above). The
+// Schedule tab's save handler uses this to decide which windows' ids are
+// real server ids worth sending back (to preserve identity across the
+// edit) versus which must be omitted so the backend mints a real id for
+// them -- echoing either synthetic form back as if it were a real id is
+// exactly the bug this function exists to prevent (the backend correctly
+// rejects an unrecognized window_id with a 400, since it was never told to
+// treat its own read-time fallback as something save() should accept back).
+export function isUnsavedWindowId(id: string): boolean {
+  return id.startsWith(LOCAL_WINDOW_ID_PREFIX) || id.startsWith(LEGACY_WINDOW_ID_PREFIX);
 }
 
 // Removes exactly one window (by id) from a day's local, not-yet-saved

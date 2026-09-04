@@ -97,7 +97,7 @@ test("the Dashboard tab explains Draft campaigns have no enrollments yet, rather
 
 test("the Leads tab gives Draft campaigns an accurate empty state instead of an empty table", () => {
   assert.match(LEADS_TAB_SOURCE, /status === "draft"/);
-  assert.match(LEADS_TAB_SOURCE, /enrollments are created when this campaign is marked Ready/);
+  assert.match(LEADS_TAB_SOURCE, /enrollments is created when this campaign is marked Ready/);
 });
 
 test("the Leads tab never invents a send/open/reply enrollment state", () => {

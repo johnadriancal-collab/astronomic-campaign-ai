@@ -15,7 +15,7 @@ import { MailCampaignScheduleTab, type TabWindow } from "@/components/mail-campa
 import { MailCampaignSettingsTab } from "@/components/mail-campaign-settings-tab";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
 import { campaignLockedBannerDescription, campaignLockedBannerTitle } from "@/lib/mail";
-import { findOverlappingPairs, isLocalWindowId, minutesFromTimeString, timeStringFromMinutes } from "@/lib/schedule";
+import { findOverlappingPairs, isUnsavedWindowId, minutesFromTimeString, timeStringFromMinutes } from "@/lib/schedule";
 import type { StepSelection } from "@/lib/mail-campaign-steps";
 import { cn } from "@/lib/utils";
 import {
@@ -226,13 +226,17 @@ export default function MailCampaignDetailPage() {
     setScheduleError(null);
     try {
       // Preserve identity for windows the server already knows about --
-      // only a genuinely local, not-yet-saved window (see
-      // lib/schedule.ts's isLocalWindowId) omits window_id so the backend
-      // mints a real one for it. A dragged/resized EXISTING window keeps
-      // its real id here (only start/end changed, not `w.id`), so the
-      // backend correctly treats it as the same entity, not a delete+recreate.
+      // any synthetic, not-yet-persisted window (see lib/schedule.ts's
+      // isUnsavedWindowId: covers both a brand-new "new-..." window AND a
+      // legacy campaign's "legacy-..." fallback windows, which the GET
+      // .../schedule fallback fabricates fresh every time but never saves)
+      // omits window_id so the backend mints a real one for it instead of
+      // rejecting an id it never persisted. A dragged/resized EXISTING
+      // window keeps its real id here (only start/end changed, not
+      // `w.id`), so the backend correctly treats it as the same entity,
+      // not a delete+recreate.
       const payload = windows.map((w) => ({
-        window_id: isLocalWindowId(w.id) ? undefined : w.id,
+        window_id: isUnsavedWindowId(w.id) ? undefined : w.id,
         day_of_week: w.day,
         start_time: timeStringFromMinutes(w.start),
         end_time: timeStringFromMinutes(w.end),
@@ -442,6 +446,15 @@ export default function MailCampaignDetailPage() {
       setCampaign(await markMailCampaignReady(campaignId));
       await refreshReview();
       setEnrollments(await listMailEnrollments(campaignId));
+      // The Schedule tab is about to go from editable to locked -- any
+      // error left over from an earlier Save Schedule attempt (while still
+      // DRAFT) belongs to a context that no longer exists, and would
+      // otherwise sit there indefinitely since nothing else ever clears it
+      // once the user stops interacting with that tab. Only clearing this
+      // on SUCCESS, not in the catch below: if Mark Ready itself fails,
+      // the campaign is still DRAFT/editable and that error may still be
+      // exactly what the user needs to see.
+      setScheduleError(null);
     } catch (err) {
       setActionError(err instanceof ApiError ? `Couldn't mark ready (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
@@ -455,6 +468,12 @@ export default function MailCampaignDetailPage() {
     try {
       await unlockMailCampaign(campaignId);
       await load();
+      // Back to DRAFT/editable -- load() re-fetches the real current
+      // schedule, but doesn't itself touch scheduleError (it's not part of
+      // its own generic `error` state), so a stale message from before
+      // this unlock would otherwise survive it. See handleMarkReady's own
+      // comment for why this is a success-only clear.
+      setScheduleError(null);
     } catch (err) {
       setActionError(err instanceof ApiError ? `Couldn't unlock (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
@@ -467,6 +486,10 @@ export default function MailCampaignDetailPage() {
     setActionError(null);
     try {
       setCampaign(await archiveMailCampaign(campaignId));
+      // Stays on this page (see this handler's own body -- no navigation),
+      // and the Schedule tab remains locked, so the same stale-error
+      // concern as handleMarkReady/handleUnlock applies here too.
+      setScheduleError(null);
     } catch (err) {
       setActionError(err instanceof ApiError ? `Couldn't archive (${err.status}): ${err.message}` : "Couldn't reach the backend.");
     } finally {
