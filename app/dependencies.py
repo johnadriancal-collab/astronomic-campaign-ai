@@ -33,6 +33,7 @@ from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProsp
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
+from app.services.mail_trigger_service import MailTriggerService
 from app.services.mailbox_service import MailboxService
 
 
@@ -90,6 +91,10 @@ async def get_mail_sending_service(request: Request) -> MailSendingService:
 
 async def get_mail_suppression_service(request: Request) -> MailSuppressionService:
     return request.app.state.mail_suppression_service
+
+
+async def get_mail_trigger_service(request: Request) -> MailTriggerService:
+    return request.app.state.mail_trigger_service
 
 
 async def get_mailbox_service(request: Request) -> MailboxService:

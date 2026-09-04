@@ -40,6 +40,7 @@ from app.dependencies import (
     get_mail_campaign_service,
     get_mail_sending_service,
     get_mail_suppression_service,
+    get_mail_trigger_service,
 )
 from app.models.mail import (
     MailCampaign,
@@ -51,6 +52,7 @@ from app.models.mail import (
     MailEnrollment,
     MailEnrollmentBatch,
     MailEnrollmentBatchSource,
+    MailLeadStartTrigger,
     MailScheduleValidationError,
     MailSequenceStep,
     MailSuppression,
@@ -88,6 +90,8 @@ from app.services.mail_suppression_service import (
     MailSuppressionService,
     UnsubscribeReversalNotAllowedError,
 )
+from app.services.mail_trigger_service import MailCampaignNotEligibleForTriggersError, MailTriggerService
+from app.repositories.mail_lead_start_trigger_store import MailLeadStartTriggerNotFoundError
 
 router = APIRouter(prefix="/mail", tags=["mail"])
 
@@ -558,6 +562,97 @@ async def set_campaign_schedule(
         raise HTTPException(status_code=409, detail=str(e))
     except MailScheduleValidationError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+# --- Lead-start triggers (Stage 5D, 2026-09-04) -----------------------------
+#
+# CRUD only here -- occurrence discovery/freeze/reconciliation happens
+# entirely inside MailExecutionWorker.tick() (see MailTriggerService), never
+# from an HTTP request. Editable anywhere campaign configuration is
+# meaningfully editable (DRAFT/READY/ACTIVE/PAUSED, matching Channels'
+# posture more than Schedule's DRAFT-only lock) -- see MailTriggerService's
+# own _TRIGGER_CONFIGURABLE_STATUSES for the exact set and why ARCHIVED/
+# COMPLETED are excluded. Creating/editing/deleting a trigger NEVER starts a
+# lead -- see MailTriggerService.create_trigger()'s own docstring.
+
+
+class MailLeadStartTriggerCreateRequest(BaseModel):
+    weekdays: list[int]
+    local_time: str  # "HH:MM", same convention as every other time-of-day input in this API
+    leads_to_start: int
+    enabled: bool = True
+
+
+class MailLeadStartTriggerUpdateRequest(BaseModel):
+    weekdays: list[int] | None = None
+    local_time: str | None = None
+    leads_to_start: int | None = None
+    enabled: bool | None = None
+
+
+@router.get("/campaigns/{mail_campaign_id}/triggers", response_model=list[MailLeadStartTrigger])
+async def list_triggers(mail_campaign_id: str, service: MailTriggerService = Depends(get_mail_trigger_service)):
+    try:
+        return await service.list_triggers(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/campaigns/{mail_campaign_id}/triggers", response_model=MailLeadStartTrigger)
+async def create_trigger(
+    mail_campaign_id: str,
+    payload: MailLeadStartTriggerCreateRequest,
+    request: Request,
+    service: MailTriggerService = Depends(get_mail_trigger_service),
+):
+    try:
+        return await service.create_trigger(
+            mail_campaign_id, payload.weekdays, payload.local_time, payload.leads_to_start, payload.enabled,
+            actor=_operator_actor(request),
+        )
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignNotEligibleForTriggersError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/campaigns/{mail_campaign_id}/triggers/{trigger_id}", response_model=MailLeadStartTrigger)
+async def update_trigger(
+    mail_campaign_id: str,
+    trigger_id: str,
+    payload: MailLeadStartTriggerUpdateRequest,
+    request: Request,
+    service: MailTriggerService = Depends(get_mail_trigger_service),
+):
+    try:
+        return await service.update_trigger(
+            mail_campaign_id, trigger_id, payload.weekdays, payload.local_time, payload.leads_to_start,
+            payload.enabled, actor=_operator_actor(request),
+        )
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailLeadStartTriggerNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignNotEligibleForTriggersError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/campaigns/{mail_campaign_id}/triggers/{trigger_id}", status_code=204)
+async def delete_trigger(
+    mail_campaign_id: str, trigger_id: str, request: Request, service: MailTriggerService = Depends(get_mail_trigger_service)
+):
+    try:
+        await service.delete_trigger(mail_campaign_id, trigger_id, actor=_operator_actor(request))
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailLeadStartTriggerNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailCampaignNotEligibleForTriggersError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
 
 # --- Sequence steps --------------------------------------------------------

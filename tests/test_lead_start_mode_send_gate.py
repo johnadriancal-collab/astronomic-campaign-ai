@@ -394,11 +394,18 @@ def test_stage_5b_adds_no_trigger_execution_logic():
         assert forbidden not in source
 
 
-def test_mail_execution_worker_still_has_no_trigger_code():
+def test_mail_execution_worker_delegates_trigger_processing_rather_than_reimplementing_it():
+    """Superseded by Stage 5D (2026-09-04) -- see
+    test_mail_trigger_foundation.py's identically-renamed test for the
+    full explanation. This file's own remaining concern (Stage 5B's
+    daily_lead_start_limit gate) is unaffected either way -- checked
+    separately above."""
     from pathlib import Path
 
     source = Path("app/services/mail_execution_worker.py").read_text()
-    assert "trigger" not in source.lower()
+    assert "mail_trigger_service" in source
+    for forbidden in ("freeze_members(", "MailTriggerOccurrence(", "create_occurrence("):
+        assert forbidden not in source
 
 
 # --- 12. No existing campaign is automatically switched to TRIGGERED -------

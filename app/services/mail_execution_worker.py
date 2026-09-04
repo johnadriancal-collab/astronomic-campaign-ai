@@ -53,6 +53,7 @@ from app.services.mail_sending_service import (
     MailSenderPort,
     MailSendingService,
 )
+from app.services.mail_trigger_service import MailTriggerService
 from app.services.worker_lease_service import WorkerLeaseService
 
 # A tick is considered stalled (worker "dead" for /health purposes) once
@@ -78,6 +79,7 @@ class MailExecutionWorker:
         lease_service: WorkerLeaseService,
         sender: MailSenderPort,
         activity_log: ActivityLogService | None = None,
+        mail_trigger_service: MailTriggerService | None = None,
         poll_interval_seconds: int = WORKER_POLL_INTERVAL_SECONDS,
         lease_duration_seconds: int = WORKER_LEASE_DURATION_SECONDS,
         recovery_interval_seconds: int = WORKER_RECOVERY_INTERVAL_SECONDS,
@@ -87,6 +89,14 @@ class MailExecutionWorker:
         self.mail_campaign_service = mail_campaign_service
         self.lease_service = lease_service
         self.sender = sender
+        # Stage 5D (2026-09-04): optional, same convention as `activity_log`
+        # above -- every existing test/call site that constructs a worker
+        # without knowing about Triggers keeps working unchanged. When
+        # present, tick() runs Trigger occurrence processing BEFORE
+        # ordinary due-step processing (see tick()'s own docstring) --
+        # structurally reachable only under the exact same conditions
+        # (leadership held, engine enabled) that already gate every send.
+        self.mail_trigger_service = mail_trigger_service
         # Optional (matching MailboxService's own activity_log convention --
         # see that class's docstring) so every existing test/call site that
         # constructs a worker without it keeps working unchanged; every
@@ -183,7 +193,26 @@ class MailExecutionWorker:
         wall clock) -- matching this codebase's established convention
         (reap_orphans(now), process_one_due_step(..., now=now), etc.)
         of never computing "now" internally where a caller might need a
-        deterministic, testable value instead."""
+        deterministic, testable value instead.
+
+        Stage 5D (2026-09-04) order, deterministic and documented here:
+        leadership -> recovery sweep -> Trigger occurrence processing ->
+        ordinary due-step processing. Trigger processing runs BEFORE the
+        due-step claim specifically so a lead a Trigger just started (a
+        fresh QUEUED Step 1 row) can be picked up by THIS SAME tick's
+        list_due() call if its window happens to already be open, rather
+        than waiting a full poll interval -- a latency nicety, not a
+        correctness requirement (a later tick would pick it up regardless).
+        Both phases run only once this process holds leadership (the same
+        `is_leader` gate below covers both), and this whole method is only
+        ever invoked while the worker loop is running, which start() never
+        schedules at all when mail_sending_engine_enabled is False -- so
+        Trigger lead-starts share EXACTLY the same structural
+        unreachability the rest of send execution already has, with no
+        separate check needed here. A Trigger-processing failure is caught
+        and logged the same way a tick-level failure always is (see
+        _run_forever()) -- it must never abort the due-step processing
+        that follows it in the same tick."""
         now = now or datetime.now(timezone.utc)
         self._last_tick_at = now
 
@@ -202,6 +231,17 @@ class MailExecutionWorker:
         ):
             await self._run_recovery(now)
             self._last_recovery_at = now
+
+        if self.mail_trigger_service is not None:
+            try:
+                await self.mail_trigger_service.process_due_occurrences(now)
+            except Exception:
+                # A Trigger-processing failure must never abort the
+                # due-step processing below in the SAME tick -- caught and
+                # logged here, exactly like a whole-tick failure is caught
+                # one level up in _run_forever(), so ordinary sends are
+                # never collaterally delayed by an unrelated Trigger bug.
+                logger.exception("Phase C worker: Trigger occurrence processing failed.")
 
         schedule_cache: dict[str, tuple[list[MailSendWindow], str]] = {}
         steps_cache: dict[str, list[MailSequenceStep]] = {}

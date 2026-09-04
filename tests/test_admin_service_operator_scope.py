@@ -266,18 +266,20 @@ def test_unrelated_top_level_surfaces_are_out_of_scope():
 # --- Closed-set regression guard (Phase 2, 2026-09-03) ----------------------
 
 
-def test_operator_rule_count_has_not_grown_beyond_stage_3_add_prospects():
+def test_operator_rule_count_has_not_grown_beyond_stage_5d_triggers():
     """A precise tripwire against accidental scope broadening: this exact
-    count (28) is Stage 3's expected total -- Stage 2's 27 rules (the
-    pre-Stage-2 set of 25 campaign-lifecycle/channel/schedule/step/
-    mailbox/CRM-list rules, plus the two Stage 2 read-only rules for
-    workload and batches), plus exactly the one new write rule this
-    stage adds (POST .../prospects). If this number ever changes without
-    a corresponding, deliberate update to this test, something was
-    granted (or revoked) that wasn't explicitly reviewed."""
+    count (32) is Stage 5D's expected total -- Stage 3's 28 rules (see
+    this test's own prior history for that count's own derivation), plus
+    exactly the four new Trigger CRUD rules this stage adds (GET/POST
+    .../triggers, PATCH/DELETE .../triggers/{trigger_id}) -- narrow,
+    campaign-scoped definition CRUD only, granting zero execution-admin
+    power (see app/session_auth_middleware.py's own "Lead-start triggers"
+    note). If this number ever changes without a corresponding,
+    deliberate update to this test, something was granted (or revoked)
+    that wasn't explicitly reviewed."""
     from app.session_auth_middleware import _SERVICE_OPERATOR_RULES
 
-    assert len(_SERVICE_OPERATOR_RULES) == 28
+    assert len(_SERVICE_OPERATOR_RULES) == 32
 
 
 def test_no_write_method_is_granted_on_the_two_new_read_routes_via_any_other_rule():

@@ -176,3 +176,24 @@ class SQLiteMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
         rows = await cursor.fetchall()
         await cursor.close()
         return [_row_to_member(row) for row in rows]
+
+    async def mark_member_reconciled(
+        self, trigger_id: str, scheduled_for: datetime, enrollment_id: str, outcome: str, reconciled_at: datetime
+    ) -> None:
+        async with sqlite_write(self._connection):
+            await self._connection.execute(
+                "UPDATE mail_trigger_occurrence_members SET outcome = ?, reconciled_at = ? "
+                "WHERE trigger_id = ? AND scheduled_for = ? AND enrollment_id = ? AND outcome = 'PENDING_RECONCILE'",
+                (outcome, reconciled_at.isoformat(), trigger_id, scheduled_for.isoformat(), enrollment_id),
+            )
+
+    async def complete_occurrence(
+        self, trigger_id: str, scheduled_for: datetime, started_count: int, completed_at: datetime
+    ) -> bool:
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "UPDATE mail_trigger_occurrences SET status = 'COMPLETED', started_count = ?, completed_at = ? "
+                "WHERE trigger_id = ? AND scheduled_for = ? AND status = 'PREPARING'",
+                (started_count, completed_at.isoformat(), trigger_id, scheduled_for.isoformat()),
+            )
+        return cursor.rowcount > 0

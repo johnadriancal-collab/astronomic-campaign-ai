@@ -128,6 +128,7 @@ from app.services.mail_batch_reconciliation_worker import MailBatchReconciliatio
 from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
+from app.services.mail_trigger_service import MailTriggerService
 from app.services.mailbox_service import MailboxService
 from app.services.worker_lease_service import WorkerLeaseService
 
@@ -332,6 +333,26 @@ async def lifespan(app: FastAPI):
         link_store=mail_campaign_csv_prospect_link_store,
     )
 
+    # Trigger feature (Stage 5D, 2026-09-04) -- Trigger CRUD + occurrence
+    # discovery/freeze/reconciliation. The occurrence-execution HALF of
+    # this is only ever invoked from MailExecutionWorker.tick() below
+    # (constructed and wired in a few lines down) -- CRUD routes alone
+    # never start a lead. Reuses the SAME mail_sending_service instance
+    # (for create_step1_execution()/suppress_enrollment()) and
+    # mail_campaign_service instance (for get_schedule()/list_steps()) as
+    # everything else, never a second implementation of either.
+    app.state.mail_trigger_service = MailTriggerService(
+        trigger_store=mail_lead_start_trigger_store,
+        occurrence_store=mail_trigger_occurrence_store,
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        suppression_store=mail_suppression_store,
+        sending_service=mail_sending_service,
+        mail_campaign_service=app.state.mail_campaign_service,
+        activity_log=activity_log_service,
+    )
+
     # Astronomic Mail Phase 2 (Google Workspace Mailbox Connection). CSRF
     # `state` lives only in MailboxService's in-memory dict, not a store --
     # see that class's docstring. GoogleOAuthClient makes real network calls
@@ -365,6 +386,7 @@ async def lifespan(app: FastAPI):
         lease_service=worker_lease_service,
         sender=gmail_sender,
         activity_log=activity_log_service,
+        mail_trigger_service=app.state.mail_trigger_service,
     )
     app.state.mail_execution_worker = mail_execution_worker
     mail_execution_worker.start()

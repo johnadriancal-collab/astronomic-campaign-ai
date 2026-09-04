@@ -364,18 +364,43 @@ async def test_mail_campaign_service_has_no_trigger_methods_yet():
         assert not hasattr(MailCampaignService, forbidden), f"MailCampaignService must not have {forbidden}() yet"
 
 
-def test_no_trigger_api_route_is_registered_yet():
-    """Confirms no /triggers endpoint exists in the FastAPI app yet."""
+def test_trigger_crud_routes_registered_but_no_broader_admin_route_exists():
+    """Superseded by Stage 5D (2026-09-04), which approved exactly four
+    campaign-scoped Trigger CRUD routes -- see
+    tests/test_mail_trigger_occurrence_execution.py for the full Stage 5D
+    API-behavior suite. What still matters, and is checked here now: no
+    OTHER trigger-shaped route exists (no bulk/admin/execution-trigger
+    endpoint) -- exactly the four approved paths, nothing broader.
+
+    Uses the resolved OpenAPI schema, not raw app.routes iteration --
+    this FastAPI version wraps included sub-routers in an internal
+    _IncludedRouter object with no bare `.path` attribute, so a naive
+    `hasattr(route, "path")` walk silently finds nothing at all (which is
+    exactly why the ORIGINAL Stage 5A version of this test -- asserting
+    "no trigger route exists yet" -- passed vacuously even before any
+    route existed, not because it genuinely detected absence)."""
     from app.main import app
 
-    paths = [route.path for route in app.routes if hasattr(route, "path")]
-    assert not any("trigger" in path.lower() for path in paths)
+    schema = app.openapi()
+    trigger_paths = {path: set(ops.keys()) for path, ops in schema["paths"].items() if "trigger" in path.lower()}
+    assert trigger_paths == {
+        "/mail/campaigns/{mail_campaign_id}/triggers": {"get", "post"},
+        "/mail/campaigns/{mail_campaign_id}/triggers/{trigger_id}": {"patch", "delete"},
+    }
 
 
-def test_mail_execution_worker_source_is_untouched_by_triggers():
-    """Cheap structural guard: the worker file that will eventually run
-    Trigger reconciliation (Stage 5D) has no trigger-shaped code yet."""
+def test_mail_execution_worker_delegates_trigger_processing_rather_than_reimplementing_it():
+    """Superseded by Stage 5D (2026-09-04), which approved wiring Trigger
+    occurrence processing into MailExecutionWorker.tick() -- this file's
+    original assertion ("no trigger-shaped code at all") was Stage 5A's
+    own scope guard, correct only through Stage 5C. What still matters,
+    and is checked here now: the worker DELEGATES to MailTriggerService
+    rather than reimplementing occurrence discovery/freeze/reconciliation
+    inline -- see tests/test_mail_trigger_occurrence_execution.py for the
+    full Stage 5D behavioral suite."""
     from pathlib import Path
 
     source = Path("app/services/mail_execution_worker.py").read_text()
-    assert "trigger" not in source.lower()
+    assert "mail_trigger_service" in source
+    for forbidden in ("freeze_members(", "MailTriggerOccurrence(", "create_occurrence("):
+        assert forbidden not in source

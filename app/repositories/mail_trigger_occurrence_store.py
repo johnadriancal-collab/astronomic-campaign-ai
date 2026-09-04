@@ -12,12 +12,16 @@ against the same underlying .db file, cannot share one transaction. So the
 only way an atomic freeze is actually achievable is for one store/one
 connection to own both tables -- see sqlite_mail_trigger_occurrence_store.py.
 
-Stage 5A exposes exactly the primitives Stage 5D's freeze/reconcile logic
-will need -- create_occurrence() (the idempotent claim) and
-freeze_members() (the one atomic multi-row write) -- WITHOUT implementing
-any of the surrounding business logic (which enrollments are eligible,
-when an occurrence is due, what a member's outcome should be). Nothing in
-this codebase calls any of this yet.
+Stage 5A exposed the freeze-side primitives -- create_occurrence() (the
+idempotent claim) and freeze_members() (the one atomic multi-row write).
+Stage 5D (2026-09-04) adds the two reconciliation-side primitives this
+store was always going to need but Stage 5A deliberately didn't build yet
+(no reconciliation logic existed to call them) -- mark_member_reconciled()
+(a CAS-guarded per-member outcome write) and complete_occurrence() (a
+CAS-guarded occurrence-level status transition). Both operate on columns
+that already existed in Stage 5A's own schema (`outcome`/`reconciled_at`,
+`status`/`started_count`/`completed_at`) -- no new table, no new column,
+purely additive store methods for state Stage 5A's models always defined.
 """
 
 from abc import ABC, abstractmethod
@@ -70,6 +74,30 @@ class MailTriggerOccurrenceStore(ABC):
         frozen with zero eligible candidates -- see MailTriggerOccurrence's
         own `frozen_at` field for how callers tell those two apart."""
 
+    @abstractmethod
+    async def mark_member_reconciled(
+        self, trigger_id: str, scheduled_for: datetime, enrollment_id: str, outcome: str, reconciled_at: datetime
+    ) -> None:
+        """CAS-guarded: only applies if this member's CURRENT outcome is
+        still PENDING_RECONCILE -- a retry after a crash (or a second,
+        redundant reconciliation attempt) safely no-ops for a member
+        that's already reconciled, rather than overwriting a terminal
+        outcome. `outcome` is the caller's own already-decided value
+        (STARTED or SKIPPED_INELIGIBLE) -- this method performs no
+        eligibility logic itself, purely a durable write."""
+
+    @abstractmethod
+    async def complete_occurrence(
+        self, trigger_id: str, scheduled_for: datetime, started_count: int, completed_at: datetime
+    ) -> bool:
+        """CAS-guarded: only transitions status PREPARING -> COMPLETED,
+        storing the given `started_count` (the caller's own already-
+        computed value, derived from durable member outcomes -- this
+        method does not recompute it). Returns True if this call performed
+        the transition, False if the occurrence was already COMPLETED (a
+        safe no-op -- e.g. a retry after the transition already landed but
+        before the caller observed success)."""
+
 
 class MemoryMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
     """Dict-backed -- not persistent, for tests/local dev. Enforces the
@@ -115,3 +143,24 @@ class MemoryMailTriggerOccurrenceStore(MailTriggerOccurrenceStore):
 
     async def list_members(self, trigger_id: str, scheduled_for: datetime) -> list[MailTriggerOccurrenceMember]:
         return [m for (t, s, _e), m in self._members.items() if t == trigger_id and s == scheduled_for]
+
+    async def mark_member_reconciled(
+        self, trigger_id: str, scheduled_for: datetime, enrollment_id: str, outcome: str, reconciled_at: datetime
+    ) -> None:
+        key = (trigger_id, scheduled_for, enrollment_id)
+        member = self._members.get(key)
+        if member is None or member.outcome != "PENDING_RECONCILE":
+            return  # CAS miss -- already reconciled (or never froze), safe no-op
+        self._members[key] = member.model_copy(update={"outcome": outcome, "reconciled_at": reconciled_at})
+
+    async def complete_occurrence(
+        self, trigger_id: str, scheduled_for: datetime, started_count: int, completed_at: datetime
+    ) -> bool:
+        key = (trigger_id, scheduled_for)
+        occurrence = self._occurrences.get(key)
+        if occurrence is None or occurrence.status != "PREPARING":
+            return False
+        self._occurrences[key] = occurrence.model_copy(
+            update={"status": "COMPLETED", "started_count": started_count, "completed_at": completed_at}
+        )
+        return True

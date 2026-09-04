@@ -487,11 +487,18 @@ def test_no_trigger_occurrence_or_member_rows_created_by_this_stage():
         assert forbidden not in source
 
 
-def test_no_trigger_executor_exists():
+def test_mail_execution_worker_delegates_trigger_processing_rather_than_reimplementing_it():
+    """Superseded by Stage 5D (2026-09-04) -- see
+    test_mail_trigger_foundation.py's identically-renamed test for the
+    full explanation. This file's own remaining concern (Stage 5C's
+    activation-gate behavior) is unaffected either way -- checked
+    separately above."""
     from pathlib import Path
 
     source = Path("app/services/mail_execution_worker.py").read_text()
-    assert "trigger" not in source.lower()
+    assert "mail_trigger_service" in source
+    for forbidden in ("freeze_members(", "MailTriggerOccurrence(", "create_occurrence("):
+        assert forbidden not in source
 
 
 # =====================================================================

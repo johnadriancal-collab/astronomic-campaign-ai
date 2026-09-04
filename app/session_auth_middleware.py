@@ -159,7 +159,11 @@ _SERVICE_OPERATOR_RULES below), covering exactly:
     Add Prospects source is Stage 4, not yet implemented -- this route
     only accepts source=crm_list for now (enforced by the request body's
     own Pydantic Literal type, see app/api/mail.py's
-    MailAddProspectsRequest).
+    MailAddProspectsRequest). Lead-start triggers (Stage 5D, 2026-09-04,
+    list/create/edit/delete a MailLeadStartTrigger DEFINITION only --
+    occurrence discovery/freeze/reconciliation is exclusively a
+    MailExecutionWorker.tick() concern, unreachable from any HTTP route
+    including this token's own).
   - Mailboxes: the bare GET /mailboxes list ONLY (to pick a mailbox id for
     channel selection) -- never mailbox OAuth connect/disconnect.
   - CRM contact lists: create/edit a list and add/remove its membership --
@@ -323,6 +327,20 @@ _SERVICE_OPERATOR_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = tuple(
         # Schedule.
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/schedule$"),
         ("PUT", rf"^/mail/campaigns/{_ID_SEGMENT}/schedule$"),
+        # Lead-start triggers (Stage 5D, 2026-09-04) -- narrow, campaign-
+        # scoped CRUD only, the same shape as Schedule/Channels/Steps
+        # above. Grants no execution-admin power of any kind: these routes
+        # can only create/edit/delete a MailLeadStartTrigger DEFINITION
+        # (and, as a side effect of the first creation,
+        # MailCampaign.lead_start_mode) -- occurrence discovery/freeze/
+        # reconciliation happens exclusively inside MailExecutionWorker.
+        # tick(), which no HTTP route (this token's or any other) can
+        # invoke directly. No new identity, no new auth mechanism -- four
+        # more rows in this SAME existing allowlist.
+        ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/triggers$"),
+        ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/triggers$"),
+        ("PATCH", rf"^/mail/campaigns/{_ID_SEGMENT}/triggers/{_ID_SEGMENT}$"),
+        ("DELETE", rf"^/mail/campaigns/{_ID_SEGMENT}/triggers/{_ID_SEGMENT}$"),
         # Sequence steps.
         ("GET", rf"^/mail/campaigns/{_ID_SEGMENT}/steps$"),
         ("POST", rf"^/mail/campaigns/{_ID_SEGMENT}/steps$"),
