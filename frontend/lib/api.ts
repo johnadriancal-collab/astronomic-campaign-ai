@@ -1127,6 +1127,16 @@ export interface MailCampaign {
   sharing: MailCampaignSharing;
   start_immediately: boolean;
   daily_lead_start_limit: number | null;
+  // Lead-start Triggers (Stage 5A-5F): "immediate" is today's only real
+  // behavior (every PENDING enrollment starts eagerly); "triggered" means
+  // at least one MailLeadStartTrigger has ever been created for this
+  // campaign -- a one-way flip, never reverted by deleting/disabling every
+  // trigger. `execution_active_since` is backend-internal bookkeeping
+  // (the start of the campaign's current ACTIVE streak) -- surfaced here
+  // only because it's part of the same already-returned MailCampaign
+  // object; the frontend has no reason to read it directly.
+  lead_start_mode: "immediate" | "triggered";
+  execution_active_since: string | null;
   created_at: string;
   updated_at: string;
   ready_at: string | null;
@@ -1400,6 +1410,73 @@ export function setMailCampaignSchedule(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ timezone: tz, windows }),
   });
+}
+
+// --- Lead-start Triggers (Stage 5D/5E backend, Stage 5F frontend) ---------
+//
+// Mirrors app/api/mail.py's "Lead-start triggers" section exactly --
+// weekdays are 0=Monday..6=Sunday (same convention as MailSendWindow's
+// own day_of_week), local_time is campaign-local "HH:MM". CRUD is
+// editable in DRAFT/READY/ACTIVE/PAUSED (409 in COMPLETED/ARCHIVED -- see
+// MailCampaignNotEligibleForTriggersError), independent of Schedule's own
+// DRAFT-only sending-hours lock -- see lib/mail-trigger.ts's
+// isTriggerEditable() for the one place that lifecycle rule lives.
+// Creating/editing/deleting a trigger never starts a lead itself --
+// occurrence discovery/execution happens only inside the backend worker.
+
+export interface MailLeadStartTrigger {
+  trigger_id: string;
+  mail_campaign_id: string;
+  weekdays: number[]; // 0=Monday .. 6=Sunday
+  local_time: string; // "HH:MM:SS"
+  leads_to_start: number;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailLeadStartTriggerInput {
+  weekdays: number[];
+  local_time: string; // "HH:MM"
+  leads_to_start: number;
+  enabled: boolean;
+}
+
+export function listMailLeadStartTriggers(mailCampaignId: string): Promise<MailLeadStartTrigger[]> {
+  return request<MailLeadStartTrigger[]>(`/mail/campaigns/${mailCampaignId}/triggers`);
+}
+
+export function createMailLeadStartTrigger(
+  mailCampaignId: string,
+  input: MailLeadStartTriggerInput
+): Promise<MailLeadStartTrigger> {
+  return post<MailLeadStartTrigger>(`/mail/campaigns/${mailCampaignId}/triggers`, input);
+}
+
+export function updateMailLeadStartTrigger(
+  mailCampaignId: string,
+  triggerId: string,
+  patch: Partial<MailLeadStartTriggerInput>
+): Promise<MailLeadStartTrigger> {
+  return request<MailLeadStartTrigger>(`/mail/campaigns/${mailCampaignId}/triggers/${triggerId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
+
+// Not built on request<T>() -- the backend returns a genuine 204 No
+// Content (see app/api/mail.py's delete_trigger), and request<T>()'s own
+// unconditional res.json() would throw parsing an empty body. No other
+// DELETE in this file returns a bare 204 today, so there's no existing
+// helper to reuse here without changing request<T>()'s behavior for
+// every other caller.
+export async function deleteMailLeadStartTrigger(mailCampaignId: string, triggerId: string): Promise<void> {
+  const res = await fetch(`/backend/mail/campaigns/${mailCampaignId}/triggers/${triggerId}`, { method: "DELETE" });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new ApiError(res.status, detail || `Request to delete trigger failed with ${res.status}`);
+  }
 }
 
 export function listMailSequenceSteps(mailCampaignId: string): Promise<MailSequenceStep[]> {

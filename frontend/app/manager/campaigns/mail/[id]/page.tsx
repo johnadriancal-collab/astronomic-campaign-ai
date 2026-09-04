@@ -12,6 +12,7 @@ import { MailCampaignLeadsTab } from "@/components/mail-campaign-leads-tab";
 import { MailCampaignStepsTab } from "@/components/mail-campaign-steps-tab";
 import { MailCampaignChannelsTab } from "@/components/mail-campaign-channels-tab";
 import { MailCampaignScheduleTab, type TabWindow } from "@/components/mail-campaign-schedule-tab";
+import { MailCampaignTriggersCard } from "@/components/mail-campaign-triggers-card";
 import { MailCampaignSettingsTab } from "@/components/mail-campaign-settings-tab";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
 import { campaignLockedBannerDescription, campaignLockedBannerTitle } from "@/lib/mail";
@@ -32,6 +33,7 @@ import {
   listMailboxes,
   listMailCampaignBatches,
   listMailEnrollments,
+  listMailLeadStartTriggers,
   listMailSequenceSteps,
   markMailCampaignReady,
   reorderMailSequenceSteps,
@@ -48,6 +50,7 @@ import {
   type MailCampaignWorkload,
   type MailEnrollment,
   type MailEnrollmentBatch,
+  type MailLeadStartTrigger,
   type MailSequenceStep,
 } from "@/lib/api";
 
@@ -107,11 +110,14 @@ export default function MailCampaignDetailPage() {
   const [savingChannels, setSavingChannels] = useState(false);
   const [channelsError, setChannelsError] = useState<string | null>(null);
 
+  const [triggers, setTriggers] = useState<MailLeadStartTrigger[]>([]);
+  const [triggersError, setTriggersError] = useState<string | null>(null);
+
   const editable = campaign?.status === "draft";
 
   async function load() {
     try {
-      const [c, s, r, e, w, b, l, mb, ch, sched] = await Promise.all([
+      const [c, s, r, e, w, b, l, mb, ch, sched, trig] = await Promise.all([
         getMailCampaign(campaignId),
         listMailSequenceSteps(campaignId),
         getMailCampaignReview(campaignId),
@@ -122,6 +128,7 @@ export default function MailCampaignDetailPage() {
         listMailboxes(),
         getMailCampaignChannels(campaignId),
         getMailCampaignSchedule(campaignId),
+        listMailLeadStartTriggers(campaignId),
       ]);
       setCampaign(c);
       setSteps(s);
@@ -132,6 +139,8 @@ export default function MailCampaignDetailPage() {
       setLists(l);
       setMailboxes(mb);
       setSelectedMailboxIds(ch);
+      setTriggers(trig);
+      setTriggersError(null);
       setName(c.name);
       setSourceListId(c.source_list_id ?? "");
       setTimezone(sched.timezone ?? "");
@@ -162,6 +171,28 @@ export default function MailCampaignDetailPage() {
       setReview(await getMailCampaignReview(campaignId));
     } catch {
       // Review is a convenience panel -- a refresh failure here doesn't block anything else.
+    }
+  }
+
+  // Called after any Trigger create/edit/enable-toggle/delete. Re-fetches
+  // BOTH the trigger list and the campaign itself -- the very first
+  // successful create flips campaign.lead_start_mode on the backend, and
+  // this page must reflect that immediately (stops re-showing the
+  // first-trigger confirmation, starts showing the zero-enabled warning
+  // and the legacy daily-limit note where relevant). Unlike
+  // refreshLeadsSection, a failure here IS surfaced (via triggersError)
+  // rather than silently swallowed -- the Triggers card's own list would
+  // otherwise silently go stale right after a mutation the user just made.
+  async function refreshTriggers() {
+    try {
+      const [c, trig] = await Promise.all([getMailCampaign(campaignId), listMailLeadStartTriggers(campaignId)]);
+      setCampaign(c);
+      setTriggers(trig);
+      setTriggersError(null);
+    } catch (err) {
+      setTriggersError(
+        err instanceof ApiError ? `Couldn't refresh triggers (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
     }
   }
 
@@ -595,7 +626,7 @@ export default function MailCampaignDetailPage() {
           />
         </TabsPanel>
 
-        <TabsPanel value="schedule">
+        <TabsPanel value="schedule" className="space-y-6">
           <MailCampaignScheduleTab
             timezone={timezone}
             setTimezone={setTimezone}
@@ -605,6 +636,13 @@ export default function MailCampaignDetailPage() {
             saving={savingSchedule}
             error={scheduleError}
             onSave={handleSaveSchedule}
+          />
+          <MailCampaignTriggersCard
+            campaign={campaign}
+            triggers={triggers}
+            triggersError={triggersError}
+            workloadPending={workload?.pending ?? null}
+            onTriggersRefresh={refreshTriggers}
           />
         </TabsPanel>
 
@@ -624,6 +662,7 @@ export default function MailCampaignDetailPage() {
             setStartImmediately={setStartImmediately}
             dailyLeadStartLimit={dailyLeadStartLimit}
             setDailyLeadStartLimit={setDailyLeadStartLimit}
+            leadStartMode={campaign.lead_start_mode}
             savingSettings={savingSettings}
             settingsError={settingsError}
             onSaveSettings={handleSaveSettings}

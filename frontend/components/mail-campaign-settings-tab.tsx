@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { SharingSelector } from "@/components/mail-sharing-selector";
 import type { CrmContactListSummary, MailCampaignSharing } from "@/lib/api";
+import { showsLegacyDailyLimitNote } from "@/lib/mail-trigger";
 
 // Combines the old single-page layout's "Audience" and "Campaign Settings"
 // cards -- same handlers, same editable gating, no behavior changes.
@@ -23,6 +24,7 @@ export function MailCampaignSettingsTab({
   setStartImmediately,
   dailyLeadStartLimit,
   setDailyLeadStartLimit,
+  leadStartMode,
   savingSettings,
   settingsError,
   onSaveSettings,
@@ -41,6 +43,7 @@ export function MailCampaignSettingsTab({
   setStartImmediately: (value: boolean) => void;
   dailyLeadStartLimit: string;
   setDailyLeadStartLimit: (value: string) => void;
+  leadStartMode: "immediate" | "triggered";
   savingSettings: boolean;
   settingsError: string | null;
   onSaveSettings: () => void;
@@ -127,6 +130,11 @@ export function MailCampaignSettingsTab({
             <p className="text-xs text-muted-foreground/70">
               How many new leads may begin this sequence per day -- separate from a mailbox&apos;s own daily sending limit.
             </p>
+            {showsLegacyDailyLimitNote(leadStartMode) && (
+              <p className="text-xs text-amber-600 dark:text-amber-500">
+                Not used while this campaign uses lead-start triggers.
+              </p>
+            )}
           </div>
           {editable && (
             <Button size="sm" onClick={onSaveSettings} disabled={savingSettings}>
