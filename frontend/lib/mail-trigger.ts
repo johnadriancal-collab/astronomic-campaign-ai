@@ -6,6 +6,17 @@
 // weekday/time combination collides with another enabled trigger.
 
 import type { MailCampaignStatus, MailLeadStartTrigger } from "@/lib/api";
+// Relative WITH an explicit ".ts" extension, not "@/lib/schedule" -- this
+// file is imported transitively by lib/mail-trigger.test.ts, which
+// node --test resolves via Node's own native ESM loader (no webpack/
+// Next.js "@/..." alias, and no extension-less resolution either -- both
+// were tried and both throw ERR_MODULE_NOT_FOUND under this Node
+// version). Every other cross-lib-file import in this codebase is a
+// type-only "./api" import, erased entirely before Node ever tries to
+// resolve it -- this is the first one that needs a real runtime VALUE,
+// so it's the first to actually exercise (and need) Node's own explicit-
+// extension relative-TS resolution.
+import { formatMinutesOfDay, minutesFromTimeString, minutesToTimelinePercent } from "./schedule.ts";
 
 // Editable in DRAFT/READY/ACTIVE/PAUSED, read-only in legacy COMPLETED and
 // ARCHIVED -- mirrors MailTriggerService._TRIGGER_CONFIGURABLE_STATUSES
@@ -100,4 +111,40 @@ export function triggerFormValidationError(form: TriggerFormState): string | nul
 
 export function isTriggerFormClientValid(form: TriggerFormState): boolean {
   return triggerFormValidationError(form) === null;
+}
+
+// --- Stage 5F.1: trigger markers on the Schedule timeline -----------------
+//
+// A pure VISUALIZATION of already-existing, already-fetched triggers --
+// never a second scheduling mechanism, never written back anywhere. Reuses
+// minutesToTimelinePercent (lib/schedule.ts) -- the SAME formula
+// schedule-window-block.tsx's own send-window bar positions itself with --
+// so a marker and a window drawn for the same instant land at the exact
+// same pixel; positioning math is never independently re-derived here.
+
+export interface TriggerMarker {
+  triggerId: string;
+  leftPct: number; // matches ScheduleWindowBlock's own `left: X%` convention
+  detail: string; // e.g. "8:00 AM · Start 20 leads" -- the tooltip's second line
+}
+
+/** Every ENABLED trigger applicable to campaign-local weekday `day`
+ * (0=Monday..6=Sunday, same convention as MailLeadStartTrigger.weekdays
+ * and ScheduleDayRow's own `day` prop) -- a disabled trigger produces no
+ * marker at all (still fully visible in the management table below,
+ * this is a timeline-only omission). Multiple enabled triggers on the
+ * same day/near-identical time each produce their own independent
+ * marker -- never deduplicated or merged, matching MailLeadStartTrigger's
+ * own "nothing here deduplicates overlapping triggers" backend design. */
+export function triggerMarkersForDay(triggers: MailLeadStartTrigger[], day: number): TriggerMarker[] {
+  return triggers
+    .filter((t) => t.enabled && t.weekdays.includes(day))
+    .map((t) => {
+      const minutes = minutesFromTimeString(t.local_time);
+      return {
+        triggerId: t.trigger_id,
+        leftPct: minutesToTimelinePercent(minutes),
+        detail: `${formatMinutesOfDay(minutes)} · ${formatLeadsToStart(t.leads_to_start)}`,
+      };
+    });
 }

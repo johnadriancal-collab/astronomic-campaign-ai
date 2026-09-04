@@ -636,6 +636,7 @@ export default function MailCampaignDetailPage() {
             saving={savingSchedule}
             error={scheduleError}
             onSave={handleSaveSchedule}
+            triggers={triggers}
           />
           <MailCampaignTriggersCard
             campaign={campaign}

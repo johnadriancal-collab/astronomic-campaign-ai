@@ -18,12 +18,22 @@ const API_ROUTE_SOURCE = readFileSync(new URL("../../app/api/mail.py", import.me
 
 const ALL_SCHEDULE_UI_SOURCE = [TAB_SOURCE, DAY_ROW_SOURCE, BLOCK_SOURCE];
 
-// --- No fake Trigger / capacity / quota UI ---------------------------------
+// --- Real Trigger integration only, no fake capacity/quota UI --------------
+//
+// Originally this guarded against a FABRICATED "+ Trigger" control (back
+// when Astronomic had no automation-rule engine at all -- see the
+// deliberately-dead git history for that original assertion). Stage 5D/5E
+// built the real backend and Stage 5E/5F/5F.1 (all explicitly approved)
+// added the real Lead-start Triggers Card and its own timeline markers
+// directly into these files -- "no mention of trigger anywhere" is now
+// the WRONG invariant to guard. What still matters, updated for that: the
+// Schedule tab's own trigger markers must be driven by the real,
+// already-fetched trigger list (triggerMarkersForDay from lib/mail-
+// trigger.ts), never a hardcoded/fabricated marker list independent of it.
 
-test("no + Trigger control exists anywhere in the Schedule UI", () => {
-  for (const source of ALL_SCHEDULE_UI_SOURCE) {
-    assert.doesNotMatch(source, /trigger/i);
-  }
+test("the Schedule tab's trigger markers are derived from the real trigger list, not fabricated", () => {
+  assert.match(TAB_SOURCE, /triggerMarkersForDay\(triggers,\s*day\)/);
+  assert.match(TAB_SOURCE, /from "@\/lib\/mail-trigger"/);
 });
 
 test("the Schedule UI never renders a fabricated sending-capacity/quota number", () => {
@@ -82,10 +92,15 @@ test("hourly gridlines render at every interior hour, not just every third hour"
 
 test("the visible hourly grid is purely presentational -- window positioning still uses raw minutes, unaffected by the label granularity", () => {
   // ScheduleWindowBlock (actual window placement) computes percentages
-  // straight from minutes (value.start/1440, value.end/1440), never from
-  // TIMELINE_HOUR_MARKS -- the label change must not touch minute-accurate
-  // positioning or the 15-minute snapping constant.
-  assert.match(BLOCK_SOURCE, /value\.start\s*\/\s*1440/);
+  // straight from minutes via the shared minutesToTimelinePercent()
+  // helper (lib/schedule.ts -- Stage 5F.1 extracted this out of an inline
+  // `value.start / 1440` literal so schedule-trigger-marker.tsx's own
+  // marker could reuse the EXACT same formula rather than re-deriving it;
+  // see that helper's own docstring), never from TIMELINE_HOUR_MARKS --
+  // the label change must not touch minute-accurate positioning or the
+  // 15-minute snapping constant.
+  assert.match(BLOCK_SOURCE, /minutesToTimelinePercent\(value\.start\)/);
+  assert.match(SCHEDULE_LIB_SOURCE, /function minutesToTimelinePercent\(minutes: number\)[\s\S]{0,80}minutes\s*\/\s*MINUTES_PER_DAY/);
   assert.doesNotMatch(BLOCK_SOURCE, /TIMELINE_HOUR_MARKS/);
   assert.match(SCHEDULE_LIB_SOURCE, /SNAP_MINUTES\s*=\s*15/);
 });

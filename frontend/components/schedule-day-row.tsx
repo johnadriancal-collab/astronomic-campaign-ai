@@ -4,6 +4,7 @@ import { useRef } from "react";
 import { Plus } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScheduleWindowBlock } from "@/components/schedule-window-block";
+import { ScheduleTriggerMarker } from "@/components/schedule-trigger-marker";
 import {
   MinuteWindow,
   TIMELINE_HOUR_MARKS,
@@ -16,6 +17,7 @@ import {
   timeStringFromMinutes,
 } from "@/lib/schedule";
 import { WEEKDAY_LABELS } from "@/lib/mail";
+import type { TriggerMarker } from "@/lib/mail-trigger";
 import { cn } from "@/lib/utils";
 
 export type EditableWindow = MinuteWindow & { id: string };
@@ -33,12 +35,19 @@ export function ScheduleDayRow({
   onWindowsChange,
   anyWindowInCampaign,
   readOnly,
+  triggerMarkers = [],
 }: {
   day: number;
   windows: EditableWindow[];
   onWindowsChange: (next: EditableWindow[]) => void;
   anyWindowInCampaign: MinuteWindow | null;
   readOnly: boolean;
+  // Stage 5F.1 -- purely a visualization of already-enabled triggers for
+  // this weekday (see lib/mail-trigger.ts's triggerMarkersForDay). Never
+  // read or written by anything in this file beyond rendering; entirely
+  // independent of `windows`/`readOnly` -- a marker renders (or not)
+  // regardless of whether send windows exist or are editable.
+  triggerMarkers?: TriggerMarker[];
 }) {
   const trackRef = useRef<HTMLDivElement>(null);
   // A plain incrementing counter, not Date.now()/Math.random() -- both are
@@ -84,29 +93,46 @@ export function ScheduleDayRow({
             rationale this reuses rather than inventing a second, separate
             "medium-narrow" label density. */}
         <div className="hidden lg:block">
-          <div ref={trackRef} className="relative h-10 overflow-hidden rounded-md border border-border/60 bg-secondary/20">
-            {TIMELINE_HOUR_MARKS.slice(1, -1).map((h) => (
-              <div
-                key={h}
-                className="pointer-events-none absolute inset-y-0 w-px bg-border/40"
-                style={{ left: `${(h / 24) * 100}%` }}
-              />
-            ))}
-            {sorted.map((w, i) => {
-              const { prevEnd, nextStart } = neighborBounds(sorted, i);
-              return (
-                <ScheduleWindowBlock
-                  key={w.id}
-                  value={w}
-                  prevEnd={prevEnd}
-                  nextStart={nextStart}
-                  trackRef={trackRef}
-                  onChange={(next) => updateWindow(w.id, next)}
-                  onRemove={() => removeWindow(w.id)}
-                  readOnly={readOnly}
+          {/* The trigger-marker overlay (Stage 5F.1) is a SIBLING of the
+              track, not a child -- the track itself has overflow-hidden
+              (clipping window blocks' own edges/handles cleanly), which
+              would also clip a marker positioned to straddle the track's
+              top edge (see ScheduleTriggerMarker's own docstring for why
+              it sits there). This wrapper gives both layers the same
+              `left: X%` coordinate space (both measure against its own
+              full width) without either clipping the other. */}
+          <div className="relative">
+            <div ref={trackRef} className="relative h-10 overflow-hidden rounded-md border border-border/60 bg-secondary/20">
+              {TIMELINE_HOUR_MARKS.slice(1, -1).map((h) => (
+                <div
+                  key={h}
+                  className="pointer-events-none absolute inset-y-0 w-px bg-border/40"
+                  style={{ left: `${(h / 24) * 100}%` }}
                 />
-              );
-            })}
+              ))}
+              {sorted.map((w, i) => {
+                const { prevEnd, nextStart } = neighborBounds(sorted, i);
+                return (
+                  <ScheduleWindowBlock
+                    key={w.id}
+                    value={w}
+                    prevEnd={prevEnd}
+                    nextStart={nextStart}
+                    trackRef={trackRef}
+                    onChange={(next) => updateWindow(w.id, next)}
+                    onRemove={() => removeWindow(w.id)}
+                    readOnly={readOnly}
+                  />
+                );
+              })}
+            </div>
+            {triggerMarkers.length > 0 && (
+              <div className="pointer-events-none absolute inset-0">
+                {triggerMarkers.map((marker) => (
+                  <ScheduleTriggerMarker key={marker.triggerId} marker={marker} />
+                ))}
+              </div>
+            )}
           </div>
           {/* Every label (including the two "12AM" endpoints) is centered
               on its own tick via translateX(-50%) -- uniformly, no special

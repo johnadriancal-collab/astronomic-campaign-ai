@@ -131,6 +131,16 @@ export function formatWindowRange(window: MinuteWindow): string {
   return `${formatMinutesOfDay(window.start)} – ${formatMinutesOfDay(window.end)}`;
 }
 
+/** The one time-to-position formula for this timeline (`left: X%` inside
+ * the track) -- schedule-window-block.tsx's own send-window bar and
+ * (Stage 5F.1) schedule-trigger-marker.tsx's lightning marker both derive
+ * their horizontal position from this SAME function, so a marker and a
+ * window drawn for the same instant always land at the exact same pixel,
+ * and there is only one place this math could ever drift. */
+export function minutesToTimelinePercent(minutes: number): number {
+  return (minutes / MINUTES_PER_DAY) * 100;
+}
+
 /** Touching boundaries (a.end === b.start) are NOT an overlap -- matches
  * the backend's validate_send_windows() exactly. */
 export function windowsOverlap(a: MinuteWindow, b: MinuteWindow): boolean {

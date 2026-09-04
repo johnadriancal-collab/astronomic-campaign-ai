@@ -15,6 +15,7 @@ import {
   isUnsavedWindowId,
   isValidWindow,
   minutesFromTimeString,
+  minutesToTimelinePercent,
   neighborBounds,
   newLocalWindowId,
   removeWindowById,
@@ -79,6 +80,39 @@ test("formatMinutesOfDay renders 12-hour clock labels", () => {
 
 test("formatMinutesOfDay renders the 23:59 end-of-day sentinel as midnight, not 11:59 PM", () => {
   assert.equal(formatMinutesOfDay(MAX_MINUTE), "12:00 AM");
+});
+
+// --- minutesToTimelinePercent (Stage 5F.1's shared marker/window ---------
+// --- positioning formula) --------------------------------------------------
+
+test("minutesToTimelinePercent maps 00:00 to the beginning of the timeline", () => {
+  assert.equal(minutesToTimelinePercent(0), 0);
+});
+
+test("minutesToTimelinePercent maps 08:00 to the correct percentage", () => {
+  assert.equal(minutesToTimelinePercent(minutesFromTimeString("08:00")), (480 / 1440) * 100);
+});
+
+test("minutesToTimelinePercent maps 12:00 to the exact midpoint", () => {
+  assert.equal(minutesToTimelinePercent(minutesFromTimeString("12:00")), 50);
+});
+
+test("minutesToTimelinePercent maps 14:00 to the correct percentage", () => {
+  assert.equal(minutesToTimelinePercent(minutesFromTimeString("14:00")), (14 / 24) * 100);
+});
+
+test("minutesToTimelinePercent maps 23:59 near, but not at, the very end", () => {
+  const pct = minutesToTimelinePercent(minutesFromTimeString("23:59"));
+  assert.ok(pct > 99 && pct < 100, `expected just under 100, got ${pct}`);
+});
+
+test("minutesToTimelinePercent matches the exact formula ScheduleWindowBlock positions itself with", () => {
+  // Regression guard for the "one shared formula, never re-derived
+  // independently" requirement -- (minutes/1440)*100 is the ONLY math
+  // schedule-window-block.tsx now uses for its own `left: X%`.
+  for (const minutes of [0, 90, 480, 720, 840, 1439]) {
+    assert.equal(minutesToTimelinePercent(minutes), (minutes / 1440) * 100);
+  }
 });
 
 test("formatWindowRange joins start and end with an en dash", () => {

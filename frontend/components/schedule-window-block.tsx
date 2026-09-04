@@ -7,6 +7,7 @@ import {
   clampResizeEnd,
   clampResizeStart,
   formatWindowRange,
+  minutesToTimelinePercent,
 } from "@/lib/schedule";
 import { cn } from "@/lib/utils";
 
@@ -80,8 +81,8 @@ export function ScheduleWindowBlock({
     dragRef.current = null;
   }
 
-  const leftPct = (value.start / 1440) * 100;
-  const widthPct = ((value.end - value.start) / 1440) * 100;
+  const leftPct = minutesToTimelinePercent(value.start);
+  const widthPct = minutesToTimelinePercent(value.end - value.start);
 
   return (
     <div

@@ -3,6 +3,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScheduleDayRow, type EditableWindow } from "@/components/schedule-day-row";
+import type { MailLeadStartTrigger } from "@/lib/api";
+import { triggerMarkersForDay } from "@/lib/mail-trigger";
 import { timezoneOptionsIncluding } from "@/lib/timezones";
 
 export type TabWindow = EditableWindow & { day: number };
@@ -32,6 +34,7 @@ export function MailCampaignScheduleTab({
   saving,
   error,
   onSave,
+  triggers = [],
 }: {
   timezone: string;
   setTimezone: (value: string) => void;
@@ -41,6 +44,13 @@ export function MailCampaignScheduleTab({
   saving: boolean;
   error: string | null;
   onSave: () => void;
+  // Stage 5F.1 -- the SAME trigger list already fetched for the Lead
+  // start triggers Card below (page.tsx's own `triggers` state), passed
+  // in here ONLY to derive each day's marker positions. This component
+  // never mutates it, never sends it anywhere, and computing a day's
+  // markers from it is a pure, local operation -- no new fetch, no new
+  // backend contract.
+  triggers?: MailLeadStartTrigger[];
 }) {
   function windowsForDay(day: number): EditableWindow[] {
     return windows.filter((w) => w.day === day).map(({ id, start, end }) => ({ id, start, end }));
@@ -102,6 +112,7 @@ export function MailCampaignScheduleTab({
               onWindowsChange={(next) => setWindowsForDay(day, next)}
               anyWindowInCampaign={firstWindowAnywhere}
               readOnly={!editable}
+              triggerMarkers={triggerMarkersForDay(triggers, day)}
             />
           ))}
         </div>
