@@ -1835,7 +1835,23 @@ class MailSendingService:
                 await self._release_to_queued(step, earliest_next, now)
                 return ProcessOutcome(sent=False, blocked_reason=SendBlockReason.MAILBOX_PACING_NOT_SATISFIED)
 
-        if step.step_number == 1 and fresh_campaign.daily_lead_start_limit is not None:
+        # Stage 5B (2026-09-04): daily_lead_start_limit is IMMEDIATE-mode-only
+        # legacy behavior -- a campaign that has opted into
+        # lead_start_mode == "triggered" gets its lead-start pacing from a
+        # real MailLeadStartTrigger occurrence instead (Stage 5D), and must
+        # never ALSO be throttled by this older, coarser, whole-day cap --
+        # that would be exactly the "two competing controls the user can't
+        # reason about" outcome the approved Trigger design explicitly
+        # rejected (see the migration section of that report). A stale
+        # non-null daily_lead_start_limit value left over from before a
+        # campaign switched modes is deliberately inert once
+        # lead_start_mode is "triggered", never zeroed out -- see
+        # MailCampaign.lead_start_mode's own docstring.
+        if (
+            step.step_number == 1
+            and fresh_campaign.lead_start_mode == "immediate"
+            and fresh_campaign.daily_lead_start_limit is not None
+        ):
             local_day_start = _campaign_local_day_start(now, timezone_name)
             started_today = await self.step_store.count_sent_step_for_campaign_since(
                 fresh_campaign.mail_campaign_id, 1, local_day_start

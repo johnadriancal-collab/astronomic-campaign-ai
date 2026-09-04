@@ -37,6 +37,7 @@ from app.models.activity import ActivityCategory, ActivitySource
 from app.models.crm import normalize_email
 from app.models.mail import (
     ALLOWED_MAIL_TEMPLATE_VARIABLES,
+    LegacyLeadStartLimitCampaign,
     MailCampaign,
     MailCampaignReview,
     MailCampaignSchedule,
@@ -515,6 +516,31 @@ class MailCampaignService:
 
     async def list_campaigns(self) -> list[MailCampaign]:
         return await self.campaign_store.list()
+
+    async def list_campaigns_with_legacy_lead_start_limit(self) -> list[LegacyLeadStartLimitCampaign]:
+        """Read-only Stage 5B compatibility report (2026-09-04): every
+        campaign with a configured (non-null) daily_lead_start_limit,
+        regardless of lead_start_mode -- for manual review of real usage
+        ahead of the eventual 5F/5G removal of that field/its Settings-tab
+        control (see MailCampaign.daily_lead_start_limit's own docstring).
+
+        Deliberately NOT a new API route/admin endpoint -- this reuses the
+        existing list_campaigns() read this service already exposes and
+        simply projects/filters it, matching the 'a local repository/
+        service query... may be enough' guidance rather than widening any
+        access surface for a one-time review need."""
+        campaigns = await self.list_campaigns()
+        return [
+            LegacyLeadStartLimitCampaign(
+                mail_campaign_id=c.mail_campaign_id,
+                name=c.name,
+                status=c.status,
+                lead_start_mode=c.lead_start_mode,
+                daily_lead_start_limit=c.daily_lead_start_limit,
+            )
+            for c in campaigns
+            if c.daily_lead_start_limit is not None
+        ]
 
     async def update_campaign(self, mail_campaign_id: str, patch: dict[str, Any], actor: str | None = None) -> MailCampaign:
         """

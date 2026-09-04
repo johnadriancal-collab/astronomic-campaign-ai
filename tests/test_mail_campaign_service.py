@@ -351,6 +351,37 @@ async def test_update_rejects_non_positive_daily_lead_start_limit(service, bad_l
         await service.update_campaign(campaign.mail_campaign_id, {"daily_lead_start_limit": bad_limit})
 
 
+# --- Stage 5B (2026-09-04): read-only legacy-limit compatibility report ----
+
+
+async def test_list_campaigns_with_legacy_lead_start_limit_excludes_null(service):
+    with_limit = await service.create_campaign("Has Limit")
+    await service.update_campaign(with_limit.mail_campaign_id, {"daily_lead_start_limit": 20})
+    await service.create_campaign("No Limit")  # daily_lead_start_limit stays None
+
+    report = await service.list_campaigns_with_legacy_lead_start_limit()
+    ids = {row.mail_campaign_id for row in report}
+    assert with_limit.mail_campaign_id in ids
+    assert len(report) == 1
+
+
+async def test_list_campaigns_with_legacy_lead_start_limit_projects_exactly_the_required_fields(service):
+    campaign = await service.create_campaign("Q1 Outreach")
+    await service.update_campaign(campaign.mail_campaign_id, {"daily_lead_start_limit": 50})
+
+    report = await service.list_campaigns_with_legacy_lead_start_limit()
+    row = next(r for r in report if r.mail_campaign_id == campaign.mail_campaign_id)
+    assert row.name == "Q1 Outreach"
+    assert row.status == MailCampaignStatus.DRAFT
+    assert row.lead_start_mode == "immediate"
+    assert row.daily_lead_start_limit == 50
+
+
+async def test_list_campaigns_with_legacy_lead_start_limit_is_empty_when_none_configured(service):
+    await service.create_campaign("Draft")
+    assert await service.list_campaigns_with_legacy_lead_start_limit() == []
+
+
 async def test_all_hours_forces_full_day_bounds_overriding_explicit_times(service):
     """Setting all_hours True forces literal 00:00/23:59 bounds even if the
     same patch also tried to set different explicit times -- all_hours wins."""

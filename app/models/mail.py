@@ -181,6 +181,20 @@ class MailCampaign(BaseModel):
         `daily_lead_start_limit` can still be fully throttled by a
         stricter mailbox-level `daily_send_limit` -- both apply
         independently.
+
+        Stage 5B (2026-09-04): this field's send-time enforcement now
+        applies ONLY while `lead_start_mode == "immediate"` (see that
+        field's own docstring below, and MailSendingService.
+        prepare_and_send_step()) -- a "triggered" campaign gets its
+        lead-start pacing from a real MailLeadStartTrigger occurrence
+        instead, and must never also be throttled by this older, coarser
+        control. A stale non-null value left over from before a campaign
+        switched modes is deliberately never cleared/zeroed by that
+        switch -- it simply becomes inert. The field/its Settings-tab UI
+        control are intentionally NOT removed yet (production campaigns
+        may still depend on them while in "immediate" mode); full removal
+        is a later-stage cleanup once every campaign's usage has been
+        reviewed.
     """
 
     mail_campaign_id: str
@@ -244,6 +258,22 @@ class MailCampaign(BaseModel):
     updated_at: datetime
     ready_at: datetime | None = None
     archived_at: datetime | None = None
+
+
+class LegacyLeadStartLimitCampaign(BaseModel):
+    """One row of MailCampaignService.list_campaigns_with_legacy_lead_start_limit()'s
+    read-only Stage 5B compatibility report (2026-09-04) -- every campaign
+    with a non-null daily_lead_start_limit, for manual review ahead of the
+    eventual 5F/5G removal of that field/its Settings-tab control. Not
+    exposed via any API route -- deliberately internal-only tooling (see
+    that method's own docstring for why no new admin endpoint was added
+    for this)."""
+
+    mail_campaign_id: str
+    name: str
+    status: MailCampaignStatus
+    lead_start_mode: Literal["immediate", "triggered"]
+    daily_lead_start_limit: int
 
 
 class MailSequenceStepInput(BaseModel):
