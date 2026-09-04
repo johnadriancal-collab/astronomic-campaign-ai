@@ -1164,7 +1164,14 @@ export interface MailSequenceStep {
 // show the same whitelist it will actually be validated against.
 export const MAIL_TEMPLATE_VARIABLES = ["first_name", "last_name", "company"] as const;
 
-export type MailEnrollmentStatus = "pending" | "suppressed";
+// Widened (Stage 4B, 2026-09-03) from the original Phase 1 "pending" |
+// "suppressed" pair -- Phase A's execution model added active/completed/
+// paused/failed to MailEnrollmentStatus on the backend, but this frontend
+// type was never updated to match, so a real in-flight/finished enrollment
+// (exactly what Add Prospects against an ACTIVE/PAUSED campaign produces)
+// would have been mislabeled "Pending" by the old binary label helper --
+// see mailEnrollmentStatusLabel/mailEnrollmentStatusBadgeClass in mail.ts.
+export type MailEnrollmentStatus = "pending" | "active" | "paused" | "completed" | "suppressed" | "failed";
 
 export interface MailEnrollment {
   enrollment_id: string;
@@ -1174,6 +1181,11 @@ export interface MailEnrollment {
   status: MailEnrollmentStatus;
   enrolled_at: string;
   created_at: string;
+  // Present on every real backend row; kept optional here only for
+  // resilience against a caller-constructed test fixture that omits them.
+  assigned_mailbox_id?: string | null;
+  paused_reason?: string | null;
+  batch_id?: string | null;
 }
 
 // Pure, read-only -- calling this never enrolls anyone, queues anything, or
@@ -1235,6 +1247,99 @@ export function getMailCampaignReview(mailCampaignId: string): Promise<MailCampa
 
 export function listMailEnrollments(mailCampaignId: string): Promise<MailEnrollment[]> {
   return request<MailEnrollment[]>(`/mail/campaigns/${mailCampaignId}/enrollments`);
+}
+
+// --- Workload / prospect batches / Add Prospects (Phase 2, Stage 2-4B) ----
+//
+// Workload is enrollment-status counts, entirely independent of the
+// campaign's own lifecycle `status` (see MailCampaignWorkload's backend
+// docstring) -- a campaign can be lifecycle "completed" while workload
+// still shows pending/active rows (a legacy-COMPLETED campaign reopened by
+// Add Prospects, for example), and lifecycle must never be inferred FROM
+// workload draining to zero.
+
+export interface MailCampaignWorkload {
+  mail_campaign_id: string;
+  total: number;
+  pending: number;
+  active: number;
+  paused: number;
+  completed: number;
+  suppressed: number;
+  failed: number;
+}
+
+export function getMailCampaignWorkload(mailCampaignId: string): Promise<MailCampaignWorkload> {
+  return request<MailCampaignWorkload>(`/mail/campaigns/${mailCampaignId}/workload`);
+}
+
+export type MailEnrollmentBatchSource = "crm_list" | "csv_upload";
+export type MailEnrollmentBatchStatus = "preparing" | "ready";
+
+// Count semantics (see MailEnrollmentBatch's own backend docstring):
+// submitted_count = unique USABLE candidates actually frozen into the
+// batch (already deduped, already live-email-filtered -- NOT a raw CSV
+// row count and NOT the raw CRM List membership count). enrolled_count =
+// genuinely new enrollments this batch created (includes suppressed ones).
+// already_enrolled_count = candidates skipped because already enrolled in
+// this campaign at any status. suppressed_count is a SUBSET of
+// enrolled_count, never additive: submitted_count == enrolled_count +
+// already_enrolled_count, and suppressed_count <= enrolled_count. All four
+// are null while status is still "preparing".
+export interface MailEnrollmentBatch {
+  batch_id: string;
+  mail_campaign_id: string;
+  source: MailEnrollmentBatchSource;
+  source_list_id: string | null;
+  source_import_batch_id: string | null;
+  idempotency_key: string;
+  status: MailEnrollmentBatchStatus;
+  created_at: string;
+  created_by_actor: string | null;
+  submitted_count: number | null;
+  enrolled_count: number | null;
+  already_enrolled_count: number | null;
+  suppressed_count: number | null;
+}
+
+export function listMailCampaignBatches(mailCampaignId: string): Promise<MailEnrollmentBatch[]> {
+  return request<MailEnrollmentBatch[]>(`/mail/campaigns/${mailCampaignId}/batches`);
+}
+
+// Add Prospects, CRM-List source -- reuses the existing Stage 3 route
+// unchanged. `idempotencyKey` must be generated once per user operation
+// and reused across any retry (see lib/add-prospects-flow.ts).
+export function addProspectsFromCrmList(
+  mailCampaignId: string,
+  sourceListId: string,
+  idempotencyKey: string
+): Promise<MailEnrollmentBatch> {
+  return post<MailEnrollmentBatch>(`/mail/campaigns/${mailCampaignId}/prospects`, {
+    source: "crm_list",
+    source_list_id: sourceListId,
+    idempotency_key: idempotencyKey,
+  });
+}
+
+// Add Prospects, CSV source (Stage 4B) -- the ONE new orchestration call.
+// `importBatchId` must already be uploaded+previewed via the EXISTING
+// uploadCrmImport()/previewCrmImport() functions below; this route (not
+// the frontend) performs the actual CrmImportService commit as part of
+// its own orchestration -- the frontend must never call commitCrmImport()
+// for this flow. `decisions` is the exact same row_index -> "create" |
+// "update" | "skip" shape the standalone CRM Import review step already
+// uses.
+export function addProspectsFromCsv(
+  mailCampaignId: string,
+  importBatchId: string,
+  idempotencyKey: string,
+  decisions: Record<string, string>
+): Promise<MailEnrollmentBatch> {
+  return post<MailEnrollmentBatch>(`/mail/campaigns/${mailCampaignId}/prospects/csv`, {
+    import_batch_id: importBatchId,
+    idempotency_key: idempotencyKey,
+    decisions,
+  });
 }
 
 // --- Mail Campaign Schedule (real MailSendWindow rows, legacy-compatible) --

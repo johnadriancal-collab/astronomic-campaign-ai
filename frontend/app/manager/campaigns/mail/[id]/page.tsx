@@ -27,8 +27,10 @@ import {
   getMailCampaignChannels,
   getMailCampaignReview,
   getMailCampaignSchedule,
+  getMailCampaignWorkload,
   listCrmLists,
   listMailboxes,
+  listMailCampaignBatches,
   listMailEnrollments,
   listMailSequenceSteps,
   markMailCampaignReady,
@@ -43,7 +45,9 @@ import {
   type MailCampaign,
   type MailCampaignReview,
   type MailCampaignSharing,
+  type MailCampaignWorkload,
   type MailEnrollment,
+  type MailEnrollmentBatch,
   type MailSequenceStep,
 } from "@/lib/api";
 
@@ -55,6 +59,8 @@ export default function MailCampaignDetailPage() {
   const [steps, setSteps] = useState<MailSequenceStep[]>([]);
   const [review, setReview] = useState<MailCampaignReview | null>(null);
   const [enrollments, setEnrollments] = useState<MailEnrollment[]>([]);
+  const [workload, setWorkload] = useState<MailCampaignWorkload | null>(null);
+  const [batches, setBatches] = useState<MailEnrollmentBatch[]>([]);
   const [lists, setLists] = useState<CrmContactListSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -105,11 +111,13 @@ export default function MailCampaignDetailPage() {
 
   async function load() {
     try {
-      const [c, s, r, e, l, mb, ch, sched] = await Promise.all([
+      const [c, s, r, e, w, b, l, mb, ch, sched] = await Promise.all([
         getMailCampaign(campaignId),
         listMailSequenceSteps(campaignId),
         getMailCampaignReview(campaignId),
         listMailEnrollments(campaignId),
+        getMailCampaignWorkload(campaignId),
+        listMailCampaignBatches(campaignId),
         listCrmLists(),
         listMailboxes(),
         getMailCampaignChannels(campaignId),
@@ -119,6 +127,8 @@ export default function MailCampaignDetailPage() {
       setSteps(s);
       setReview(r);
       setEnrollments(e);
+      setWorkload(w);
+      setBatches(b);
       setLists(l);
       setMailboxes(mb);
       setSelectedMailboxIds(ch);
@@ -152,6 +162,34 @@ export default function MailCampaignDetailPage() {
       setReview(await getMailCampaignReview(campaignId));
     } catch {
       // Review is a convenience panel -- a refresh failure here doesn't block anything else.
+    }
+  }
+
+  // Called after a successful Add Prospects (CRM List or CSV) so the Leads
+  // tab reflects the new batch immediately, without a full page reload --
+  // see MailCampaignLeadsTab's onProspectsAdded prop. Deliberately
+  // re-fetches ONLY the four things Add Prospects can actually change
+  // (campaign -- its status may have just reopened from a legacy
+  // COMPLETED via Stage 3's own reopening rule; enrollments; workload;
+  // batch history), never steps/schedule/channels/mailboxes/settings --
+  // this never resets campaign lifecycle/configuration state, it only
+  // shows whatever it genuinely now is.
+  async function refreshLeadsSection() {
+    try {
+      const [c, e, w, b] = await Promise.all([
+        getMailCampaign(campaignId),
+        listMailEnrollments(campaignId),
+        getMailCampaignWorkload(campaignId),
+        listMailCampaignBatches(campaignId),
+      ]);
+      setCampaign(c);
+      setEnrollments(e);
+      setWorkload(w);
+      setBatches(b);
+    } catch {
+      // Best-effort refresh -- the modal already showed the user their
+      // successful result; a refresh hiccup here doesn't undo that or
+      // block anything else on the page.
     }
   }
 
@@ -491,7 +529,14 @@ export default function MailCampaignDetailPage() {
         </TabsPanel>
 
         <TabsPanel value="leads">
-          <MailCampaignLeadsTab campaign={campaign} enrollments={enrollments} />
+          <MailCampaignLeadsTab
+            campaign={campaign}
+            enrollments={enrollments}
+            workload={workload}
+            batches={batches}
+            lists={lists}
+            onProspectsAdded={refreshLeadsSection}
+          />
         </TabsPanel>
 
         <TabsPanel value="steps">

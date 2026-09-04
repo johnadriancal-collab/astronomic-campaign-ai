@@ -1,11 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { AlertTriangle, Upload } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { CsvColumnMappingStep } from "@/components/crm-import/csv-column-mapping-step";
+import { CsvReviewStep } from "@/components/crm-import/csv-review-step";
+import { CsvUploadStep } from "@/components/crm-import/csv-upload-step";
 import {
   ApiError,
   commitCrmImport,
@@ -16,34 +18,6 @@ import {
   type CrmImportBatch,
   type CrmImportReport,
 } from "@/lib/api";
-
-const CORE_FIELD_OPTIONS = [
-  "apollo_contact_id", "first_name", "last_name", "email", "email_status", "phone", "linkedin_url",
-  "title", "company", "company_website", "city", "state", "country", "industry", "company_size",
-  "revenue", "funding_stage", "funding_amount", "technologies", "seniority", "department", "job_function",
-];
-
-// thesis_private_check_sizes / thesis_institutional_check_sizes deliberately excluded --
-// deprecated as of the 2026-08-06 Check Size consolidation. check_size_personal/
-// check_size_institutional (custom fields, already selectable via the custom-field
-// section of this same mapping UI) are now the sole canonical Check Size destinations.
-const THESIS_FIELD_OPTIONS = [
-  "thesis_cities", "thesis_investor_mode", "thesis_dietary_preferences", "thesis_referral_emails",
-  "thesis_private_asset_types", "thesis_private_business_models", "thesis_private_industries",
-  "thesis_private_deal_stages", "thesis_private_meeting_preferences",
-  "thesis_private_demographic_preferences", "thesis_private_other_criteria",
-  "thesis_also_invests_institutionally",
-  "thesis_institutional_asset_types", "thesis_institutional_business_models", "thesis_institutional_industries",
-  "thesis_institutional_deal_stages", "thesis_institutional_meeting_preferences",
-  "thesis_institutional_demographic_preferences", "thesis_institutional_other_criteria",
-];
-
-const STATUS_LABEL: Record<string, string> = {
-  new: "New",
-  existing: "Existing (will update)",
-  possible_duplicate: "Possible duplicate",
-  error: "Error",
-};
 
 export default function CrmImportPage() {
   const [customFields, setCustomFields] = useState<CrmCustomFieldDefinition[]>([]);
@@ -121,20 +95,7 @@ export default function CrmImportPage() {
             <CardTitle className="text-sm">1. Upload</CardTitle>
           </CardHeader>
           <CardContent>
-            <label className="flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed border-border/60 py-12 text-center text-sm text-muted-foreground hover:bg-secondary/40">
-              <Upload className="h-5 w-5" />
-              {busy ? "Uploading..." : "Choose a CSV file"}
-              <input
-                type="file"
-                accept=".csv"
-                className="hidden"
-                disabled={busy}
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  if (file) handleUpload(file);
-                }}
-              />
-            </label>
+            <CsvUploadStep busy={busy} onUpload={handleUpload} />
           </CardContent>
         </Card>
       )}
@@ -146,39 +107,15 @@ export default function CrmImportPage() {
               2. Map columns -- {batch.row_count} row{batch.row_count === 1 ? "" : "s"} in {batch.filename}
             </CardTitle>
           </CardHeader>
-          <CardContent className="space-y-3">
-            {batch.headers.map((header) => (
-              <div key={header} className="flex items-center gap-3">
-                <span className="w-48 shrink-0 truncate text-sm">{header}</span>
-                <select
-                  value={mapping[header] ?? ""}
-                  onChange={(e) => setMapping((prev) => ({ ...prev, [header]: e.target.value }))}
-                  className="h-9 flex-1 rounded-md border border-input bg-transparent px-3 text-sm"
-                >
-                  <option value="">-- ignore this column --</option>
-                  <optgroup label="Core / source fields">
-                    {CORE_FIELD_OPTIONS.map((f) => (
-                      <option key={f} value={f}>{f}</option>
-                    ))}
-                  </optgroup>
-                  <optgroup label="Investor Thesis fields">
-                    {THESIS_FIELD_OPTIONS.map((f) => (
-                      <option key={f} value={f}>{f}</option>
-                    ))}
-                  </optgroup>
-                  {customFields.length > 0 && (
-                    <optgroup label="Custom fields">
-                      {customFields.map((f) => (
-                        <option key={f.field_key} value={`custom:${f.field_key}`}>{f.label}</option>
-                      ))}
-                    </optgroup>
-                  )}
-                </select>
-              </div>
-            ))}
-            <Button onClick={handlePreview} disabled={busy} className="mt-2">
-              {busy ? "Checking for duplicates..." : "Preview import"}
-            </Button>
+          <CardContent>
+            <CsvColumnMappingStep
+              batch={batch}
+              mapping={mapping}
+              onMappingChange={setMapping}
+              customFields={customFields}
+              busy={busy}
+              onSubmit={handlePreview}
+            />
           </CardContent>
         </Card>
       )}
@@ -188,48 +125,14 @@ export default function CrmImportPage() {
           <CardHeader>
             <CardTitle className="text-sm">3. Review &amp; commit</CardTitle>
           </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap gap-2 text-sm">
-              <Badge variant="outline">New: {batch.new_count}</Badge>
-              <Badge variant="outline">Existing: {batch.existing_count}</Badge>
-              <Badge variant="outline">Possible duplicates: {batch.possible_duplicate_count}</Badge>
-              <Badge variant="outline">Errors: {batch.error_count}</Badge>
-            </div>
-
-            <div className="max-h-96 space-y-1 overflow-y-auto rounded-lg border border-border/60 p-2">
-              {batch.preview.map((row) => (
-                <div key={row.row_index} className="flex items-center justify-between gap-3 rounded-md p-2 text-sm hover:bg-secondary/40">
-                  <div className="min-w-0">
-                    <p className="truncate">
-                      {String(row.mapped_fields.first_name ?? "")} {String(row.mapped_fields.last_name ?? "")}{" "}
-                      <span className="text-muted-foreground">{String(row.mapped_fields.email ?? "")}</span>
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      {STATUS_LABEL[row.status]}
-                      {row.matched_on && !row.matched_on.startsWith("within_file") && ` -- matched by ${row.matched_on}`}
-                      {row.matched_on?.startsWith("within_file") && " -- duplicate of an earlier row in this file"}
-                      {row.error && ` -- ${row.error}`}
-                    </p>
-                  </div>
-                  <select
-                    value={decisions[String(row.row_index)] ?? ""}
-                    onChange={(e) => setDecisions((prev) => ({ ...prev, [String(row.row_index)]: e.target.value }))}
-                    className="h-8 shrink-0 rounded-md border border-input bg-transparent px-2 text-xs"
-                  >
-                    <option value="">
-                      Default ({row.status === "new" ? "create" : row.status === "existing" ? "update" : "skip"})
-                    </option>
-                    <option value="create">Create</option>
-                    <option value="update">Update</option>
-                    <option value="skip">Skip</option>
-                  </select>
-                </div>
-              ))}
-            </div>
-
-            <Button onClick={handleCommit} disabled={busy}>
-              {busy ? "Committing..." : "Commit import"}
-            </Button>
+          <CardContent>
+            <CsvReviewStep
+              batch={batch}
+              decisions={decisions}
+              onDecisionChange={(rowIndex, decision) => setDecisions((prev) => ({ ...prev, [String(rowIndex)]: decision }))}
+              busy={busy}
+              onConfirm={handleCommit}
+            />
           </CardContent>
         </Card>
       )}

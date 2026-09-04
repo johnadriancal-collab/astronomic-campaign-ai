@@ -81,12 +81,46 @@ export function campaignLockedBannerDescription(status: MailCampaignStatus): str
   }
 }
 
+// Widened (Stage 4B, 2026-09-03) to the full real MailEnrollmentStatus set
+// -- see that type's own comment in api.ts for why the original binary
+// pending/suppressed version would have mislabeled a real in-flight/
+// finished enrollment. Same "one real label/badge per real value" pattern
+// as mailCampaignStatusLabel/mailCampaignStatusBadgeClass above.
 export function mailEnrollmentStatusLabel(status: MailEnrollmentStatus): string {
-  return status === "suppressed" ? "Suppressed" : "Pending";
+  switch (status) {
+    case "pending":
+      return "Pending";
+    case "active":
+      return "Active";
+    case "paused":
+      return "Paused";
+    case "completed":
+      return "Completed";
+    case "suppressed":
+      return "Suppressed";
+    case "failed":
+      return "Failed";
+    default:
+      return status;
+  }
 }
 
 export function mailEnrollmentStatusBadgeClass(status: MailEnrollmentStatus): string {
-  return status === "suppressed" ? "bg-destructive/10 text-destructive" : "bg-secondary text-muted-foreground";
+  switch (status) {
+    case "suppressed":
+      return "bg-destructive/10 text-destructive";
+    case "failed":
+      return "bg-destructive/10 text-destructive";
+    case "active":
+      return "bg-blue-100 text-blue-800";
+    case "completed":
+      return "bg-secondary text-muted-foreground";
+    case "paused":
+      return "bg-amber-100 text-amber-800";
+    case "pending":
+    default:
+      return "bg-secondary text-muted-foreground";
+  }
 }
 
 export const MAIL_SUPPRESSION_REASON_OPTIONS: { value: MailSuppressionReason; label: string }[] = [

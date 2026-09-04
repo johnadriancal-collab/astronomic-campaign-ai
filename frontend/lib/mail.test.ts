@@ -13,6 +13,7 @@ import {
   isAllSendingDaysSelected,
   mailCampaignStatusBadgeClass,
   mailCampaignStatusLabel,
+  mailEnrollmentStatusBadgeClass,
   mailEnrollmentStatusLabel,
   mailSuppressionReasonLabel,
   nextSuppressionAction,
@@ -83,7 +84,25 @@ test("campaignLockedBannerDescription: only the truly archived status says 'arch
 
 test("mailEnrollmentStatusLabel", () => {
   assert.equal(mailEnrollmentStatusLabel("pending"), "Pending");
+  assert.equal(mailEnrollmentStatusLabel("active"), "Active");
+  assert.equal(mailEnrollmentStatusLabel("paused"), "Paused");
+  assert.equal(mailEnrollmentStatusLabel("completed"), "Completed");
   assert.equal(mailEnrollmentStatusLabel("suppressed"), "Suppressed");
+  assert.equal(mailEnrollmentStatusLabel("failed"), "Failed");
+});
+
+test("mailEnrollmentStatusBadgeClass gives every status its own real class, never silently reusing suppressed's", () => {
+  const seen = new Set<string>();
+  for (const status of ["pending", "active", "paused", "completed", "suppressed", "failed"] as const) {
+    seen.add(mailEnrollmentStatusBadgeClass(status));
+  }
+  // Not asserting every value is unique (paused/pending intentionally share
+  // a calm class in some pairings) -- just that this is a real per-status
+  // switch, not the old binary "suppressed vs everything else" fallback
+  // (which would collapse active/completed/paused/failed all into one).
+  assert.ok(seen.size >= 3);
+  assert.equal(mailEnrollmentStatusBadgeClass("suppressed"), mailEnrollmentStatusBadgeClass("failed"));
+  assert.notEqual(mailEnrollmentStatusBadgeClass("active"), mailEnrollmentStatusBadgeClass("pending"));
 });
 
 test("mailSuppressionReasonLabel maps every reason", () => {
