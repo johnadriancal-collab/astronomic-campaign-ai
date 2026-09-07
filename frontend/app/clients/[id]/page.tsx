@@ -3,14 +3,16 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { AlertTriangle, ArrowLeft, Lock } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Lock, Plus } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ClientFormModal } from "@/components/client-form-modal";
-import { ApiError, getClient, updateClient, type Client } from "@/lib/api";
+import { ClientContactFormModal } from "@/components/client-contact-form-modal";
+import { ApiError, getClient, listClientContacts, updateClient, updateClientContact, type Client, type ClientContact } from "@/lib/api";
 import {
+  clientContactDisplayName,
   clientRelationshipClassificationBadgeClass,
   clientRelationshipClassificationLabel,
   clientStatusBadgeClass,
@@ -19,12 +21,13 @@ import {
 } from "@/lib/client-crm";
 import { cn } from "@/lib/utils";
 
-// Stage 1C: Overview only. This will eventually grow into a tabbed page
-// (see the Client CRM investigation report for the planned sections) --
-// deliberately NOT built as tabs yet with empty/fake other sections, since
-// only Overview has any real, backend-supported data behind it today.
-// This page shows no fabricated numbers for anything not built yet --
-// a fabricated "0" would misrepresent "not built" as "genuinely zero".
+// Stage 1C shipped Overview only; Stage 1D adds a real Contacts section
+// now that ClientContact linking actually exists (see this stage's own
+// STOP report). Still deliberately NOT a tabbed page with other empty/
+// fake sections (Dinners/Activity/Deals) -- only Overview and Contacts
+// have any real, backend-supported data behind them today. This page
+// shows no fabricated numbers for anything not built yet -- a fabricated
+// "0" would misrepresent "not built" as "genuinely zero".
 export default function ClientDetailPage() {
   const params = useParams<{ id: string }>();
   const clientId = params.id;
@@ -35,6 +38,13 @@ export default function ClientDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  const [contacts, setContacts] = useState<ClientContact[] | null>(null);
+  const [contactsError, setContactsError] = useState<string | null>(null);
+  const [contactModalOpen, setContactModalOpen] = useState(false);
+  const [editingContact, setEditingContact] = useState<ClientContact | null>(null);
+  const [contactActionError, setContactActionError] = useState<string | null>(null);
+  const [busyContactId, setBusyContactId] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -50,10 +60,72 @@ export default function ClientDetailPage() {
     }
   }
 
+  async function loadContacts() {
+    try {
+      setContacts(await listClientContacts(clientId));
+      setContactsError(null);
+    } catch (err) {
+      setContactsError(err instanceof ApiError ? `Couldn't load Contacts (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    }
+  }
+
   useEffect(() => {
     load();
+    loadContacts();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
+
+  function handleContactSaved(contact: ClientContact) {
+    setContacts((prev) => {
+      if (!prev) return [contact];
+      const index = prev.findIndex((c) => c.client_contact_id === contact.client_contact_id);
+      if (index === -1) return [...prev, contact];
+      const next = [...prev];
+      next[index] = contact;
+      return next;
+    });
+  }
+
+  async function handleSetPrimary(contact: ClientContact) {
+    if (!client) return;
+    setBusyContactId(contact.client_contact_id);
+    setContactActionError(null);
+    try {
+      // A refetch (rather than just patching this one row locally) is
+      // what picks up the OTHER Contact that just lost Primary status --
+      // the backend clears it atomically in the same operation, but only
+      // this row's own response comes back from updateClientContact.
+      await updateClientContact(client.client_id, contact.client_contact_id, { is_primary_contact: true });
+      await loadContacts();
+    } catch (err) {
+      setContactActionError(
+        err instanceof ApiError ? `Couldn't set this Contact as Primary (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    } finally {
+      setBusyContactId(null);
+    }
+  }
+
+  async function handleArchiveContactToggle(contact: ClientContact) {
+    if (!client) return;
+    const nextArchived = !contact.archived;
+    if (nextArchived) {
+      const confirmed = window.confirm(
+        `Remove ${clientContactDisplayName(contact)} from ${client.name}'s Contacts? This can be undone anytime.`
+      );
+      if (!confirmed) return;
+    }
+    setBusyContactId(contact.client_contact_id);
+    setContactActionError(null);
+    try {
+      const updated = await updateClientContact(client.client_id, contact.client_contact_id, { archived: nextArchived });
+      handleContactSaved(updated);
+    } catch (err) {
+      setContactActionError(err instanceof ApiError ? `Couldn't update this Contact (${err.status}): ${err.message}` : "Couldn't reach the backend.");
+    } finally {
+      setBusyContactId(null);
+    }
+  }
 
   async function handleArchiveToggle() {
     if (!client) return;
@@ -195,9 +267,121 @@ export default function ClientDetailPage() {
             <OverviewField label="Last Updated" value={formatClientDate(client.updated_at)} />
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-sm">Contacts</CardTitle>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={() => {
+                setEditingContact(null);
+                setContactModalOpen(true);
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add Contact
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {contactsError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{contactsError}</AlertDescription>
+              </Alert>
+            )}
+            {contactActionError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{contactActionError}</AlertDescription>
+              </Alert>
+            )}
+
+            {contacts === null && !contactsError && <p className="text-sm text-muted-foreground">Loading…</p>}
+
+            {contacts !== null && contacts.length === 0 && (
+              <p className="text-sm text-muted-foreground">No Contacts linked yet.</p>
+            )}
+
+            {contacts !== null && contacts.length > 0 && (
+              <ul className="space-y-3">
+                {contacts.map((contact) => (
+                  <li key={contact.client_contact_id} className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {contact.crm_contact_id ? (
+                          <Link href={`/crm/${contact.crm_contact_id}`} className="font-medium hover:underline">
+                            {clientContactDisplayName(contact)}
+                          </Link>
+                        ) : (
+                          <span className="font-medium">{clientContactDisplayName(contact)}</span>
+                        )}
+                        {contact.is_primary_contact && (
+                          <Badge variant="secondary" className="bg-emerald-100 text-emerald-800">
+                            Primary
+                          </Badge>
+                        )}
+                        {contact.is_decision_maker && (
+                          <Badge variant="secondary" className="bg-violet-100 text-violet-800">
+                            Decision Maker
+                          </Badge>
+                        )}
+                        {contact.archived && (
+                          <Badge variant="secondary" className="bg-secondary text-muted-foreground">
+                            Archived
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">{contact.title || "—"}</p>
+                      {contact.email && <p className="text-xs text-muted-foreground">{contact.email}</p>}
+                    </div>
+                    <div className="flex shrink-0 flex-wrap gap-2">
+                      {!contact.archived && !contact.is_primary_contact && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyContactId === contact.client_contact_id}
+                          onClick={() => handleSetPrimary(contact)}
+                        >
+                          Set Primary
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busyContactId === contact.client_contact_id}
+                        onClick={() => {
+                          setEditingContact(contact);
+                          setContactModalOpen(true);
+                        }}
+                      >
+                        Edit
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={busyContactId === contact.client_contact_id}
+                        className={contact.archived ? undefined : "text-muted-foreground hover:text-destructive"}
+                        onClick={() => handleArchiveContactToggle(contact)}
+                      >
+                        {contact.archived ? "Restore" : "Remove"}
+                      </Button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <ClientFormModal open={editOpen} onOpenChange={setEditOpen} existingClient={client} onSaved={setClient} />
+      <ClientContactFormModal
+        open={contactModalOpen}
+        onOpenChange={setContactModalOpen}
+        client={client}
+        existingContact={editingContact}
+        onSaved={handleContactSaved}
+      />
     </div>
   );
 }

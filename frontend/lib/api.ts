@@ -1785,3 +1785,61 @@ export function updateClient(clientId: string, patch: ClientUpdateInput): Promis
     body: JSON.stringify(patch),
   });
 }
+
+// --- ClientContact (Client CRM Stage 1D, 2026-09-07) -----------------------
+// A person in their capacity as a client-side stakeholder for one Client --
+// see app/models/client_crm.py's own ClientContact docstring. name/email/
+// phone below are SNAPSHOTS taken from the linked CrmContact at creation
+// time (server-populated, never sent by the client), not a live join --
+// they keep rendering correctly even if the canonical Contact later
+// changes. `title`/`is_decision_maker`/`role_notes` are relationship-
+// specific to THIS Client, distinct from anything CrmContact itself holds.
+
+export interface ClientContact {
+  client_contact_id: string;
+  client_id: string;
+  crm_contact_id: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  phone: string | null;
+  title: string | null;
+  is_primary_contact: boolean;
+  is_decision_maker: boolean;
+  role_notes: string | null;
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+}
+
+export interface ClientContactCreateInput {
+  crm_contact_id: string;
+  title?: string | null;
+  is_primary_contact?: boolean;
+  is_decision_maker?: boolean;
+  role_notes?: string | null;
+}
+
+export type ClientContactUpdateInput = Partial<Omit<ClientContactCreateInput, "crm_contact_id">> & {
+  archived?: boolean;
+};
+
+export function listClientContacts(clientId: string): Promise<ClientContact[]> {
+  return request<ClientContact[]>(`/client-crm/clients/${clientId}/contacts`);
+}
+
+export function createClientContact(clientId: string, input: ClientContactCreateInput): Promise<ClientContact> {
+  return post<ClientContact>(`/client-crm/clients/${clientId}/contacts`, input);
+}
+
+export function updateClientContact(
+  clientId: string,
+  clientContactId: string,
+  patch: ClientContactUpdateInput
+): Promise<ClientContact> {
+  return request<ClientContact>(`/client-crm/clients/${clientId}/contacts/${clientContactId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}

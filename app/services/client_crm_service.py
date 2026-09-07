@@ -35,8 +35,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models.activity import ActivityCategory, ActivitySource
-from app.models.client_crm import Client, ClientPage, ClientRelationshipClassification, ClientStatus
+from app.models.client_crm import Client, ClientContact, ClientPage, ClientRelationshipClassification, ClientStatus
+from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
+from app.repositories.crm_contact_store import CrmContactStore
 from app.services.activity_log_service import ActivityLogService
 
 SORTABLE_CLIENT_FIELDS = frozenset({"name", "created_at", "updated_at", "next_action_due"})
@@ -62,16 +64,43 @@ class ClientNotFound(Exception):
         super().__init__(f"Client not found: {client_id}")
 
 
+class ClientContactNotFound(Exception):
+    """Raised for a client_contact_id that doesn't exist, OR that exists
+    but belongs to a different client_id than the one in the URL -- the
+    two cases are deliberately indistinguishable to the caller (same 404),
+    so this never leaks whether a given client_contact_id exists at all
+    under some OTHER Client."""
+
+    def __init__(self, client_contact_id: str):
+        self.client_contact_id = client_contact_id
+        super().__init__(f"ClientContact not found: {client_contact_id}")
+
+
 class ClientCrmService:
-    def __init__(self, *, client_store: ClientStore, activity_log: ActivityLogService):
+    def __init__(
+        self,
+        *,
+        client_store: ClientStore,
+        activity_log: ActivityLogService,
+        client_contact_store: ClientContactStore,
+        crm_contact_store: CrmContactStore,
+    ):
         self.client_store = client_store
         self.activity_log = activity_log
+        self.client_contact_store = client_contact_store
+        self.crm_contact_store = crm_contact_store
 
     async def _require_client(self, client_id: str) -> Client:
         client = await self.client_store.get(client_id)
         if client is None:
             raise ClientNotFound(client_id)
         return client
+
+    async def _require_client_contact(self, client_id: str, client_contact_id: str) -> ClientContact:
+        contact = await self.client_contact_store.get(client_contact_id)
+        if contact is None or contact.client_id != client_id:
+            raise ClientContactNotFound(client_contact_id)
+        return contact
 
     async def create_client(self, fields: dict[str, Any]) -> Client:
         """`fields` is assumed already validated/shaped by the API layer's
@@ -211,3 +240,143 @@ class ClientCrmService:
         start = (page - 1) * page_size
         items = filtered[start : start + page_size]
         return ClientPage(items=items, total=total, page=page, page_size=page_size)
+
+    # =====================================================================
+    # ClientContact -- Client CRM Stage 1D (2026-09-07). See this stage's
+    # own STOP report for the full investigation this design comes from.
+    # =====================================================================
+
+    async def list_client_contacts(self, client_id: str) -> list[ClientContact]:
+        await self._require_client(client_id)
+        return await self.client_contact_store.list_for_client(client_id)
+
+    async def create_client_contact(self, client_id: str, fields: dict[str, Any]) -> ClientContact:
+        """V1 requires `crm_contact_id` -- there is no free-text-only
+        person-creation path here (see this stage's own STOP report,
+        item 8: reusing the existing Contact-creation form inline was
+        investigated and deliberately deferred). Snapshot fields
+        (first_name/last_name/email/phone) are populated FROM the
+        canonical CrmContact at creation time, using only whatever data
+        it actually has -- never fabricated -- and are never written back
+        to CrmContact (no two-way sync in Stage 1D; see ClientContact's
+        own model docstring for why the snapshot exists at all).
+        `title`/`is_decision_maker`/`role_notes` are relationship-specific
+        and come from the request only -- CrmContact.title is a different
+        concept (this person's general job title) and is never copied
+        into ClientContact.title (this person's role AT THIS CLIENT)."""
+        await self._require_client(client_id)
+
+        crm_contact_id = (fields.get("crm_contact_id") or "").strip()
+        if not crm_contact_id:
+            raise ValueError("crm_contact_id is required to link a Primary/additional Contact.")
+        crm_contact = await self.crm_contact_store.get(crm_contact_id)
+        if crm_contact is None:
+            raise ValueError("crm_contact_id does not refer to an existing Contact.")
+        if crm_contact.archived:
+            raise ValueError("Cannot link an archived Contact.")
+
+        now = datetime.now(timezone.utc)
+        contact = ClientContact(
+            client_contact_id=str(uuid.uuid4()),
+            client_id=client_id,
+            crm_contact_id=crm_contact_id,
+            first_name=crm_contact.first_name,
+            last_name=crm_contact.last_name,
+            email=crm_contact.email,
+            phone=crm_contact.phone,
+            title=fields.get("title"),
+            is_primary_contact=bool(fields.get("is_primary_contact", False)),
+            is_decision_maker=bool(fields.get("is_decision_maker", False)),
+            role_notes=fields.get("role_notes"),
+            created_at=now,
+            updated_at=now,
+        )
+        if contact.is_primary_contact:
+            await self.client_contact_store.create_as_primary(contact)
+        else:
+            await self.client_contact_store.create(contact)
+
+        display_name = " ".join(part for part in (contact.first_name, contact.last_name) if part) or "Unnamed contact"
+        await self.activity_log.record(
+            event_type="client_contact.created",
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f'"{display_name}" was linked as a Contact.',
+            entity_type="client_contact",
+            entity_id=contact.client_contact_id,
+            entity_name=display_name,
+            metadata={"client_id": client_id, "crm_contact_id": crm_contact_id},
+        )
+        return contact
+
+    async def update_client_contact(self, client_id: str, client_contact_id: str, patch: dict[str, Any]) -> ClientContact:
+        """Genuine partial update. crm_contact_id/first_name/last_name/
+        email/phone have no fields in ClientContactUpdateRequest at all
+        (re-linking to a different person isn't supported in V1 -- archive
+        and re-add instead), so `patch` only ever carries title/
+        is_primary_contact/is_decision_maker/role_notes/archived.
+
+        Ordering matters here: is_primary_contact=True is always applied
+        via the store's atomic set_primary() (which also clears every
+        other active primary for this Client in the same transaction),
+        never via a plain field assignment -- see ClientContactStore.
+        set_primary()'s own docstring for why. An archived ClientContact
+        can never remain or become Primary (this stage's own explicit
+        rule): archiving a currently-primary contact clears
+        is_primary_contact in the same save(); requesting
+        is_primary_contact=True together with archived=True (or against
+        an already-archived contact) is rejected outright."""
+        existing = await self._require_client_contact(client_id, client_contact_id)
+
+        wants_primary = patch.get("is_primary_contact") is True
+        archiving = patch.get("archived") is True and not existing.archived
+        if wants_primary and (existing.archived or archiving):
+            raise ValueError("Cannot make an archived Contact relationship Primary.")
+
+        # is_primary_contact=True always routes through the atomic
+        # set_primary() path below instead, so it's excluded here. An
+        # explicit is_primary_contact=False (voluntary un-primary, or the
+        # archiving-clears-primary case below) is a plain field like any
+        # other and stays in other_fields.
+        other_fields = {k: v for k, v in patch.items() if not (k == "is_primary_contact" and v is True)}
+        now = datetime.now(timezone.utc)
+
+        if archiving and existing.is_primary_contact:
+            other_fields = {**other_fields, "is_primary_contact": False}
+
+        merged = existing.model_copy(update={**other_fields, "updated_at": now})
+
+        if wants_primary and not archiving:
+            # Atomically flips THIS row to primary and clears every other
+            # active primary for the Client -- must happen before (or
+            # instead of) a plain save() of the other field changes, so
+            # there is never a moment with two primaries.
+            merged = await self.client_contact_store.set_primary(client_id, client_contact_id)
+            remaining_fields = {k: v for k, v in other_fields.items() if k != "is_primary_contact"}
+            if remaining_fields:
+                merged = merged.model_copy(update={**remaining_fields, "updated_at": now})
+                await self.client_contact_store.save(merged)
+        else:
+            await self.client_contact_store.save(merged)
+
+        await self._record_client_contact_update_activity(existing, merged)
+        return merged
+
+    async def _record_client_contact_update_activity(self, before: ClientContact, after: ClientContact) -> None:
+        display_name = " ".join(part for part in (after.first_name, after.last_name) if part) or "Unnamed contact"
+        if before.archived != after.archived:
+            event_type, verb = ("client_contact.archived", "archived") if after.archived else ("client_contact.restored", "restored")
+        elif not before.is_primary_contact and after.is_primary_contact:
+            event_type, verb = "client_contact.primary_changed", "set as Primary Contact"
+        else:
+            event_type, verb = "client_contact.updated", "updated"
+        await self.activity_log.record(
+            event_type=event_type,
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f'"{display_name}" was {verb}.',
+            entity_type="client_contact",
+            entity_id=after.client_contact_id,
+            entity_name=display_name,
+            metadata={"client_id": after.client_id},
+        )

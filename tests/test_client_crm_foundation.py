@@ -341,6 +341,105 @@ async def test_sqlite_client_contact_save_and_archive(sqlite_client_contact_stor
 
 
 # =====================================================================
+# ClientContact store -- atomic Primary Contact invariant (Stage 1D,
+# 2026-09-07). See ClientContactStore.create_as_primary/set_primary's own
+# docstrings for the invariant these prove: at most one active Primary
+# Contact per client_id, with no window where two rows are simultaneously
+# primary.
+# =====================================================================
+
+
+async def test_memory_create_as_primary_demotes_the_existing_primary():
+    store = MemoryClientContactStore()
+    await store.create_as_primary(_contact("cc1", "c1", is_primary_contact=True))
+    await store.create_as_primary(_contact("cc2", "c1", is_primary_contact=True))
+
+    assert (await store.get("cc1")).is_primary_contact is False
+    assert (await store.get("cc2")).is_primary_contact is True
+
+
+async def test_sqlite_create_as_primary_demotes_the_existing_primary(sqlite_client_contact_store):
+    store = sqlite_client_contact_store
+    await store.create_as_primary(_contact("cc1", "c1", is_primary_contact=True))
+    await store.create_as_primary(_contact("cc2", "c1", is_primary_contact=True))
+
+    assert (await store.get("cc1")).is_primary_contact is False
+    assert (await store.get("cc2")).is_primary_contact is True
+
+
+async def test_create_as_primary_never_demotes_a_different_clients_primary():
+    store = MemoryClientContactStore()
+    await store.create_as_primary(_contact("cc1", "c1", is_primary_contact=True))
+    await store.create_as_primary(_contact("cc2", "c2", is_primary_contact=True))
+
+    assert (await store.get("cc1")).is_primary_contact is True
+    assert (await store.get("cc2")).is_primary_contact is True
+
+
+async def test_create_as_primary_never_demotes_an_already_archived_contact_again():
+    """Archived rows are excluded from the "clear other primaries" scan --
+    there's nothing wrong with leaving an archived row's stale
+    is_primary_contact value alone; the service layer never treats an
+    archived contact as primary regardless of this flag's value."""
+    store = MemoryClientContactStore()
+    await store.create(_contact("cc1", "c1", is_primary_contact=True, archived=True))
+    await store.create_as_primary(_contact("cc2", "c1", is_primary_contact=True))
+
+    assert (await store.get("cc1")).is_primary_contact is True  # untouched, but archived
+    assert (await store.get("cc2")).is_primary_contact is True
+
+
+async def test_memory_set_primary_switches_and_demotes():
+    store = MemoryClientContactStore()
+    await store.create(_contact("cc1", "c1", is_primary_contact=True))
+    await store.create(_contact("cc2", "c1", is_primary_contact=False))
+
+    updated = await store.set_primary("c1", "cc2")
+
+    assert updated.is_primary_contact is True
+    assert (await store.get("cc1")).is_primary_contact is False
+    assert (await store.get("cc2")).is_primary_contact is True
+
+
+async def test_sqlite_set_primary_switches_and_demotes(sqlite_client_contact_store):
+    store = sqlite_client_contact_store
+    await store.create(_contact("cc1", "c1", is_primary_contact=True))
+    await store.create(_contact("cc2", "c1", is_primary_contact=False))
+
+    updated = await store.set_primary("c1", "cc2")
+
+    assert updated.is_primary_contact is True
+    assert (await store.get("cc1")).is_primary_contact is False
+    assert (await store.get("cc2")).is_primary_contact is True
+
+
+async def test_memory_set_primary_missing_contact_raises():
+    store = MemoryClientContactStore()
+    with pytest.raises(ClientContactNotFoundError):
+        await store.set_primary("c1", "does-not-exist")
+
+
+async def test_sqlite_set_primary_missing_contact_raises(sqlite_client_contact_store):
+    store = sqlite_client_contact_store
+    with pytest.raises(ClientContactNotFoundError):
+        await store.set_primary("c1", "does-not-exist")
+
+
+async def test_memory_set_primary_rejects_a_contact_from_a_different_client():
+    store = MemoryClientContactStore()
+    await store.create(_contact("cc1", "c1"))
+    with pytest.raises(ClientContactNotFoundError):
+        await store.set_primary("c-other", "cc1")
+
+
+async def test_sqlite_set_primary_rejects_a_contact_from_a_different_client(sqlite_client_contact_store):
+    store = sqlite_client_contact_store
+    await store.create(_contact("cc1", "c1"))
+    with pytest.raises(ClientContactNotFoundError):
+        await store.set_primary("c-other", "cc1")
+
+
+# =====================================================================
 # Engagement store -- Memory + SQLite parity
 # =====================================================================
 

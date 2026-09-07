@@ -7,26 +7,75 @@ file is about request/response shape and HTTP status mapping only), same
 isolation style as test_activity_api.py.
 """
 
+import asyncio
+from datetime import datetime, timezone
+
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.client_crm import router as client_crm_router
 from app.dependencies import get_client_crm_service
+from app.models.crm import CrmContact
 from app.repositories.activity_event_store import MemoryActivityEventStore
+from app.repositories.client_contact_store import MemoryClientContactStore
 from app.repositories.client_store import MemoryClientStore
+from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.client_crm_service import ClientCrmService
 
 
 @pytest.fixture
 def test_client():
-    service = ClientCrmService(client_store=MemoryClientStore(), activity_log=ActivityLogService(MemoryActivityEventStore()))
+    service = ClientCrmService(
+        client_store=MemoryClientStore(),
+        activity_log=ActivityLogService(MemoryActivityEventStore()),
+        client_contact_store=MemoryClientContactStore(),
+        crm_contact_store=MemoryCrmContactStore(),
+    )
     app = FastAPI()
     app.include_router(client_crm_router)
     app.dependency_overrides[get_client_crm_service] = lambda: service
     with TestClient(app) as client:
         yield client, service
+
+
+@pytest.fixture
+def contact_test_client():
+    """Same as test_client, but also exposes the CrmContactStore directly
+    so a test can seed a canonical Contact before linking it."""
+    crm_contact_store = MemoryCrmContactStore()
+    service = ClientCrmService(
+        client_store=MemoryClientStore(),
+        activity_log=ActivityLogService(MemoryActivityEventStore()),
+        client_contact_store=MemoryClientContactStore(),
+        crm_contact_store=crm_contact_store,
+    )
+    app = FastAPI()
+    app.include_router(client_crm_router)
+    app.dependency_overrides[get_client_crm_service] = lambda: service
+    with TestClient(app) as client:
+        yield client, service, crm_contact_store
+
+
+def _seed_crm_contact(crm_contact_store, **overrides) -> None:
+    now = datetime.now(timezone.utc)
+    fields = {
+        "crm_contact_id": "ethan-1",
+        "first_name": "Ethan",
+        "last_name": "Wong",
+        "email": "ethan@hiveasmbld.example.com",
+        "title": "Co-CEO",
+        "company": "Hive ASMBLD",
+        "created_at": now,
+        "updated_at": now,
+        **overrides,
+    }
+    asyncio.run(crm_contact_store.create(CrmContact(**fields)))
+
+
+def _seed_ethan(crm_contact_store) -> None:
+    _seed_crm_contact(crm_contact_store)
 
 
 def test_create_client_minimal(test_client):
@@ -191,3 +240,149 @@ def test_archive_and_restore_via_patch(test_client):
     assert restored.status_code == 200
     assert restored.json()["archived"] is False
     assert client.get("/client-crm/clients").json()["total"] == 1
+
+
+# =====================================================================
+# ClientContact -- Client CRM Stage 1D (2026-09-07)
+# =====================================================================
+
+
+def test_list_client_contacts_missing_client_is_404(test_client):
+    client, _service = test_client
+    resp = client.get("/client-crm/clients/does-not-exist/contacts")
+    assert resp.status_code == 404
+
+
+def test_create_client_contact_missing_client_is_404(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_ethan(crm_contact_store)
+    resp = client.post("/client-crm/clients/does-not-exist/contacts", json={"crm_contact_id": "ethan-1"})
+    assert resp.status_code == 404
+
+
+def test_create_client_contact_missing_crm_contact_id_is_422(contact_test_client):
+    client, _service, _crm_contact_store = contact_test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(f"/client-crm/clients/{created['client_id']}/contacts", json={})
+    assert resp.status_code == 422
+
+
+def test_create_client_contact_unknown_crm_contact_id_is_400(contact_test_client):
+    client, _service, _crm_contact_store = contact_test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(
+        f"/client-crm/clients/{created['client_id']}/contacts", json={"crm_contact_id": "does-not-exist"}
+    )
+    assert resp.status_code == 400
+
+
+def test_create_client_contact_links_and_populates_snapshot(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_ethan(crm_contact_store)
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+
+    resp = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/contacts",
+        json={"crm_contact_id": "ethan-1", "is_primary_contact": True, "title": "Co-CEO"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["client_id"] == created_client["client_id"]
+    assert body["crm_contact_id"] == "ethan-1"
+    assert body["first_name"] == "Ethan"
+    assert body["last_name"] == "Wong"
+    assert body["is_primary_contact"] is True
+    assert body["archived"] is False
+
+
+def test_list_client_contacts_after_create(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_ethan(crm_contact_store)
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    client.post(f"/client-crm/clients/{created_client['client_id']}/contacts", json={"crm_contact_id": "ethan-1"})
+
+    resp = client.get(f"/client-crm/clients/{created_client['client_id']}/contacts")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+    assert resp.json()[0]["first_name"] == "Ethan"
+
+
+def test_update_client_contact_partial_patch(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_ethan(crm_contact_store)
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    contact = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/contacts", json={"crm_contact_id": "ethan-1"}
+    ).json()
+
+    resp = client.patch(
+        f"/client-crm/clients/{created_client['client_id']}/contacts/{contact['client_contact_id']}",
+        json={"role_notes": "Introduced us to the CFO"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["role_notes"] == "Introduced us to the CFO"
+    assert body["is_primary_contact"] is False  # untouched
+
+
+def test_update_client_contact_missing_is_404(contact_test_client):
+    client, _service, _crm_contact_store = contact_test_client
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.patch(
+        f"/client-crm/clients/{created_client['client_id']}/contacts/does-not-exist", json={"role_notes": "x"}
+    )
+    assert resp.status_code == 404
+
+
+def test_archive_and_restore_client_contact_via_patch(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_ethan(crm_contact_store)
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    contact = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/contacts", json={"crm_contact_id": "ethan-1"}
+    ).json()
+    contact_url = f"/client-crm/clients/{created_client['client_id']}/contacts/{contact['client_contact_id']}"
+
+    archived = client.patch(contact_url, json={"archived": True})
+    assert archived.status_code == 200
+    assert archived.json()["archived"] is True
+
+    restored = client.patch(contact_url, json={"archived": False})
+    assert restored.status_code == 200
+    assert restored.json()["archived"] is False
+
+
+def test_no_delete_route_exists_for_client_contacts(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_ethan(crm_contact_store)
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    contact = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/contacts", json={"crm_contact_id": "ethan-1"}
+    ).json()
+    resp = client.delete(f"/client-crm/clients/{created_client['client_id']}/contacts/{contact['client_contact_id']}")
+    assert resp.status_code in (404, 405)
+
+
+def test_switching_primary_contact_demotes_the_other_via_api(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_ethan(crm_contact_store)
+    _seed_crm_contact(crm_contact_store, crm_contact_id="tim-1", first_name="Tim", last_name="Lankau")
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    ethan_contact = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/contacts",
+        json={"crm_contact_id": "ethan-1", "is_primary_contact": True},
+    ).json()
+    tim_contact = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/contacts", json={"crm_contact_id": "tim-1"}
+    ).json()
+
+    resp = client.patch(
+        f"/client-crm/clients/{created_client['client_id']}/contacts/{tim_contact['client_contact_id']}",
+        json={"is_primary_contact": True},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["is_primary_contact"] is True
+
+    contacts = client.get(f"/client-crm/clients/{created_client['client_id']}/contacts").json()
+    by_id = {c["client_contact_id"]: c for c in contacts}
+    assert by_id[ethan_contact["client_contact_id"]]["is_primary_contact"] is False

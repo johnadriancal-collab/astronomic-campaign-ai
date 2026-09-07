@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   buildClientListQueryParams,
+  clientContactCreatePayload,
+  clientContactDisplayName,
+  clientContactFormStateFromContact,
+  clientContactUpdatePatch,
   clientCreatePayload,
   clientFormStateFromClient,
   clientRelationshipClassificationBadgeClass,
@@ -10,11 +14,12 @@ import {
   clientStatusLabel,
   clientUpdatePatch,
   defaultClientListFilters,
+  emptyClientContactFormState,
   emptyClientFormState,
   formatClientDate,
   isClientFormValid,
 } from "./client-crm.ts";
-import type { Client } from "./api.ts";
+import type { Client, ClientContact } from "./api.ts";
 
 function makeClient(overrides: Partial<Client> = {}): Client {
   return {
@@ -213,4 +218,90 @@ test("clientUpdatePatch reflects multiple simultaneous changes", () => {
   form.status = "inactive";
   form.owner = "Ria";
   assert.deepEqual(clientUpdatePatch(form, client), { status: "inactive", owner: "Ria" });
+});
+
+// --- ClientContact (Stage 1D) -------------------------------------------
+
+function makeClientContact(overrides: Partial<ClientContact> = {}): ClientContact {
+  return {
+    client_contact_id: "cc1",
+    client_id: "c1",
+    crm_contact_id: "crm-1",
+    first_name: "Ethan",
+    last_name: "Wong",
+    email: "ethan@hiveasmbld.example.com",
+    phone: null,
+    title: "Co-CEO",
+    is_primary_contact: false,
+    is_decision_maker: false,
+    role_notes: null,
+    created_at: "2026-09-01T00:00:00Z",
+    updated_at: "2026-09-01T00:00:00Z",
+    archived: false,
+    ...overrides,
+  };
+}
+
+test("clientContactDisplayName joins first/last name", () => {
+  assert.equal(clientContactDisplayName(makeClientContact()), "Ethan Wong");
+});
+
+test("clientContactDisplayName falls back to Unnamed contact when both names are missing", () => {
+  assert.equal(clientContactDisplayName(makeClientContact({ first_name: null, last_name: null })), "Unnamed contact");
+});
+
+test("emptyClientContactFormState defaults to no title, not primary, not decision maker", () => {
+  const form = emptyClientContactFormState();
+  assert.equal(form.title, "");
+  assert.equal(form.isPrimaryContact, false);
+  assert.equal(form.isDecisionMaker, false);
+});
+
+test("clientContactCreatePayload carries the picked crm_contact_id and form fields", () => {
+  const form = { title: "VP of BD", isPrimaryContact: true, isDecisionMaker: true, roleNotes: "Warm intro" };
+  const payload = clientContactCreatePayload(form, "crm-42");
+  assert.deepEqual(payload, {
+    crm_contact_id: "crm-42",
+    title: "VP of BD",
+    is_primary_contact: true,
+    is_decision_maker: true,
+    role_notes: "Warm intro",
+  });
+});
+
+test("clientContactCreatePayload defaults blank optional fields to null", () => {
+  const payload = clientContactCreatePayload(emptyClientContactFormState(), "crm-42");
+  assert.equal(payload.title, null);
+  assert.equal(payload.role_notes, null);
+  assert.equal(payload.is_primary_contact, false);
+});
+
+test("clientContactUpdatePatch is empty when nothing changed", () => {
+  const contact = makeClientContact({ title: "Co-CEO" });
+  const form = clientContactFormStateFromContact(contact);
+  assert.deepEqual(clientContactUpdatePatch(form, contact), {});
+});
+
+test("clientContactUpdatePatch includes only the field that actually changed", () => {
+  const contact = makeClientContact({ role_notes: null });
+  const form = clientContactFormStateFromContact(contact);
+  form.roleNotes = "Introduced us to the CFO";
+  assert.deepEqual(clientContactUpdatePatch(form, contact), { role_notes: "Introduced us to the CFO" });
+});
+
+test("clientContactUpdatePatch never includes client_contact_id/crm_contact_id/client_id -- the form state carries none of them", () => {
+  const contact = makeClientContact();
+  const form = clientContactFormStateFromContact(contact);
+  form.title = "New Title";
+  const patch = clientContactUpdatePatch(form, contact);
+  assert.ok(!("client_contact_id" in patch));
+  assert.ok(!("crm_contact_id" in patch));
+  assert.ok(!("client_id" in patch));
+});
+
+test("clientContactUpdatePatch reflects switching is_primary_contact", () => {
+  const contact = makeClientContact({ is_primary_contact: false });
+  const form = clientContactFormStateFromContact(contact);
+  form.isPrimaryContact = true;
+  assert.deepEqual(clientContactUpdatePatch(form, contact), { is_primary_contact: true });
 });

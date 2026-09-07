@@ -7,6 +7,7 @@ ClientStore (see that module's own docstring); removal is always
 """
 
 from abc import ABC, abstractmethod
+from datetime import datetime, timezone
 
 from app.models.client_crm import ClientContact
 
@@ -35,6 +36,31 @@ class ClientContactStore(ABC):
         """Persist mutations to an existing ClientContact, including
         archiving it. Raises ClientContactNotFoundError if
         client_contact_id doesn't exist."""
+
+    @abstractmethod
+    async def create_as_primary(self, contact: ClientContact) -> None:
+        """Client CRM Stage 1D: persist a newly-created ClientContact
+        (contact.is_primary_contact is assumed True) AND, in the same
+        atomic operation, clear is_primary_contact on every OTHER
+        non-archived ClientContact for contact.client_id. This is the
+        only way a new row is inserted with is_primary_contact=True --
+        it exists so "at most one active Primary Contact per Client" is
+        never violated even momentarily (no window where two rows are
+        simultaneously primary), which a separate create() + a separate
+        clear-the-old-one call could not guarantee."""
+
+    @abstractmethod
+    async def set_primary(self, client_id: str, client_contact_id: str) -> ClientContact:
+        """Client CRM Stage 1D: atomically set is_primary_contact=True on
+        the given EXISTING ClientContact and clear it on every OTHER
+        non-archived ClientContact for the same client_id, in one
+        operation -- same invariant as create_as_primary, for the
+        "switch which existing contact is primary" case. Raises
+        ClientContactNotFoundError if client_contact_id doesn't exist or
+        does not belong to client_id. Does not itself reject an archived
+        target -- the service layer owns that validation (Client CRM
+        Stage 1D's own explicit rule: an archived ClientContact must
+        never remain/become Primary)."""
 
     @abstractmethod
     async def list_for_client(self, client_id: str) -> list[ClientContact]:
@@ -77,3 +103,20 @@ class MemoryClientContactStore(ClientContactStore):
     async def list_for_crm_contact(self, crm_contact_id: str) -> list[ClientContact]:
         rows = [c for c in self._rows.values() if c.crm_contact_id == crm_contact_id]
         return sorted(rows, key=lambda c: c.created_at)
+
+    async def create_as_primary(self, contact: ClientContact) -> None:
+        for other in self._rows.values():
+            if other.client_id == contact.client_id and not other.archived and other.is_primary_contact:
+                self._rows[other.client_contact_id] = other.model_copy(update={"is_primary_contact": False})
+        self._rows[contact.client_contact_id] = contact
+
+    async def set_primary(self, client_id: str, client_contact_id: str) -> ClientContact:
+        target = self._rows.get(client_contact_id)
+        if target is None or target.client_id != client_id:
+            raise ClientContactNotFoundError(client_contact_id)
+        for other in self._rows.values():
+            if other.client_id == client_id and not other.archived and other.is_primary_contact and other.client_contact_id != client_contact_id:
+                self._rows[other.client_contact_id] = other.model_copy(update={"is_primary_contact": False})
+        updated = target.model_copy(update={"is_primary_contact": True, "updated_at": datetime.now(timezone.utc)})
+        self._rows[client_contact_id] = updated
+        return updated

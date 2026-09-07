@@ -30,8 +30,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.dependencies import get_client_crm_service
-from app.models.client_crm import Client, ClientPage, ClientRelationshipClassification, ClientStatus
-from app.services.client_crm_service import ClientCrmService, ClientNotFound
+from app.models.client_crm import Client, ClientContact, ClientPage, ClientRelationshipClassification, ClientStatus
+from app.services.client_crm_service import ClientContactNotFound, ClientCrmService, ClientNotFound
 
 router = APIRouter(prefix="/client-crm", tags=["client-crm"])
 
@@ -63,6 +63,32 @@ class ClientUpdateRequest(BaseModel):
     next_action: str | None = None
     next_action_due: date | None = None
     archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
+
+
+class ClientContactCreateRequest(BaseModel):
+    """Client CRM Stage 1D. `crm_contact_id` is required -- V1 has no
+    free-text-only person-creation path (see this stage's own STOP
+    report). Snapshot fields (name/email/phone) are populated server-side
+    from the canonical Contact, not accepted here."""
+
+    crm_contact_id: str
+    title: str | None = None  # role AT THIS CLIENT, e.g. "VP of BD"
+    is_primary_contact: bool = False
+    is_decision_maker: bool = False
+    role_notes: str | None = None
+
+
+class ClientContactUpdateRequest(BaseModel):
+    """Every field optional -- a genuine partial PATCH. No crm_contact_id/
+    snapshot fields here -- re-linking to a different person isn't
+    supported in V1 (archive this relationship and add a new one
+    instead)."""
+
+    title: str | None = None
+    is_primary_contact: bool | None = None
+    is_decision_maker: bool | None = None
+    role_notes: str | None = None
+    archived: bool | None = None
 
 
 @router.get("/clients", response_model=ClientPage)
@@ -124,6 +150,41 @@ async def update_client(
     try:
         return await service.update_client(client_id, payload.model_dump(exclude_unset=True))
     except ClientNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/clients/{client_id}/contacts", response_model=list[ClientContact])
+async def list_client_contacts(client_id: str, service: ClientCrmService = Depends(get_client_crm_service)):
+    try:
+        return await service.list_client_contacts(client_id)
+    except ClientNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/clients/{client_id}/contacts", response_model=ClientContact)
+async def create_client_contact(
+    client_id: str, payload: ClientContactCreateRequest, service: ClientCrmService = Depends(get_client_crm_service)
+):
+    try:
+        return await service.create_client_contact(client_id, payload.model_dump())
+    except ClientNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/clients/{client_id}/contacts/{client_contact_id}", response_model=ClientContact)
+async def update_client_contact(
+    client_id: str,
+    client_contact_id: str,
+    payload: ClientContactUpdateRequest,
+    service: ClientCrmService = Depends(get_client_crm_service),
+):
+    try:
+        return await service.update_client_contact(client_id, client_contact_id, payload.model_dump(exclude_unset=True))
+    except (ClientNotFound, ClientContactNotFound) as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

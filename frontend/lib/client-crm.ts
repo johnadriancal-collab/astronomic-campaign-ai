@@ -5,7 +5,16 @@
 // (people/prospects) and distinct from a "dinner" (Engagement, not built
 // yet) -- see app/models/client_crm.py's own docstring on the backend.
 
-import type { Client, ClientCreateInput, ClientRelationshipClassification, ClientStatus, ClientUpdateInput } from "@/lib/api";
+import type {
+  Client,
+  ClientContact,
+  ClientContactCreateInput,
+  ClientContactUpdateInput,
+  ClientCreateInput,
+  ClientRelationshipClassification,
+  ClientStatus,
+  ClientUpdateInput,
+} from "@/lib/api";
 
 export const CLIENT_STATUS_OPTIONS: { value: ClientStatus; label: string }[] = [
   { value: "active", label: "Active" },
@@ -215,5 +224,59 @@ export function clientUpdatePatch(form: ClientFormState, original: Client): Clie
   const nextActionDue = form.nextActionDue || null;
   if (nextActionDue !== original.next_action_due) patch.next_action_due = nextActionDue;
 
+  return patch;
+}
+
+// --- ClientContact (Stage 1D) -------------------------------------------
+
+export function clientContactDisplayName(contact: Pick<ClientContact, "first_name" | "last_name">): string {
+  return [contact.first_name, contact.last_name].filter(Boolean).join(" ") || "Unnamed contact";
+}
+
+export interface ClientContactFormState {
+  title: string;
+  isPrimaryContact: boolean;
+  isDecisionMaker: boolean;
+  roleNotes: string;
+}
+
+export function emptyClientContactFormState(): ClientContactFormState {
+  return { title: "", isPrimaryContact: false, isDecisionMaker: false, roleNotes: "" };
+}
+
+export function clientContactFormStateFromContact(contact: ClientContact): ClientContactFormState {
+  return {
+    title: contact.title ?? "",
+    isPrimaryContact: contact.is_primary_contact,
+    isDecisionMaker: contact.is_decision_maker,
+    roleNotes: contact.role_notes ?? "",
+  };
+}
+
+/** CREATE only -- `crmContactId` comes from the picker, not the form
+ * state itself (there is no free-text way to set it -- see this stage's
+ * own STOP report on why no free-text Primary Contact field exists). */
+export function clientContactCreatePayload(form: ClientContactFormState, crmContactId: string): ClientContactCreateInput {
+  return {
+    crm_contact_id: crmContactId,
+    title: form.title.trim() || null,
+    is_primary_contact: form.isPrimaryContact,
+    is_decision_maker: form.isDecisionMaker,
+    role_notes: form.roleNotes.trim() || null,
+  };
+}
+
+/** A genuine partial PATCH, same diff-only convention as
+ * clientUpdatePatch -- crm_contact_id/snapshot fields are never part of
+ * this form at all (re-linking to a different person isn't supported in
+ * V1), so there is nothing here that could ever leak them. */
+export function clientContactUpdatePatch(form: ClientContactFormState, original: ClientContact): ClientContactUpdateInput {
+  const patch: ClientContactUpdateInput = {};
+  const title = form.title.trim() || null;
+  if (title !== original.title) patch.title = title;
+  if (form.isPrimaryContact !== original.is_primary_contact) patch.is_primary_contact = form.isPrimaryContact;
+  if (form.isDecisionMaker !== original.is_decision_maker) patch.is_decision_maker = form.isDecisionMaker;
+  const roleNotes = form.roleNotes.trim() || null;
+  if (roleNotes !== original.role_notes) patch.role_notes = roleNotes;
   return patch;
 }

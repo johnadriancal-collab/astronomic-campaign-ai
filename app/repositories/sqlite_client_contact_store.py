@@ -11,6 +11,8 @@ Stage 1A (2026-09-07): a brand-new table, no prior deployed shape to
 accommodate.
 """
 
+from datetime import datetime, timezone
+
 import aiosqlite
 
 from app.models.client_crm import ClientContact
@@ -120,3 +122,69 @@ class SQLiteClientContactStore(ClientContactStore):
         rows = await cursor.fetchall()
         await cursor.close()
         return [_row_to_contact(row) for row in rows]
+
+    async def _other_active_primaries(self, client_id: str, exclude_client_contact_id: str | None) -> list[ClientContact]:
+        cursor = await self._connection.execute(
+            "SELECT * FROM client_contacts WHERE client_id = ?", (client_id,)
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        contacts = [_row_to_contact(row) for row in rows]
+        return [
+            c
+            for c in contacts
+            if not c.archived and c.is_primary_contact and c.client_contact_id != exclude_client_contact_id
+        ]
+
+    async def create_as_primary(self, contact: ClientContact) -> None:
+        # Single connection/transaction: the INSERT of the new primary and
+        # the UPDATEs clearing every other active primary for this Client
+        # commit or roll back together, so there is never a window where
+        # two rows are simultaneously primary for the same client_id.
+        async with sqlite_write(self._connection):
+            others = await self._other_active_primaries(contact.client_id, exclude_client_contact_id=None)
+            for other in others:
+                cleared = other.model_copy(update={"is_primary_contact": False})
+                await self._connection.execute(
+                    "UPDATE client_contacts SET data = ? WHERE client_contact_id = ?",
+                    (cleared.model_dump_json(), cleared.client_contact_id),
+                )
+            await self._connection.execute(
+                "INSERT INTO client_contacts "
+                "(client_contact_id, client_id, crm_contact_id, created_at, updated_at, data) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    contact.client_contact_id,
+                    contact.client_id,
+                    contact.crm_contact_id,
+                    contact.created_at.isoformat(),
+                    contact.updated_at.isoformat(),
+                    contact.model_dump_json(),
+                ),
+            )
+
+    async def set_primary(self, client_id: str, client_contact_id: str) -> ClientContact:
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "SELECT * FROM client_contacts WHERE client_contact_id = ?", (client_contact_id,)
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            target = _row_to_contact(row) if row else None
+            if target is None or target.client_id != client_id:
+                raise ClientContactNotFoundError(client_contact_id)
+
+            others = await self._other_active_primaries(client_id, exclude_client_contact_id=client_contact_id)
+            for other in others:
+                cleared = other.model_copy(update={"is_primary_contact": False})
+                await self._connection.execute(
+                    "UPDATE client_contacts SET data = ? WHERE client_contact_id = ?",
+                    (cleared.model_dump_json(), cleared.client_contact_id),
+                )
+
+            updated = target.model_copy(update={"is_primary_contact": True, "updated_at": datetime.now(timezone.utc)})
+            await self._connection.execute(
+                "UPDATE client_contacts SET updated_at = ?, data = ? WHERE client_contact_id = ?",
+                (updated.updated_at.isoformat(), updated.model_dump_json(), updated.client_contact_id),
+            )
+        return updated

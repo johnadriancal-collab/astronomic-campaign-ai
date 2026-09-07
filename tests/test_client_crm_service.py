@@ -13,21 +13,34 @@ import pytest_asyncio
 
 from app.models.activity import ActivityCategory
 from app.models.client_crm import ClientRelationshipClassification, ClientStatus
-from app.repositories.client_contact_store import MemoryClientContactStore
+from app.models.crm import CrmContact
+from app.repositories.client_contact_store import ClientContactStore, MemoryClientContactStore
 from app.repositories.client_note_store import MemoryClientNoteStore
 from app.repositories.client_store import ClientStore, MemoryClientStore
+from app.repositories.crm_contact_store import CrmContactStore, MemoryCrmContactStore
 from app.repositories.engagement_store import MemoryEngagementStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.services.activity_log_service import ActivityLogService
 from app.repositories.activity_event_store import MemoryActivityEventStore
-from app.services.client_crm_service import ClientCrmService, ClientNotFound
+from app.services.client_crm_service import ClientContactNotFound, ClientCrmService, ClientNotFound
 
 pytestmark = pytest.mark.asyncio
 
 
-def _make_service(client_store: ClientStore) -> tuple[ClientCrmService, ActivityLogService]:
+def _make_service(
+    client_store: ClientStore,
+    *,
+    client_contact_store: ClientContactStore | None = None,
+    crm_contact_store: CrmContactStore | None = None,
+) -> tuple[ClientCrmService, ActivityLogService]:
     activity_log = ActivityLogService(MemoryActivityEventStore())
-    return ClientCrmService(client_store=client_store, activity_log=activity_log), activity_log
+    service = ClientCrmService(
+        client_store=client_store,
+        activity_log=activity_log,
+        client_contact_store=client_contact_store or MemoryClientContactStore(),
+        crm_contact_store=crm_contact_store or MemoryCrmContactStore(),
+    )
+    return service, activity_log
 
 
 @pytest.fixture
@@ -43,6 +56,45 @@ async def sqlite_service(tmp_path):
     service, activity_log = _make_service(store)
     yield service, activity_log
     await store.close()
+
+
+# =====================================================================
+# ClientContact -- Client CRM Stage 1D (2026-09-07)
+# =====================================================================
+
+
+@pytest_asyncio.fixture
+async def contact_service(tmp_path):
+    """Same as memory_service, but ALSO exposes the ClientContactStore and
+    CrmContactStore directly (needed to seed a canonical CrmContact before
+    linking it, and to inspect ClientContact rows Stage 1D's own service
+    methods don't otherwise return, e.g. list_for_crm_contact)."""
+    client_store = MemoryClientStore()
+    client_contact_store = MemoryClientContactStore()
+    crm_contact_store = MemoryCrmContactStore()
+    service, activity_log = _make_service(
+        client_store, client_contact_store=client_contact_store, crm_contact_store=crm_contact_store
+    )
+    return service, activity_log, client_contact_store, crm_contact_store
+
+
+async def _seed_crm_contact(crm_contact_store: CrmContactStore, **overrides) -> CrmContact:
+    now = datetime.now(timezone.utc)
+    fields = {
+        "crm_contact_id": "ethan-1",
+        "first_name": "Ethan",
+        "last_name": "Wong",
+        "email": "ethan@hiveasmbld.example.com",
+        "phone": None,
+        "title": "Co-CEO",
+        "company": "Hive ASMBLD",
+        "created_at": now,
+        "updated_at": now,
+        **overrides,
+    }
+    contact = CrmContact(**fields)
+    await crm_contact_store.create(contact)
+    return contact
 
 
 # =====================================================================
@@ -405,3 +457,224 @@ async def test_sqlite_service_create_get_list_update_archive_parity(sqlite_servi
 
     activity_page = await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)
     assert [e.event_type for e in activity_page.items] == ["client.archived", "client.updated", "client.created"]  # newest first
+
+
+# =====================================================================
+# ClientContact -- Client CRM Stage 1D (2026-09-07)
+# =====================================================================
+
+
+async def test_create_client_contact_requires_a_real_parent_client(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+
+    with pytest.raises(ClientNotFound):
+        await service.create_client_contact("does-not-exist", {"crm_contact_id": "ethan-1"})
+
+
+async def test_list_client_contacts_requires_a_real_parent_client(contact_service):
+    service, _activity_log, _client_contact_store, _crm_contact_store = contact_service
+    with pytest.raises(ClientNotFound):
+        await service.list_client_contacts("does-not-exist")
+
+
+async def test_create_client_contact_requires_crm_contact_id(contact_service):
+    service, _activity_log, _client_contact_store, _crm_contact_store = contact_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_contact(client.client_id, {})
+
+
+async def test_create_client_contact_rejects_unknown_crm_contact_id(contact_service):
+    service, _activity_log, _client_contact_store, _crm_contact_store = contact_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_contact(client.client_id, {"crm_contact_id": "does-not-exist"})
+
+
+async def test_create_client_contact_rejects_archived_crm_contact(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store, archived=True)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1"})
+
+
+async def test_create_client_contact_links_existing_crm_contact_and_populates_snapshot(contact_service):
+    service, activity_log, _client_contact_store, crm_contact_store = contact_service
+    ethan = await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+
+    contact = await service.create_client_contact(
+        client.client_id, {"crm_contact_id": "ethan-1", "is_primary_contact": True, "title": "Co-CEO"}
+    )
+
+    assert contact.client_id == client.client_id
+    assert contact.crm_contact_id == "ethan-1"
+    assert contact.first_name == "Ethan"
+    assert contact.last_name == "Wong"
+    assert contact.email == ethan.email
+    assert contact.phone is None  # ethan has no phone on file -- never fabricated
+    assert contact.title == "Co-CEO"  # relationship-specific, from the request, not copied from CrmContact.title
+    assert contact.is_primary_contact is True
+    assert contact.archived is False
+
+    # The canonical Contact is completely unchanged.
+    assert (await crm_contact_store.get("ethan-1")).model_dump() == ethan.model_dump()
+
+    activity_page = await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)
+    assert activity_page.items[0].event_type == "client_contact.created"
+
+
+async def test_create_client_contact_never_creates_a_duplicate_crm_contact(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1"})
+
+    assert len(await crm_contact_store.list()) == 1
+
+
+async def test_client_detail_lists_linked_contact(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1", "is_primary_contact": True})
+
+    contacts = await service.list_client_contacts(client.client_id)
+    assert len(contacts) == 1
+    assert contacts[0].first_name == "Ethan"
+
+
+async def test_first_primary_contact_created_is_primary(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    ethan_contact = await service.create_client_contact(
+        client.client_id, {"crm_contact_id": "ethan-1", "is_primary_contact": True}
+    )
+    assert ethan_contact.is_primary_contact is True
+
+
+async def test_creating_a_second_primary_contact_demotes_the_first(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="ethan-1", first_name="Ethan", last_name="Wong")
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="tim-1", first_name="Tim", last_name="Lankau")
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    ethan_contact = await service.create_client_contact(
+        client.client_id, {"crm_contact_id": "ethan-1", "is_primary_contact": True}
+    )
+    tim_contact = await service.create_client_contact(
+        client.client_id, {"crm_contact_id": "tim-1", "is_primary_contact": True}
+    )
+
+    contacts = {c.client_contact_id: c for c in await service.list_client_contacts(client.client_id)}
+    assert contacts[tim_contact.client_contact_id].is_primary_contact is True
+    assert contacts[ethan_contact.client_contact_id].is_primary_contact is False
+
+
+async def test_switching_primary_contact_via_update_demotes_the_other(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="ethan-1", first_name="Ethan", last_name="Wong")
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="tim-1", first_name="Tim", last_name="Lankau")
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    ethan_contact = await service.create_client_contact(
+        client.client_id, {"crm_contact_id": "ethan-1", "is_primary_contact": True}
+    )
+    tim_contact = await service.create_client_contact(client.client_id, {"crm_contact_id": "tim-1"})
+    assert tim_contact.is_primary_contact is False
+
+    updated_tim = await service.update_client_contact(
+        client.client_id, tim_contact.client_contact_id, {"is_primary_contact": True}
+    )
+    assert updated_tim.is_primary_contact is True
+
+    refreshed_ethan = await _client_contact_store.get(ethan_contact.client_contact_id)
+    assert refreshed_ethan.is_primary_contact is False
+
+
+async def test_update_client_contact_is_a_genuine_partial_patch(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    contact = await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1", "title": "Co-CEO"})
+
+    updated = await service.update_client_contact(client.client_id, contact.client_contact_id, {"role_notes": "Introduced us to the CFO"})
+    assert updated.role_notes == "Introduced us to the CFO"
+    assert updated.title == "Co-CEO"  # untouched
+    assert updated.is_primary_contact is False  # untouched
+
+
+async def test_archiving_a_client_contact_is_soft_and_reversible(contact_service):
+    service, activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    contact = await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1"})
+
+    archived = await service.update_client_contact(client.client_id, contact.client_contact_id, {"archived": True})
+    assert archived.archived is True
+
+    restored = await service.update_client_contact(client.client_id, contact.client_contact_id, {"archived": False})
+    assert restored.archived is False
+
+    events = [e.event_type for e in (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items]
+    assert "client_contact.archived" in events
+    assert "client_contact.restored" in events
+
+
+async def test_archiving_the_primary_contact_clears_primary_status(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    contact = await service.create_client_contact(
+        client.client_id, {"crm_contact_id": "ethan-1", "is_primary_contact": True}
+    )
+
+    archived = await service.update_client_contact(client.client_id, contact.client_contact_id, {"archived": True})
+    assert archived.archived is True
+    assert archived.is_primary_contact is False
+
+
+async def test_archived_contact_cannot_become_primary(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    contact = await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1"})
+    await service.update_client_contact(client.client_id, contact.client_contact_id, {"archived": True})
+
+    with pytest.raises(ValueError):
+        await service.update_client_contact(client.client_id, contact.client_contact_id, {"is_primary_contact": True})
+
+
+async def test_cannot_archive_and_set_primary_in_the_same_patch(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    contact = await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1"})
+
+    with pytest.raises(ValueError):
+        await service.update_client_contact(
+            client.client_id, contact.client_contact_id, {"archived": True, "is_primary_contact": True}
+        )
+
+
+async def test_update_client_contact_requires_matching_parent_client(contact_service):
+    service, _activity_log, _client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client_a = await service.create_client({"name": "Hive ASMBLD"})
+    client_b = await service.create_client({"name": "Other Co"})
+    contact = await service.create_client_contact(client_a.client_id, {"crm_contact_id": "ethan-1"})
+
+    with pytest.raises(ClientContactNotFound):
+        await service.update_client_contact(client_b.client_id, contact.client_contact_id, {"role_notes": "x"})
+
+
+async def test_no_hard_delete_of_client_contact(contact_service):
+    service, _activity_log, client_contact_store, crm_contact_store = contact_service
+    await _seed_crm_contact(crm_contact_store)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    contact = await service.create_client_contact(client.client_id, {"crm_contact_id": "ethan-1"})
+    await service.update_client_contact(client.client_id, contact.client_contact_id, {"archived": True})
+
+    assert not hasattr(client_contact_store, "delete")
+    assert await client_contact_store.get(contact.client_contact_id) is not None
