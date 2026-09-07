@@ -39,6 +39,11 @@ class ActivityCategory(str, Enum):
     MAIL = "mail"
     # Luma (lu.ma) event-registration sync -- app/services/luma_sync_service.py.
     LUMA = "luma"
+    # Client CRM (app/models/client_crm.py, Stage 1B) -- deliberately its own
+    # category, never CONTACTS: a Client is not a CrmContact, and this event
+    # stream must never be confused with the existing CRM's own contact
+    # activity feed.
+    CLIENT_CRM = "client_crm"
 
 
 class ActivitySource(str, Enum):
@@ -66,6 +71,10 @@ class ActivitySource(str, Enum):
     # Luma (lu.ma) event-registration sync (webhook-triggered or backfill) --
     # app/services/luma_sync_service.py.
     LUMA_SYNC = "luma_sync"
+    # Client CRM (Stage 1B) -- distinct from MANUAL_CRM: "a human editing
+    # Client CRM" is a different product area from "a human editing the
+    # existing Contacts", even though both are manual/session-driven.
+    MANUAL_CLIENT_CRM = "manual_client_crm"
 
 
 class ActivityEvent(BaseModel):

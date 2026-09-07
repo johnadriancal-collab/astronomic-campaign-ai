@@ -81,6 +81,19 @@ class Client(BaseModel):
     archived: bool = False  # soft-delete only, matching CrmContact.archived's own convention
 
 
+class ClientPage(BaseModel):
+    """One page of a filtered/sorted Client list (Stage 1B) -- same shape
+    as CrmContactPage/ActivityEventPage: `items` is exactly the one page
+    the caller asked for, `total` is the full filtered count (before
+    pagination), so a caller never has to fetch everything to know how
+    many pages exist."""
+
+    items: list[Client]
+    total: int
+    page: int
+    page_size: int
+
+
 class ClientContact(BaseModel):
     """A person in their capacity as a client-side stakeholder for one
     specific Client -- e.g. the primary decision-maker at Hive ASMBLD.

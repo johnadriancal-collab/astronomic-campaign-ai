@@ -88,6 +88,16 @@ def client(auth_svc):
     async def crm_contacts_read():
         return [{"crm_contact_id": "real-crm-data"}]
 
+    @app.get("/client-crm/clients")  # stands in for the real Client CRM list route (Stage 1B) --
+    # deliberately NOT under /crm/, so the service-read token's own "/crm/* GET" prefix rule must
+    # never cover it (see test_service_read_token_gets_403_for_client_crm below).
+    async def client_crm_clients_read():
+        return [{"client_id": "real-client-crm-data"}]
+
+    @app.post("/client-crm/clients")  # stands in for the real Client CRM create route (Stage 1B)
+    async def client_crm_clients_write():
+        return {"client_id": "would-have-been-created"}
+
     @app.get("/crm/backup/export")  # stands in for the real full-database backup export
     async def crm_backup_export():
         return {"contacts": ["every-contact-in-the-database"]}
@@ -460,6 +470,55 @@ def test_service_read_token_gets_403_outside_crm_scope(client, configured_servic
 
     assert resp.status_code == 403
     assert "real-private-data" not in resp.text
+
+
+def test_client_crm_requires_a_session(client):
+    """Client CRM (Stage 1B) gets no special treatment -- not in
+    PUBLIC_PATHS, so it's protected by the same default-deny rule as
+    every other private route."""
+    c, _svc = client
+
+    resp = c.get("/client-crm/clients")
+
+    assert resp.status_code == 401
+    assert "real-client-crm-data" not in resp.text
+
+
+def test_client_crm_succeeds_once_authenticated(client):
+    c, _svc = client
+    _login(c)
+
+    resp = c.get("/client-crm/clients")
+
+    assert resp.status_code == 200
+    assert resp.json() == [{"client_id": "real-client-crm-data"}]
+
+
+def test_service_read_token_gets_403_for_client_crm(client, configured_service_read_token):
+    """Client CRM (Stage 1B) deliberately uses the "/client-crm/" prefix,
+    NOT "/crm/" -- proves the existing read-only service token's scope
+    (hardcoded to paths starting with "/crm/") does not automatically
+    cover it. A valid token still gets 403 here, same as any other
+    out-of-scope path."""
+    c, _svc = client
+
+    resp = c.get("/client-crm/clients", headers={"Authorization": f"Bearer {SERVICE_READ_TOKEN}"})
+
+    assert resp.status_code == 403
+    assert "real-client-crm-data" not in resp.text
+
+
+def test_operator_token_gets_403_for_client_crm(client, configured_service_operator_token):
+    """Client CRM (Stage 1B) has no rule in _SERVICE_OPERATOR_RULES --
+    the operator token's own explicit allowlist -- so this identity has
+    zero access, matching Stage 1B's explicit "no scope expansion"
+    instruction without needing to change that allowlist at all."""
+    c, _svc = client
+
+    resp = c.get("/client-crm/clients", headers={"Authorization": f"Bearer {SERVICE_OPERATOR_TOKEN}"})
+
+    assert resp.status_code == 403
+    assert "real-client-crm-data" not in resp.text
 
 
 def test_invalid_service_token_is_rejected(client, configured_service_read_token):

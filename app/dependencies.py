@@ -21,6 +21,7 @@ from app.services.astro_export_store import AstroExportStore
 from app.services.auth_service import AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
+from app.services.client_crm_service import ClientCrmService
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.email_intake_service import EmailIntakeService
@@ -59,6 +60,10 @@ async def get_email_message_sync_service(request: Request) -> EmailMessageSyncSe
 
 async def get_crm_service(request: Request) -> CrmService:
     return request.app.state.crm_service
+
+
+async def get_client_crm_service(request: Request) -> ClientCrmService:
+    return request.app.state.client_crm_service
 
 
 async def get_crm_import_service(request: Request) -> CrmImportService:

@@ -50,6 +50,7 @@ from app.api.astro_ai import router as astro_ai_router
 from app.api.auth import router as auth_router
 from app.api.campaign import router as campaign_router
 from app.api.campaign_manager import router as campaign_manager_router
+from app.api.client_crm import router as client_crm_router
 from app.api.crm import router as crm_router
 from app.api.email_intake import crm_router as email_intake_crm_router
 from app.api.email_intake import sync_router as email_intake_sync_router
@@ -66,6 +67,7 @@ from app.repositories.sqlite_activity_event_store import SQLiteActivityEventStor
 from app.repositories.sqlite_auth_session_store import SQLiteAuthSessionStore
 from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
 from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
+from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.repositories.sqlite_crm_contact_list_member_store import SQLiteCrmContactListMemberStore
 from app.repositories.sqlite_crm_contact_list_store import SQLiteCrmContactListStore
 from app.repositories.sqlite_crm_contact_store import SQLiteCrmContactStore
@@ -114,6 +116,7 @@ from app.services.astro_mailbox_tools import AstroMailboxTools
 from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
+from app.services.client_crm_service import ClientCrmService
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.email_intake_service import EmailIntakeService
@@ -145,6 +148,7 @@ async def lifespan(app: FastAPI):
     email_sequence_step_store = SQLiteEmailSequenceStepStore(settings.database_path)
     email_message_store = SQLiteEmailMessageStore(settings.database_path)
     email_message_event_store = SQLiteEmailMessageEventStore(settings.database_path)
+    client_store = SQLiteClientStore(settings.database_path)
     crm_contact_store = SQLiteCrmContactStore(settings.database_path)
     crm_custom_field_store = SQLiteCrmCustomFieldStore(settings.database_path)
     crm_import_batch_store = SQLiteCrmImportBatchStore(settings.database_path)
@@ -185,6 +189,7 @@ async def lifespan(app: FastAPI):
     await email_sequence_step_store.connect()
     await email_message_store.connect()
     await email_message_event_store.connect()
+    await client_store.connect()
     await crm_contact_store.connect()
     await crm_custom_field_store.connect()
     await crm_import_batch_store.connect()
@@ -244,6 +249,7 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
     )
 
+    app.state.client_crm_service = ClientCrmService(client_store=client_store, activity_log=activity_log_service)
     crm_service = CrmService(
         contact_store=crm_contact_store,
         custom_field_store=crm_custom_field_store,
@@ -475,6 +481,7 @@ async def lifespan(app: FastAPI):
     await email_sequence_step_store.close()
     await email_message_store.close()
     await email_message_event_store.close()
+    await client_store.close()
     await crm_contact_store.close()
     await crm_custom_field_store.close()
     await crm_import_batch_store.close()
@@ -526,6 +533,7 @@ app.include_router(campaign_manager_router)
 app.include_router(leads_router)
 app.include_router(sync_router)
 app.include_router(crm_router)
+app.include_router(client_crm_router)
 app.include_router(astro_router)
 app.include_router(activity_router)
 app.include_router(email_intake_sync_router)
