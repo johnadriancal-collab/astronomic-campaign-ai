@@ -16,5 +16,6 @@ export interface TopLevelNavArea {
 export const TOP_LEVEL_NAV_AREAS: TopLevelNavArea[] = [
   { href: "/", label: "Astro AI" },
   { href: "/manager", label: "Campaign Manager" },
-  { href: "/crm", label: "CRM" },
+  { href: "/crm", label: "Contacts" },
+  { href: "/clients", label: "Client CRM" },
 ];

@@ -1687,3 +1687,101 @@ export interface AstroChatMessage {
 export function sendAstroChatMessage(messages: AstroChatMessage[]): Promise<AstroChatMessage> {
   return post<AstroChatMessage>("/astro-ai/chat", { messages });
 }
+
+// --- Client CRM (Stage 1B backend, Stage 1C frontend) ----------------------
+//
+// Astronomic's relationship/sales system of record for organizations (a
+// Client/Account) -- deliberately separate from CrmContact above, which
+// stays the people/prospect/guest/investor contact database. A Client is
+// not a CrmContact, and a Client is not a dinner. Mirrors
+// app/api/client_crm.py's exact contract: "/client-crm/clients", NOT
+// "/crm/..." (that prefix intentionally keeps this outside the existing
+// CRM's own read-only service-token scope -- see that backend module's
+// own docstring). ClientContact/Engagement/ClientNote have no routes yet
+// (later stages) -- nothing here references them.
+
+export type ClientStatus = "active" | "inactive";
+
+export type ClientRelationshipClassification =
+  | "nurture"
+  | "opportunity"
+  | "referral"
+  | "needs_attention"
+  | "closed_inactive";
+
+export interface Client {
+  client_id: string;
+  name: string;
+  website: string | null;
+  industry: string | null;
+  status: ClientStatus;
+  relationship_classification: ClientRelationshipClassification | null;
+  owner: string | null;
+  next_action: string | null;
+  next_action_due: string | null; // "YYYY-MM-DD"
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+}
+
+export interface ClientPage {
+  items: Client[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+// Every field optional here (even `name`) -- create validation ("name is
+// required") lives in the caller's own form-level check
+// (lib/client-crm.ts's clientCreatePayload), not in this type, matching
+// how MailLeadStartTriggerInput etc. keep the wire shape separate from
+// client-side validation.
+export interface ClientCreateInput {
+  name: string;
+  website?: string | null;
+  industry?: string | null;
+  status?: ClientStatus;
+  relationship_classification?: ClientRelationshipClassification | null;
+  owner?: string | null;
+  next_action?: string | null;
+  next_action_due?: string | null;
+}
+
+export type ClientUpdateInput = Partial<ClientCreateInput> & { archived?: boolean };
+
+export interface ListClientsParams {
+  q?: string;
+  status?: ClientStatus;
+  relationship_classification?: ClientRelationshipClassification;
+  owner?: string;
+  include_archived?: boolean;
+  sort_by?: "name" | "created_at" | "updated_at" | "next_action_due";
+  sort_dir?: "asc" | "desc";
+  page?: number;
+  page_size?: number;
+}
+
+export function listClients(params: ListClientsParams = {}): Promise<ClientPage> {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") query.set(key, String(value));
+  }
+  const qs = query.toString();
+  return request<ClientPage>(`/client-crm/clients${qs ? `?${qs}` : ""}`);
+}
+
+export function createClient(input: ClientCreateInput): Promise<Client> {
+  return post<Client>("/client-crm/clients", input);
+}
+
+export function getClient(clientId: string): Promise<Client> {
+  return request<Client>(`/client-crm/clients/${clientId}`);
+}
+
+export function updateClient(clientId: string, patch: ClientUpdateInput): Promise<Client> {
+  return request<Client>(`/client-crm/clients/${clientId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}

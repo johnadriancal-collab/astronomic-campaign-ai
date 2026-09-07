@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  Briefcase,
   ChartColumn,
   Contact,
   Inbox,
@@ -61,7 +62,14 @@ export function ManagerSidebar() {
           className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
         >
           <Contact className="h-4 w-4" />
-          CRM
+          Contacts
+        </Link>
+        <Link
+          href="/clients"
+          className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
+        >
+          <Briefcase className="h-4 w-4" />
+          Client CRM
         </Link>
       </div>
 

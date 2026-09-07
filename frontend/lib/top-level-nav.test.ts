@@ -15,15 +15,27 @@ test("Campaign Builder is no longer a top-level nav area", () => {
   assert.ok(!labels.includes("Campaign Builder"));
 });
 
-test("Campaign Manager and CRM remain as top-level areas", () => {
+test("Campaign Manager and Contacts (/crm) remain as top-level areas", () => {
   const hrefs = TOP_LEVEL_NAV_AREAS.map((a) => a.href);
   assert.ok(hrefs.includes("/manager"));
   assert.ok(hrefs.includes("/crm"));
 });
 
-test("exactly these three top-level areas exist, in this order", () => {
+test("the /crm area's display label is Contacts, not CRM -- the route itself is unchanged", () => {
+  const contacts = TOP_LEVEL_NAV_AREAS.find((a) => a.href === "/crm");
+  assert.ok(contacts, "expected a /crm top-level area");
+  assert.equal(contacts.label, "Contacts");
+});
+
+test("Client CRM is present at '/clients' as the fourth top-level area (Stage 1C)", () => {
+  const clientCrm = TOP_LEVEL_NAV_AREAS.find((a) => a.href === "/clients");
+  assert.ok(clientCrm, "expected a /clients top-level area");
+  assert.equal(clientCrm.label, "Client CRM");
+});
+
+test("exactly these four top-level areas exist, in this order", () => {
   assert.deepEqual(
     TOP_LEVEL_NAV_AREAS.map((a) => a.href),
-    ["/", "/manager", "/crm"]
+    ["/", "/manager", "/crm", "/clients"]
   );
 });

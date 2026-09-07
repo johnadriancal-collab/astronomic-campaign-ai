@@ -167,7 +167,7 @@ export default function CrmContactsPage() {
     <div className="mx-auto max-w-5xl px-6 py-10">
       <div className="mb-8 flex items-start justify-between gap-4">
         <div>
-          <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">CRM</h1>
+          <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">Contacts</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
             Our own record of known prospects and relationships -- separate from Apollo, separate from Campaign Manager.
           </p>
