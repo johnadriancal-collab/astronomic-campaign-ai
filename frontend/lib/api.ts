@@ -1843,3 +1843,78 @@ export function updateClientContact(
     body: JSON.stringify(patch),
   });
 }
+
+// --- Engagement (Client CRM Stage 1E, 2026-09-07) --------------------------
+// One commercial service/project Astronomic performs for a Client -- a
+// dinner today, another kind of service later. Historical/commercial
+// delivery data only -- see app/services/client_crm_service.py's own
+// Stage 1E docstring for the "never a side-effect source for Client/
+// ClientContact/CrmContact/Luma" rule this API also honors.
+
+export type EngagementType = "investor_dinner" | "customer_dinner" | "sponsorship" | "other";
+export type DinnerProgram = "supernova" | "galaxy" | "aurora" | "other";
+export type EngagementStatus = "planned" | "confirmed" | "completed" | "cancelled";
+export type EngagementContractStatus = "not_sent" | "sent" | "signed";
+export type EngagementPaymentStatus = "unpaid" | "partial" | "paid";
+
+export interface Engagement {
+  engagement_id: string;
+  client_id: string;
+  title: string;
+  engagement_type: EngagementType;
+  dinner_program: DinnerProgram | null;
+  engagement_date: string | null;
+  location: string | null;
+  status: EngagementStatus;
+  owner: string | null;
+  fee: number | null;
+  contract_status: EngagementContractStatus;
+  contract_url: string | null;
+  signed_date: string | null;
+  payment_status: EngagementPaymentStatus;
+  luma_event_id: string | null;
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+}
+
+export interface EngagementCreateInput {
+  title: string;
+  engagement_type: EngagementType;
+  dinner_program?: DinnerProgram | null;
+  engagement_date?: string | null;
+  location?: string | null;
+  status?: EngagementStatus;
+  owner?: string | null;
+  fee?: number | null;
+  contract_status?: EngagementContractStatus;
+  contract_url?: string | null;
+  signed_date?: string | null;
+  payment_status?: EngagementPaymentStatus;
+}
+
+export type EngagementUpdateInput = Partial<EngagementCreateInput> & { archived?: boolean };
+
+export function listClientEngagements(clientId: string): Promise<Engagement[]> {
+  return request<Engagement[]>(`/client-crm/clients/${clientId}/engagements`);
+}
+
+export function createClientEngagement(clientId: string, input: EngagementCreateInput): Promise<Engagement> {
+  return post<Engagement>(`/client-crm/clients/${clientId}/engagements`, input);
+}
+
+export function getClientEngagement(clientId: string, engagementId: string): Promise<Engagement> {
+  return request<Engagement>(`/client-crm/clients/${clientId}/engagements/${engagementId}`);
+}
+
+export function updateClientEngagement(
+  clientId: string,
+  engagementId: string,
+  patch: EngagementUpdateInput
+): Promise<Engagement> {
+  return request<Engagement>(`/client-crm/clients/${clientId}/engagements/${engagementId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}

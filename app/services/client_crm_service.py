@@ -1,9 +1,18 @@
 """
-ClientCrmService -- Client CRM Stage 1B (2026-09-07). Client CRUD only --
-ClientContact/Engagement/ClientNote remain completely inert: their Stage
-1A stores exist, but nothing constructs or wires them into live app state
-yet, and this service never touches them. Their own CRUD arrives in later
-stages.
+ClientCrmService -- Client CRM Stage 1B (2026-09-07), extended for
+ClientContact (Stage 1D) and Engagement (Stage 1E, 2026-09-07).
+ClientNote remains completely inert: its Stage 1A store exists, but
+nothing constructs or wires it into live app state yet, and this service
+never touches it.
+
+Engagement (Stage 1E) is historical/commercial delivery data ONLY --
+creating, updating, or archiving/restoring an Engagement NEVER writes to
+Client (relationship_classification/next_action/owner), ClientContact,
+CrmContact, or anything Luma-related. The only side effect of any
+Engagement write is its own Activity Log event, same as every other
+Client CRM entity. This is a deliberate boundary, not an oversight: see
+this stage's own STOP report for the "historical vs. current Client
+state" architecture this preserves for a future ClientFollowUpRecord.
 
 Archive/restore is deliberately NOT a separate method -- both are just
 update_client(id, {"archived": True/False}) through the same partial-PATCH
@@ -35,10 +44,18 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.models.activity import ActivityCategory, ActivitySource
-from app.models.client_crm import Client, ClientContact, ClientPage, ClientRelationshipClassification, ClientStatus
+from app.models.client_crm import (
+    Client,
+    ClientContact,
+    ClientPage,
+    ClientRelationshipClassification,
+    ClientStatus,
+    Engagement,
+)
 from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
 from app.repositories.crm_contact_store import CrmContactStore
+from app.repositories.engagement_store import EngagementStore
 from app.services.activity_log_service import ActivityLogService
 
 SORTABLE_CLIENT_FIELDS = frozenset({"name", "created_at", "updated_at", "next_action_due"})
@@ -76,6 +93,18 @@ class ClientContactNotFound(Exception):
         super().__init__(f"ClientContact not found: {client_contact_id}")
 
 
+class EngagementNotFound(Exception):
+    """Raised for an engagement_id that doesn't exist, OR that exists but
+    belongs to a different client_id than the one in the URL -- same
+    deliberately-indistinguishable-404 rule as ClientContactNotFound, so
+    an Engagement requested through Client A can never expose (or be
+    mutated through) Client B's URL."""
+
+    def __init__(self, engagement_id: str):
+        self.engagement_id = engagement_id
+        super().__init__(f"Engagement not found: {engagement_id}")
+
+
 class ClientCrmService:
     def __init__(
         self,
@@ -84,11 +113,13 @@ class ClientCrmService:
         activity_log: ActivityLogService,
         client_contact_store: ClientContactStore,
         crm_contact_store: CrmContactStore,
+        engagement_store: EngagementStore,
     ):
         self.client_store = client_store
         self.activity_log = activity_log
         self.client_contact_store = client_contact_store
         self.crm_contact_store = crm_contact_store
+        self.engagement_store = engagement_store
 
     async def _require_client(self, client_id: str) -> Client:
         client = await self.client_store.get(client_id)
@@ -101,6 +132,12 @@ class ClientCrmService:
         if contact is None or contact.client_id != client_id:
             raise ClientContactNotFound(client_contact_id)
         return contact
+
+    async def _require_engagement(self, client_id: str, engagement_id: str) -> Engagement:
+        engagement = await self.engagement_store.get(engagement_id)
+        if engagement is None or engagement.client_id != client_id:
+            raise EngagementNotFound(engagement_id)
+        return engagement
 
     async def create_client(self, fields: dict[str, Any]) -> Client:
         """`fields` is assumed already validated/shaped by the API layer's
@@ -378,5 +415,112 @@ class ClientCrmService:
             entity_type="client_contact",
             entity_id=after.client_contact_id,
             entity_name=display_name,
+            metadata={"client_id": after.client_id},
+        )
+
+    # =====================================================================
+    # Engagement -- Client CRM Stage 1E (2026-09-07). Historical/commercial
+    # delivery data ONLY -- see this module's own docstring for the "never
+    # a side-effect source for Client/ClientContact/CrmContact/Luma" rule.
+    # =====================================================================
+
+    _DINNER_SHAPED_ENGAGEMENT_TYPES = frozenset({"investor_dinner", "customer_dinner"})
+
+    @classmethod
+    def _normalize_dinner_program(cls, engagement_type: Any, dinner_program: Any) -> Any:
+        """Backend stays authoritative regardless of what the frontend
+        sends or fails to clear: `dinner_program` is only ever meaningful
+        for a dinner-shaped `engagement_type` (INVESTOR_DINNER/
+        CUSTOMER_DINNER) -- anything else (SPONSORSHIP/OTHER) always gets
+        it silently forced to None on write, never rejected with an
+        error."""
+        value = engagement_type.value if hasattr(engagement_type, "value") else engagement_type
+        if value not in cls._DINNER_SHAPED_ENGAGEMENT_TYPES:
+            return None
+        return dinner_program
+
+    async def list_client_engagements(self, client_id: str) -> list[Engagement]:
+        await self._require_client(client_id)
+        return await self.engagement_store.list_for_client(client_id)
+
+    async def create_client_engagement(self, client_id: str, fields: dict[str, Any]) -> Engagement:
+        """`fields` is assumed already validated/shaped by the API layer's
+        own EngagementCreateRequest (enum values, field types). No
+        canonical-record linking happens here (unlike ClientContact) --
+        every field is either user-supplied or server-defaulted."""
+        await self._require_client(client_id)
+        fields = _strip_server_owned_fields(fields)
+        title = (fields.get("title") or "").strip()
+        if not title:
+            raise ValueError("Engagement title is required.")
+
+        now = datetime.now(timezone.utc)
+        engagement = Engagement(
+            engagement_id=str(uuid.uuid4()),
+            client_id=client_id,
+            created_at=now,
+            updated_at=now,
+            **{**fields, "title": title},
+        )
+        engagement = engagement.model_copy(
+            update={"dinner_program": self._normalize_dinner_program(engagement.engagement_type, engagement.dinner_program)}
+        )
+        await self.engagement_store.create(engagement)
+        await self.activity_log.record(
+            event_type="engagement.created",
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f'Engagement "{engagement.title}" was created.',
+            entity_type="engagement",
+            entity_id=engagement.engagement_id,
+            entity_name=engagement.title,
+            metadata={"client_id": client_id},
+        )
+        return engagement
+
+    async def get_client_engagement(self, client_id: str, engagement_id: str) -> Engagement:
+        return await self._require_engagement(client_id, engagement_id)
+
+    async def update_client_engagement(self, client_id: str, engagement_id: str, patch: dict[str, Any]) -> Engagement:
+        """Direct partial update -- matches update_client()'s own "no merge
+        rule" base case. `client_id`/`created_at` are stripped from
+        `patch` first; `updated_at` is always server-set to now. Archive/
+        restore is not a separate method -- both are just
+        update_client_engagement(id, {"archived": True/False}), same
+        convention as Client/ClientContact."""
+        engagement = await self._require_engagement(client_id, engagement_id)
+        patch = _strip_server_owned_fields(patch)
+        if "title" in patch:
+            stripped = (patch["title"] or "").strip()
+            if not stripped:
+                raise ValueError("Engagement title cannot be blank.")
+            patch = {**patch, "title": stripped}
+
+        updated = engagement.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
+        updated = updated.model_copy(
+            update={"dinner_program": self._normalize_dinner_program(updated.engagement_type, updated.dinner_program)}
+        )
+        await self.engagement_store.save(updated)
+        await self._record_engagement_update_activity(engagement, updated)
+        return updated
+
+    async def _record_engagement_update_activity(self, before: Engagement, after: Engagement) -> None:
+        """Distinguishes archive/restore from a plain edit by diffing the
+        `archived` flag across the save -- same convention as Client's own
+        _record_update_activity()."""
+        if before.archived == after.archived:
+            event_type, verb = "engagement.updated", "updated"
+        elif after.archived:
+            event_type, verb = "engagement.archived", "archived"
+        else:
+            event_type, verb = "engagement.restored", "restored"
+        await self.activity_log.record(
+            event_type=event_type,
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f'Engagement "{after.title}" was {verb}.',
+            entity_type="engagement",
+            entity_id=after.engagement_id,
+            entity_name=after.title,
             metadata={"client_id": after.client_id},
         )

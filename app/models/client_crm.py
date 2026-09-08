@@ -153,12 +153,35 @@ class EngagementType(str, Enum):
 
 
 class EngagementStatus(str, Enum):
-    """Deliberately small, matching the user's own explicit instruction --
-    no in-progress/no-show/rescheduled sub-states invented here."""
+    """Deliberately small -- describes delivery/logistics state only,
+    never a sales/pipeline probability (that's a future Deal concern, not
+    this). CONFIRMED (Stage 1E) answers a real, distinct operational
+    question -- "is the date/venue locked and guests being invited" --
+    from PLANNED ("still being discussed/scheduled"). A postponement is
+    just an `engagement_date` edit with status unchanged; a fully-failed
+    event's details belong in a future closeout record, not another
+    status value here."""
 
     PLANNED = "planned"
+    CONFIRMED = "confirmed"
     COMPLETED = "completed"
     CANCELLED = "cancelled"
+
+
+class DinnerProgram(str, Enum):
+    """Astronomic's named dinner program/format -- e.g. Supernova is an
+    investor/fundraising-purpose dinner, Galaxy is a fireside/luxury-home
+    format, Aurora is a business-development/customer-purpose dinner.
+    Deliberately a SEPARATE axis from `engagement_type` (Stage 1E): a
+    Galaxy-format dinner can serve either an investor or a customer
+    purpose, so collapsing "which named program" and "what commercial
+    purpose" into one enum would lose real information. Nullable and
+    normally None for a non-dinner Engagement (e.g. SPONSORSHIP)."""
+
+    SUPERNOVA = "supernova"
+    GALAXY = "galaxy"
+    AURORA = "aurora"
+    OTHER = "other"
 
 
 class EngagementContractStatus(str, Enum):
@@ -196,14 +219,36 @@ class Engagement(BaseModel):
 
     `luma_event_id` is a reserved, always-None-today field for a future
     integration point -- Luma (app/models/luma.py) is already a real,
-    live Astronomic system (unlike Deal, which doesn't exist yet), so
-    this one reserved field is kept -- not read or written by anything in
-    Stage 1A."""
+    live Astronomic system (unlike Deal, which doesn't exist yet). Stage
+    1E does not implement any Luma synchronization, auto-create, or
+    attendance calculation -- this field stays a plain optional reference,
+    not read or written by anything yet.
+
+    `owner` (Stage 1E) is this SPECIFIC Engagement's owner/runner --
+    deliberately independent from `Client.owner` (the overall relationship
+    owner), same reasoning that already separates ClientContact.title from
+    CrmContact.title: a dinner can be staffed by someone other than
+    whoever owns the Client relationship overall. Updating an Engagement
+    never writes back to Client.owner (or any other Client field) -- see
+    ClientCrmService's own Stage 1E docstring for the full "Engagement is
+    historical/delivery data, never a side-effect source" rule.
+
+    `location` stays a single flexible free-text field, NOT split into a
+    structured city -- Astronomic wants to record a venue, private
+    residence, or neighborhood here too, not just a city name, and a
+    single free-text field accommodates all of those without guessing at
+    a taxonomy that doesn't exist yet."""
 
     engagement_id: str
     client_id: str
     title: str
     engagement_type: EngagementType
+    # `dinner_program` is Stage 1E's own separate axis -- see
+    # DinnerProgram's own docstring for why this isn't merged into
+    # engagement_type. Normally None for a non-dinner engagement_type
+    # (e.g. SPONSORSHIP); the API layer keeps this authoritative even if
+    # the frontend hides/clears the field for non-dinner types.
+    dinner_program: DinnerProgram | None = None
     # NOT named `date` -- a Pydantic field literally named the same as its
     # own `date` type breaks: Python's annotated-assignment evaluation
     # order binds the default value to the name BEFORE evaluating the
@@ -216,6 +261,8 @@ class Engagement(BaseModel):
     # engagement may not have a firm date locked in yet.
     location: str | None = None
     status: EngagementStatus = EngagementStatus.PLANNED
+    owner: str | None = None  # free text, no auth-identity system exists yet -- same
+    # placeholder convention as Client.owner/ActivityEvent.actor/ClientContact fields.
     fee: float | None = None
     contract_status: EngagementContractStatus = EngagementContractStatus.NOT_SENT
     contract_url: str | None = None

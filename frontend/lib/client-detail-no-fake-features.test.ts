@@ -5,21 +5,27 @@ import { test } from "node:test";
 // Stage 1C's Client detail page must not fabricate data for features that
 // don't exist yet (Pipeline, follow-up automation, analytics) -- scanned
 // directly from source, same "no component-render harness" convention as
-// sidebar-nav-source.test.ts. Stage 1D adds a REAL Contacts section (the
-// ClientContact linking feature actually exists now), so "no fake
-// Contacts" is no longer part of this guard -- see the Contacts-specific
-// tests below instead.
+// sidebar-nav-source.test.ts. Stage 1D added a REAL Contacts section and
+// Stage 1E adds a REAL Engagements section (the underlying features
+// actually exist now), so "no fake Contacts"/"no fake Engagements" is not
+// part of this guard -- see their own dedicated tests below instead.
 
 const CLIENT_DETAIL_PAGE = readFileSync(new URL("../app/clients/[id]/page.tsx", import.meta.url), "utf-8");
 
-test("no hardcoded/fake tab navigation for Dinners/Deals exists yet", () => {
-  for (const forbidden of [/>Dinners</, />Deals</, /TabsTab/]) {
+test("no hardcoded/fake tab navigation for Deals exists yet", () => {
+  for (const forbidden of [/>Deals</, /TabsTab/]) {
     assert.doesNotMatch(CLIENT_DETAIL_PAGE, forbidden);
   }
 });
 
 test("no fabricated counts/placeholders for unbuilt features", () => {
-  for (const forbidden of [/dinner count/i, /revenue/i, /follow-up status/i]) {
+  for (const forbidden of [/revenue/i, /follow-up status/i]) {
+    assert.doesNotMatch(CLIENT_DETAIL_PAGE, forbidden);
+  }
+});
+
+test("no fabricated Closeout/Day 3/30/90 data anywhere on the Client page", () => {
+  for (const forbidden of [/Closeout/, /Day 3\b/, /Day 30/, /Day 90/, /turnout/i, /guest quality/i, /dinner dynamics/i]) {
     assert.doesNotMatch(CLIENT_DETAIL_PAGE, forbidden);
   }
 });
@@ -49,4 +55,17 @@ test("no hard-delete control exists for a ClientContact relationship either", ()
 
 test("a linked Contact links back to its canonical /crm/{id} record", () => {
   assert.match(CLIENT_DETAIL_PAGE, /\/crm\/\$\{contact\.crm_contact_id\}/);
+});
+
+// --- Stage 1E: real Engagements section ------------------------------------
+
+test("a real Engagements section is present, linking to the Engagement detail route", () => {
+  assert.match(CLIENT_DETAIL_PAGE, /Engagements/);
+  assert.match(CLIENT_DETAIL_PAGE, /Add Engagement/);
+  assert.match(CLIENT_DETAIL_PAGE, /\/clients\/\$\{client\.client_id\}\/engagements\/\$\{engagement\.engagement_id\}/);
+});
+
+test("no hard-delete control exists for an Engagement either", () => {
+  assert.doesNotMatch(CLIENT_DETAIL_PAGE, /Delete Engagement/);
+  assert.doesNotMatch(CLIENT_DETAIL_PAGE, /deleteClientEngagement/);
 });

@@ -69,6 +69,7 @@ from app.repositories.sqlite_campaign_lead_store import SQLiteCampaignLeadStore
 from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
 from app.repositories.sqlite_client_contact_store import SQLiteClientContactStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
+from app.repositories.sqlite_engagement_store import SQLiteEngagementStore
 from app.repositories.sqlite_crm_contact_list_member_store import SQLiteCrmContactListMemberStore
 from app.repositories.sqlite_crm_contact_list_store import SQLiteCrmContactListStore
 from app.repositories.sqlite_crm_contact_store import SQLiteCrmContactStore
@@ -151,6 +152,7 @@ async def lifespan(app: FastAPI):
     email_message_event_store = SQLiteEmailMessageEventStore(settings.database_path)
     client_store = SQLiteClientStore(settings.database_path)
     client_contact_store = SQLiteClientContactStore(settings.database_path)
+    engagement_store = SQLiteEngagementStore(settings.database_path)
     crm_contact_store = SQLiteCrmContactStore(settings.database_path)
     crm_custom_field_store = SQLiteCrmCustomFieldStore(settings.database_path)
     crm_import_batch_store = SQLiteCrmImportBatchStore(settings.database_path)
@@ -193,6 +195,7 @@ async def lifespan(app: FastAPI):
     await email_message_event_store.connect()
     await client_store.connect()
     await client_contact_store.connect()
+    await engagement_store.connect()
     await crm_contact_store.connect()
     await crm_custom_field_store.connect()
     await crm_import_batch_store.connect()
@@ -257,6 +260,7 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
         client_contact_store=client_contact_store,
         crm_contact_store=crm_contact_store,
+        engagement_store=engagement_store,
     )
     crm_service = CrmService(
         contact_store=crm_contact_store,
@@ -491,6 +495,7 @@ async def lifespan(app: FastAPI):
     await email_message_event_store.close()
     await client_store.close()
     await client_contact_store.close()
+    await engagement_store.close()
     await crm_contact_store.close()
     await crm_custom_field_store.close()
     await crm_import_batch_store.close()

@@ -29,6 +29,7 @@ from app.models.client_crm import (
     ClientNoteType,
     ClientRelationshipClassification,
     ClientStatus,
+    DinnerProgram,
     Engagement,
     EngagementContractStatus,
     EngagementPaymentStatus,
@@ -166,9 +167,11 @@ def test_client_contact_crm_contact_id_defaults_to_none():
 
 def test_engagement_json_round_trip_preserves_every_field():
     engagement = _engagement(
+        dinner_program=DinnerProgram.SUPERNOVA,
         engagement_date=date(2026, 9, 22),
         location="San Francisco",
         status=EngagementStatus.COMPLETED,
+        owner="Chris",
         fee=15000.0,
         contract_status=EngagementContractStatus.SIGNED,
         contract_url="https://drive.example.com/contract",
@@ -178,6 +181,29 @@ def test_engagement_json_round_trip_preserves_every_field():
     )
     restored = Engagement.model_validate_json(engagement.model_dump_json())
     assert restored == engagement
+
+
+def test_engagement_status_includes_confirmed():
+    """Stage 1E: PLANNED -> CONFIRMED -> COMPLETED, with CANCELLED
+    reachable from either PLANNED or CONFIRMED."""
+    engagement = _engagement(status=EngagementStatus.CONFIRMED)
+    assert engagement.status == EngagementStatus.CONFIRMED
+
+
+def test_dinner_program_defaults_to_none():
+    engagement = _engagement()
+    assert engagement.dinner_program is None
+
+
+def test_dinner_program_every_value_round_trips():
+    for program in DinnerProgram:
+        engagement = _engagement(dinner_program=program)
+        assert Engagement.model_validate_json(engagement.model_dump_json()).dinner_program == program
+
+
+def test_engagement_owner_defaults_to_none():
+    engagement = _engagement()
+    assert engagement.owner is None
 
 
 def test_engagement_defaults_to_planned_with_no_deal_relationship_field():

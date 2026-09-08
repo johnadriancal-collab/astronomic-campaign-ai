@@ -1,9 +1,10 @@
-// Pure logic for Client CRM (Stage 1C) -- kept separate from page/
-// component code so it's unit-testable without rendering React, same
-// split as lib/mail.ts and lib/mail-trigger.ts. Client is Astronomic's
-// relationship/sales record for organizations -- distinct from CrmContact
-// (people/prospects) and distinct from a "dinner" (Engagement, not built
-// yet) -- see app/models/client_crm.py's own docstring on the backend.
+// Pure logic for Client CRM (Stage 1C, extended 1D/1E) -- kept separate
+// from page/component code so it's unit-testable without rendering React,
+// same split as lib/mail.ts and lib/mail-trigger.ts. Client is
+// Astronomic's relationship/sales record for organizations -- distinct
+// from CrmContact (people/prospects) and distinct from an Engagement (one
+// commercial service/project delivered for a Client, e.g. a dinner) --
+// see app/models/client_crm.py's own docstring on the backend.
 
 import type {
   Client,
@@ -14,6 +15,14 @@ import type {
   ClientRelationshipClassification,
   ClientStatus,
   ClientUpdateInput,
+  DinnerProgram,
+  Engagement,
+  EngagementContractStatus,
+  EngagementCreateInput,
+  EngagementPaymentStatus,
+  EngagementStatus,
+  EngagementType,
+  EngagementUpdateInput,
 } from "@/lib/api";
 
 export const CLIENT_STATUS_OPTIONS: { value: ClientStatus; label: string }[] = [
@@ -278,5 +287,212 @@ export function clientContactUpdatePatch(form: ClientContactFormState, original:
   if (form.isDecisionMaker !== original.is_decision_maker) patch.is_decision_maker = form.isDecisionMaker;
   const roleNotes = form.roleNotes.trim() || null;
   if (roleNotes !== original.role_notes) patch.role_notes = roleNotes;
+  return patch;
+}
+
+// --- Engagement (Stage 1E) -----------------------------------------------
+
+export const ENGAGEMENT_TYPE_OPTIONS: { value: EngagementType; label: string }[] = [
+  { value: "investor_dinner", label: "Investor Dinner" },
+  { value: "customer_dinner", label: "Customer Dinner" },
+  { value: "sponsorship", label: "Sponsorship" },
+  { value: "other", label: "Other" },
+];
+
+export function engagementTypeLabel(value: EngagementType): string {
+  return ENGAGEMENT_TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+// Only these two engagement_type values are "dinner-shaped" -- matches
+// the backend's own authoritative normalization in ClientCrmService
+// (_normalize_dinner_program). The frontend uses this ONLY to decide
+// whether to show/clear the Dinner Program field -- the backend remains
+// the source of truth regardless of what the frontend sends.
+const DINNER_SHAPED_ENGAGEMENT_TYPES = new Set<EngagementType>(["investor_dinner", "customer_dinner"]);
+
+export function isDinnerShapedEngagementType(value: EngagementType): boolean {
+  return DINNER_SHAPED_ENGAGEMENT_TYPES.has(value);
+}
+
+export const DINNER_PROGRAM_OPTIONS: { value: DinnerProgram; label: string }[] = [
+  { value: "supernova", label: "Supernova" },
+  { value: "galaxy", label: "Galaxy" },
+  { value: "aurora", label: "Aurora" },
+  { value: "other", label: "Other" },
+];
+
+export function dinnerProgramLabel(value: DinnerProgram | null): string {
+  if (value === null) return "—";
+  return DINNER_PROGRAM_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export const ENGAGEMENT_STATUS_OPTIONS: { value: EngagementStatus; label: string }[] = [
+  { value: "planned", label: "Planned" },
+  { value: "confirmed", label: "Confirmed" },
+  { value: "completed", label: "Completed" },
+  { value: "cancelled", label: "Cancelled" },
+];
+
+export function engagementStatusLabel(value: EngagementStatus): string {
+  return ENGAGEMENT_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export function engagementStatusBadgeClass(status: EngagementStatus): string {
+  switch (status) {
+    case "confirmed":
+      return "bg-blue-100 text-blue-800";
+    case "completed":
+      return "bg-emerald-100 text-emerald-800";
+    case "cancelled":
+      return "bg-secondary text-muted-foreground";
+    case "planned":
+    default:
+      return "bg-amber-100 text-amber-800";
+  }
+}
+
+export const ENGAGEMENT_CONTRACT_STATUS_OPTIONS: { value: EngagementContractStatus; label: string }[] = [
+  { value: "not_sent", label: "Not Sent" },
+  { value: "sent", label: "Sent" },
+  { value: "signed", label: "Signed" },
+];
+
+export function engagementContractStatusLabel(value: EngagementContractStatus): string {
+  return ENGAGEMENT_CONTRACT_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export const ENGAGEMENT_PAYMENT_STATUS_OPTIONS: { value: EngagementPaymentStatus; label: string }[] = [
+  { value: "unpaid", label: "Unpaid" },
+  { value: "partial", label: "Partial" },
+  { value: "paid", label: "Paid" },
+];
+
+export function engagementPaymentStatusLabel(value: EngagementPaymentStatus): string {
+  return ENGAGEMENT_PAYMENT_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export function formatEngagementDate(iso: string | null): string {
+  if (!iso) return "—";
+  const date = new Date(iso.length <= 10 ? `${iso}T00:00:00Z` : iso);
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+export interface EngagementFormState {
+  title: string;
+  engagementType: EngagementType;
+  dinnerProgram: DinnerProgram | "";
+  engagementDate: string; // "" or "YYYY-MM-DD"
+  location: string;
+  status: EngagementStatus;
+  owner: string;
+  fee: string; // "" or a numeric string -- kept as text in the form, parsed on submit
+  contractStatus: EngagementContractStatus;
+  contractUrl: string;
+  signedDate: string; // "" or "YYYY-MM-DD"
+  paymentStatus: EngagementPaymentStatus;
+}
+
+export function emptyEngagementFormState(): EngagementFormState {
+  return {
+    title: "",
+    engagementType: "investor_dinner",
+    dinnerProgram: "",
+    engagementDate: "",
+    location: "",
+    status: "planned",
+    owner: "",
+    fee: "",
+    contractStatus: "not_sent",
+    contractUrl: "",
+    signedDate: "",
+    paymentStatus: "unpaid",
+  };
+}
+
+export function engagementFormStateFromEngagement(engagement: Engagement): EngagementFormState {
+  return {
+    title: engagement.title,
+    engagementType: engagement.engagement_type,
+    dinnerProgram: engagement.dinner_program ?? "",
+    engagementDate: engagement.engagement_date ?? "",
+    location: engagement.location ?? "",
+    status: engagement.status,
+    owner: engagement.owner ?? "",
+    fee: engagement.fee === null ? "" : String(engagement.fee),
+    contractStatus: engagement.contract_status,
+    contractUrl: engagement.contract_url ?? "",
+    signedDate: engagement.signed_date ?? "",
+    paymentStatus: engagement.payment_status,
+  };
+}
+
+export function isEngagementFormValid(form: EngagementFormState): boolean {
+  return form.title.trim().length > 0;
+}
+
+function parseEngagementFee(fee: string): number | null {
+  const trimmed = fee.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+/** CREATE only. `dinner_program` is sent exactly as chosen in the form --
+ * the backend remains authoritative and will clear it server-side if
+ * `engagement_type` isn't dinner-shaped, but the form itself also hides/
+ * clears the field for a non-dinner type (see isDinnerShapedEngagementType)
+ * so this rarely needs to rely on that backend correction in practice. */
+export function engagementCreatePayload(form: EngagementFormState): EngagementCreateInput {
+  return {
+    title: form.title.trim(),
+    engagement_type: form.engagementType,
+    dinner_program: isDinnerShapedEngagementType(form.engagementType) ? form.dinnerProgram || null : null,
+    engagement_date: form.engagementDate || null,
+    location: form.location.trim() || null,
+    status: form.status,
+    owner: form.owner.trim() || null,
+    fee: parseEngagementFee(form.fee),
+    contract_status: form.contractStatus,
+    contract_url: form.contractUrl.trim() || null,
+    signed_date: form.signedDate || null,
+    payment_status: form.paymentStatus,
+  };
+}
+
+/** A genuine partial PATCH, same diff-only convention as
+ * clientUpdatePatch/clientContactUpdatePatch. */
+export function engagementUpdatePatch(form: EngagementFormState, original: Engagement): EngagementUpdateInput {
+  const patch: EngagementUpdateInput = {};
+  const title = form.title.trim();
+  if (title !== original.title) patch.title = title;
+  if (form.engagementType !== original.engagement_type) patch.engagement_type = form.engagementType;
+
+  const dinnerProgram = isDinnerShapedEngagementType(form.engagementType) ? form.dinnerProgram || null : null;
+  if (dinnerProgram !== original.dinner_program) patch.dinner_program = dinnerProgram;
+
+  const engagementDate = form.engagementDate || null;
+  if (engagementDate !== original.engagement_date) patch.engagement_date = engagementDate;
+
+  const location = form.location.trim() || null;
+  if (location !== original.location) patch.location = location;
+
+  if (form.status !== original.status) patch.status = form.status;
+
+  const owner = form.owner.trim() || null;
+  if (owner !== original.owner) patch.owner = owner;
+
+  const fee = parseEngagementFee(form.fee);
+  if (fee !== original.fee) patch.fee = fee;
+
+  if (form.contractStatus !== original.contract_status) patch.contract_status = form.contractStatus;
+
+  const contractUrl = form.contractUrl.trim() || null;
+  if (contractUrl !== original.contract_url) patch.contract_url = contractUrl;
+
+  const signedDate = form.signedDate || null;
+  if (signedDate !== original.signed_date) patch.signed_date = signedDate;
+
+  if (form.paymentStatus !== original.payment_status) patch.payment_status = form.paymentStatus;
+
   return patch;
 }

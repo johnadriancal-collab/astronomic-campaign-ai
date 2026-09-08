@@ -1,6 +1,7 @@
 """
-Client CRM API -- Stage 1B (2026-09-07). Client CRUD only; ClientContact/
-Engagement/ClientNote have no routes yet (later stages).
+Client CRM API -- Stage 1B (2026-09-07) Client CRUD, extended for
+ClientContact (Stage 1D) and Engagement (Stage 1E, 2026-09-07).
+ClientNote has no routes yet (a later stage).
 
 Deliberately its own prefix ("/client-crm", NOT "/crm") -- the existing
 read-only service token's scope is hardcoded to any path starting with
@@ -30,8 +31,25 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.dependencies import get_client_crm_service
-from app.models.client_crm import Client, ClientContact, ClientPage, ClientRelationshipClassification, ClientStatus
-from app.services.client_crm_service import ClientContactNotFound, ClientCrmService, ClientNotFound
+from app.models.client_crm import (
+    Client,
+    ClientContact,
+    ClientPage,
+    ClientRelationshipClassification,
+    ClientStatus,
+    DinnerProgram,
+    Engagement,
+    EngagementContractStatus,
+    EngagementPaymentStatus,
+    EngagementStatus,
+    EngagementType,
+)
+from app.services.client_crm_service import (
+    ClientContactNotFound,
+    ClientCrmService,
+    ClientNotFound,
+    EngagementNotFound,
+)
 
 router = APIRouter(prefix="/client-crm", tags=["client-crm"])
 
@@ -89,6 +107,51 @@ class ClientContactUpdateRequest(BaseModel):
     is_decision_maker: bool | None = None
     role_notes: str | None = None
     archived: bool | None = None
+
+
+class EngagementCreateRequest(BaseModel):
+    """Client CRM Stage 1E. `dinner_program` is only ever meaningful for a
+    dinner-shaped `engagement_type` -- the service layer is the
+    authoritative enforcement of that (forces it to None otherwise), this
+    request model just accepts whatever the caller sends. `luma_event_id`
+    is accepted here (reference-only, "expose the reference appropriately"
+    per this stage's own approved scope) but is deliberately NOT exposed
+    in the frontend Add/Engagement form yet -- no Luma picker/sync/auto-
+    create is part of Stage 1E."""
+
+    title: str
+    engagement_type: EngagementType
+    dinner_program: DinnerProgram | None = None
+    engagement_date: date | None = None
+    location: str | None = None
+    status: EngagementStatus = EngagementStatus.PLANNED
+    owner: str | None = None
+    fee: float | None = None
+    contract_status: EngagementContractStatus = EngagementContractStatus.NOT_SENT
+    contract_url: str | None = None
+    signed_date: date | None = None
+    payment_status: EngagementPaymentStatus = EngagementPaymentStatus.UNPAID
+    luma_event_id: str | None = None
+
+
+class EngagementUpdateRequest(BaseModel):
+    """Every field optional -- a genuine partial PATCH. `engagement_id`/
+    `client_id`/`created_at`/`updated_at` have no fields here at all."""
+
+    title: str | None = None
+    engagement_type: EngagementType | None = None
+    dinner_program: DinnerProgram | None = None
+    engagement_date: date | None = None
+    location: str | None = None
+    status: EngagementStatus | None = None
+    owner: str | None = None
+    fee: float | None = None
+    contract_status: EngagementContractStatus | None = None
+    contract_url: str | None = None
+    signed_date: date | None = None
+    payment_status: EngagementPaymentStatus | None = None
+    luma_event_id: str | None = None
+    archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
 
 
 @router.get("/clients", response_model=ClientPage)
@@ -185,6 +248,53 @@ async def update_client_contact(
     try:
         return await service.update_client_contact(client_id, client_contact_id, payload.model_dump(exclude_unset=True))
     except (ClientNotFound, ClientContactNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/clients/{client_id}/engagements", response_model=list[Engagement])
+async def list_client_engagements(client_id: str, service: ClientCrmService = Depends(get_client_crm_service)):
+    try:
+        return await service.list_client_engagements(client_id)
+    except ClientNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/clients/{client_id}/engagements", response_model=Engagement)
+async def create_client_engagement(
+    client_id: str, payload: EngagementCreateRequest, service: ClientCrmService = Depends(get_client_crm_service)
+):
+    try:
+        return await service.create_client_engagement(client_id, payload.model_dump())
+    except ClientNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/clients/{client_id}/engagements/{engagement_id}", response_model=Engagement)
+async def get_client_engagement(
+    client_id: str, engagement_id: str, service: ClientCrmService = Depends(get_client_crm_service)
+):
+    try:
+        return await service.get_client_engagement(client_id, engagement_id)
+    except EngagementNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.patch("/clients/{client_id}/engagements/{engagement_id}", response_model=Engagement)
+async def update_client_engagement(
+    client_id: str,
+    engagement_id: str,
+    payload: EngagementUpdateRequest,
+    service: ClientCrmService = Depends(get_client_crm_service),
+):
+    """`exclude_unset=True` is what makes this a genuine partial PATCH --
+    same convention as update_client()/update_client_contact()."""
+    try:
+        return await service.update_client_engagement(client_id, engagement_id, payload.model_dump(exclude_unset=True))
+    except (ClientNotFound, EngagementNotFound) as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

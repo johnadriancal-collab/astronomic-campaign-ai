@@ -10,24 +10,42 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ClientFormModal } from "@/components/client-form-modal";
 import { ClientContactFormModal } from "@/components/client-contact-form-modal";
-import { ApiError, getClient, listClientContacts, updateClient, updateClientContact, type Client, type ClientContact } from "@/lib/api";
+import { EngagementFormModal } from "@/components/engagement-form-modal";
+import {
+  ApiError,
+  getClient,
+  listClientContacts,
+  listClientEngagements,
+  updateClient,
+  updateClientContact,
+  type Client,
+  type ClientContact,
+  type Engagement,
+} from "@/lib/api";
 import {
   clientContactDisplayName,
   clientRelationshipClassificationBadgeClass,
   clientRelationshipClassificationLabel,
   clientStatusBadgeClass,
   clientStatusLabel,
+  dinnerProgramLabel,
+  engagementStatusBadgeClass,
+  engagementStatusLabel,
+  engagementTypeLabel,
   formatClientDate,
+  formatEngagementDate,
 } from "@/lib/client-crm";
 import { cn } from "@/lib/utils";
 
-// Stage 1C shipped Overview only; Stage 1D adds a real Contacts section
-// now that ClientContact linking actually exists (see this stage's own
-// STOP report). Still deliberately NOT a tabbed page with other empty/
-// fake sections (Dinners/Activity/Deals) -- only Overview and Contacts
-// have any real, backend-supported data behind them today. This page
-// shows no fabricated numbers for anything not built yet -- a fabricated
-// "0" would misrepresent "not built" as "genuinely zero".
+// Stage 1C shipped Overview only; Stage 1D added a real Contacts section;
+// Stage 1E adds a real Engagements section now that Engagement CRUD
+// actually exists (see this stage's own STOP report). Still deliberately
+// NOT a tabbed page with other empty/fake sections (a same-day debrief,
+// staged relationship follow-ups, notes/activity) -- only Overview,
+// Contacts, and Engagements have any real, backend-supported data behind
+// them today. This page shows no fabricated numbers for anything not
+// built yet -- a fabricated "0" would misrepresent "not built" as
+// "genuinely zero".
 export default function ClientDetailPage() {
   const params = useParams<{ id: string }>();
   const clientId = params.id;
@@ -45,6 +63,10 @@ export default function ClientDetailPage() {
   const [editingContact, setEditingContact] = useState<ClientContact | null>(null);
   const [contactActionError, setContactActionError] = useState<string | null>(null);
   const [busyContactId, setBusyContactId] = useState<string | null>(null);
+
+  const [engagements, setEngagements] = useState<Engagement[] | null>(null);
+  const [engagementsError, setEngagementsError] = useState<string | null>(null);
+  const [engagementModalOpen, setEngagementModalOpen] = useState(false);
 
   async function load() {
     try {
@@ -69,11 +91,34 @@ export default function ClientDetailPage() {
     }
   }
 
+  async function loadEngagements() {
+    try {
+      setEngagements(await listClientEngagements(clientId));
+      setEngagementsError(null);
+    } catch (err) {
+      setEngagementsError(
+        err instanceof ApiError ? `Couldn't load Engagements (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    }
+  }
+
   useEffect(() => {
     load();
     loadContacts();
+    loadEngagements();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
+
+  function handleEngagementSaved(engagement: Engagement) {
+    setEngagements((prev) => {
+      if (!prev) return [engagement];
+      const index = prev.findIndex((e) => e.engagement_id === engagement.engagement_id);
+      if (index === -1) return [...prev, engagement];
+      const next = [...prev];
+      next[index] = engagement;
+      return next;
+    });
+  }
 
   function handleContactSaved(contact: ClientContact) {
     setContacts((prev) => {
@@ -372,6 +417,68 @@ export default function ClientDetailPage() {
             )}
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-sm">Engagements</CardTitle>
+            <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setEngagementModalOpen(true)}>
+              <Plus className="h-3.5 w-3.5" />
+              Add Engagement
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {engagementsError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{engagementsError}</AlertDescription>
+              </Alert>
+            )}
+
+            {engagements === null && !engagementsError && <p className="text-sm text-muted-foreground">Loading…</p>}
+
+            {engagements !== null && engagements.length === 0 && (
+              <p className="text-sm text-muted-foreground">No Engagements recorded yet.</p>
+            )}
+
+            {engagements !== null && engagements.length > 0 && (
+              <ul className="space-y-3">
+                {engagements.map((engagement) => (
+                  <li key={engagement.engagement_id}>
+                    <Link
+                      href={`/clients/${client.client_id}/engagements/${engagement.engagement_id}`}
+                      className="block rounded-lg border border-border/60 p-3 hover:bg-secondary/30"
+                    >
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <span className="font-medium">{engagement.title}</span>
+                        {engagement.archived && (
+                          <Badge variant="secondary" className="bg-secondary text-muted-foreground">
+                            Archived
+                          </Badge>
+                        )}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {formatEngagementDate(engagement.engagement_date)}
+                        {engagement.location ? ` · ${engagement.location}` : ""}
+                      </p>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                        <span>{engagementTypeLabel(engagement.engagement_type)}</span>
+                        {engagement.dinner_program && (
+                          <>
+                            <span>·</span>
+                            <span>{dinnerProgramLabel(engagement.dinner_program)}</span>
+                          </>
+                        )}
+                        <span>·</span>
+                        <Badge variant="secondary" className={engagementStatusBadgeClass(engagement.status)}>
+                          {engagementStatusLabel(engagement.status)}
+                        </Badge>
+                      </div>
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <ClientFormModal open={editOpen} onOpenChange={setEditOpen} existingClient={client} onSaved={setClient} />
@@ -381,6 +488,13 @@ export default function ClientDetailPage() {
         client={client}
         existingContact={editingContact}
         onSaved={handleContactSaved}
+      />
+      <EngagementFormModal
+        open={engagementModalOpen}
+        onOpenChange={setEngagementModalOpen}
+        client={client}
+        existingEngagement={null}
+        onSaved={handleEngagementSaved}
       />
     </div>
   );
