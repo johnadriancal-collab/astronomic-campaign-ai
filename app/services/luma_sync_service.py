@@ -35,6 +35,7 @@ from typing import Any
 
 from loguru import logger
 
+from app.config import settings
 from app.luma.client import LumaClient
 from app.models.activity import ActivityCategory, ActivitySource
 from app.models.crm import (
@@ -68,6 +69,13 @@ from app.repositories.luma_registration_store import LumaRegistrationStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.crm_service import CUSTOM_FIELD_PREFIX, CrmService
 from app.services.luma_answer_normalizers import apply_normalizer
+from app.services.luma_contact_enrichment import (
+    apply_luma_self_report,
+    normalize_company_name,
+    resolve_contact_luma_fields,
+    resolve_tier1_website,
+    resolved_company_if_material_change,
+)
 
 # The only webhook event types Phase 1 processes -- event.*/calendar.*
 # lifecycle webhooks are deliberately out of scope this phase (see the
@@ -100,6 +108,11 @@ class LumaProcessResult:
     # enrichment tried to change but was suppressed on -- see
     # _detect_identity_conflicts(). Never includes the attempted VALUE.
     identity_conflicts: dict[str, str] = field(default_factory=dict)
+    # "company" and/or "title" -- set when the Luma self-report enrichment
+    # (see _apply_luma_contact_self_report) found 2+ unknown-recency
+    # historical answers with no known-recency one to arbitrate, and
+    # deliberately left that field untouched rather than guess.
+    luma_self_report_ambiguous_fields: list[str] = field(default_factory=list)
 
 
 # The exact three confident dedup-tier fields CrmService.classify_match()
@@ -426,6 +439,47 @@ class LumaSyncService:
                 changed_field_keys = []
         return updated, changed_field_keys, identity_conflicts, outcome
 
+    async def _apply_luma_contact_self_report(self, contact: CrmContact) -> tuple[CrmContact, list[str], list[str]]:
+        """Runs the shared Luma self-report Company/Job Title enrichment
+        (app/services/luma_contact_enrichment.py) against this contact's
+        COMPLETE current set of stored LumaRegistration rows -- always
+        re-fetched fresh here, never an incrementally-remembered subset.
+        This is what makes a late-arriving webhook for an older
+        registration structurally unable to regress a newer self-report:
+        both registrations are simply inputs to the same batch
+        resolution, in whatever order this happens to be called. Must be
+        called AFTER the current registration has already been saved
+        (see _process_guest_event_locked), so list_for_contact() includes
+        it. Returns (possibly-updated contact, changed field keys,
+        ambiguous field names) -- performs its own contact_store.save()
+        when there's an actual change, separate from and in addition to
+        any save _enrich_existing_contact()/create_contact_from_import()
+        already performed for the generic mapped fields."""
+        registrations = await self.registration_store.list_for_contact(contact.crm_contact_id)
+        if not registrations:
+            return contact, [], []
+
+        events_by_id: dict[str, LumaEvent] = {}
+        for event_id in {r.luma_event_id for r in registrations}:
+            event = await self.event_store.get(event_id)
+            if event is not None:
+                events_by_id[event_id] = event
+
+        resolutions = resolve_contact_luma_fields(registrations, events_by_id)
+
+        tier1_result = None
+        material_new_company = resolved_company_if_material_change(contact, resolutions)
+        if material_new_company is not None:
+            all_contacts = await self.crm_service.contact_store.list()
+            tier1_result = resolve_tier1_website(
+                normalize_company_name(material_new_company), all_contacts, exclude_crm_contact_id=contact.crm_contact_id
+            )
+
+        outcome = apply_luma_self_report(contact, resolutions, tier1_result=tier1_result)
+        if outcome.changed_field_keys:
+            await self.crm_service.contact_store.save(outcome.contact)
+        return outcome.contact, outcome.changed_field_keys, outcome.ambiguous_fields
+
     async def process_guest_event(
         self, event_payload: dict, guest_payload: dict, webhook_delivery_id: str | None = None
     ) -> LumaProcessResult:
@@ -541,6 +595,19 @@ class LumaSyncService:
         )
         await self.registration_store.save(registration)
 
+        luma_self_report_ambiguous_fields: list[str] = []
+        if contact is not None and settings.luma_contact_enrichment_enabled:
+            contact, self_report_changed_keys, luma_self_report_ambiguous_fields = await self._apply_luma_contact_self_report(
+                contact
+            )
+            if self_report_changed_keys:
+                changed_field_keys = sorted(set(changed_field_keys) | set(self_report_changed_keys))
+                if contact_outcome == "unchanged":
+                    contact_outcome = "enriched"
+        # While luma_contact_enrichment_enabled is False (the default),
+        # this entire block is skipped -- process_guest_event() behaves
+        # BYTE-IDENTICAL to before this feature existed.
+
         result = LumaProcessResult(
             registration=registration,
             contact=contact,
@@ -548,6 +615,7 @@ class LumaSyncService:
             contact_outcome=contact_outcome,
             changed_field_keys=changed_field_keys,
             identity_conflicts=identity_conflicts,
+            luma_self_report_ambiguous_fields=luma_self_report_ambiguous_fields,
         )
         await self._record_activity(luma_event, existing, result)
         return result
@@ -688,7 +756,14 @@ class LumaSyncService:
                 entity_id=contact.crm_contact_id,
                 entity_name=name,
             )
-        elif contact is not None and result.changed_field_keys:
+        # A separate `if`, not `elif` -- a brand-new contact's OWN initial
+        # mapped fields never populate result.changed_field_keys (only
+        # _enrich_existing_contact()'s EXISTING-contact path does), so when
+        # this fires alongside "created" it can only be reporting the Luma
+        # self-report enrichment's own additional change (e.g. Company/
+        # Job Title applied moments after creation) -- never double-counts
+        # the creation itself.
+        if contact is not None and result.changed_field_keys:
             name = _contact_display_name(contact)
             await self.activity_log.record(
                 event_type="luma.contact.enriched",
@@ -722,6 +797,25 @@ class LumaSyncService:
                     "matched_contact_id": contact.crm_contact_id,
                     "conflicting_contact_ids": result.identity_conflicts,
                 },
+            )
+
+        # Independent of the above -- fires whenever the Luma self-report
+        # enrichment found 2+ unknown-recency historical answers for a
+        # field with no known-recency one to arbitrate, and deliberately
+        # left it untouched rather than guess. Metadata is field names
+        # only, same "structural, never a value" convention as every other
+        # event in this method.
+        if contact is not None and result.luma_self_report_ambiguous_fields:
+            name = _contact_display_name(contact)
+            await self.activity_log.record(
+                event_type="luma.contact.enrichment_ambiguous",
+                category=ActivityCategory.LUMA,
+                source=ActivitySource.LUMA_SYNC,
+                summary=f"{name}'s Luma self-reported data has conflicting historical answers with no reliable recency -- left unchanged, needs review.",
+                entity_type="contact",
+                entity_id=contact.crm_contact_id,
+                entity_name=name,
+                metadata={"fields": sorted(result.luma_self_report_ambiguous_fields)},
             )
 
     # --- webhook entry point ----------------------------------------------

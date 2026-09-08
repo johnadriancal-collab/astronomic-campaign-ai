@@ -108,6 +108,12 @@ async def test_linkedin_conflict_is_skipped_while_other_fields_still_enrich(luma
     assert result.contact.custom_fields["role"] == ["Investor"]  # auto-tagged from the investor questionnaire
     assert result.contact.linkedin_url is None  # NOT applied -- conflicts with `other`
     assert result.contact_outcome == "enriched"
+    # Note: this file never enables settings.luma_contact_enrichment_enabled
+    # (see luma_sync_service.py's Stage: Luma Contact Enrichment), so the
+    # dedicated self-report path (which would otherwise ALSO independently
+    # resolve this same structural question_type=="company" answer and add
+    # "custom:field_provenance") stays completely inert here -- this
+    # generic-mapping test is unaffected either way.
     assert set(result.changed_field_keys) == {"company", "title", "custom:investor_type", "custom:role"}
     assert result.identity_conflicts == {"linkedin_url": other.crm_contact_id}
 
@@ -285,7 +291,11 @@ async def test_enriched_event_excludes_the_conflicting_field(luma_service, crm_s
     page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
     enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
     assert len(enriched_events) == 1
-    assert enriched_events[0].metadata["fields_updated"] == ["company"]  # linkedin_url excluded
+    # settings.luma_contact_enrichment_enabled is off in this file (see
+    # note above) -- linkedin_url excluded (identity conflict) is this
+    # test's whole point, and no "custom:field_provenance" appears since
+    # the self-report path never ran.
+    assert enriched_events[0].metadata["fields_updated"] == ["company"]
 
 
 # --- 8. conflict event metadata never carries raw values --------------------

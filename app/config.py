@@ -213,6 +213,20 @@ class Settings(BaseSettings):
     luma_api_key: str | None = None
     luma_webhook_secret: str | None = None
 
+    # Luma self-report Company/Job Title -> CrmContact enrichment (see
+    # app/services/luma_contact_enrichment.py). Defaults False (fails
+    # CLOSED, same precedent as mail_sending_engine_enabled below) -- while
+    # this is False, LumaSyncService.process_guest_event() behaves
+    # BYTE-IDENTICAL to before this feature existed: no self-report
+    # Company/Title/Company Website write, no field_provenance custom
+    # field, no luma.contact.enrichment_ambiguous Activity Log event. This
+    # is checked at the point of use in luma_sync_service.py, not injected
+    # via constructor, matching mail_execution_worker.py's own
+    # `from app.config import settings` precedent. Flip to True only once
+    # the historical dry-run report has been reviewed and the feature is
+    # explicitly approved to start writing live.
+    luma_contact_enrichment_enabled: bool = False
+
     # Astronomic Mail Phase A (durable execution model) -- see
     # app/services/mail_sending_service.py's module docstring. Defaults to
     # False (fails CLOSED, matching cookie_secure's precedent above, not

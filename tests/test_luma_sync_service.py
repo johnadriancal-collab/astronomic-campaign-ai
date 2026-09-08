@@ -20,6 +20,7 @@ from app.repositories.crm_custom_field_store import MemoryCrmCustomFieldStore
 from app.repositories.luma_event_store import MemoryLumaEventStore
 from app.repositories.luma_question_mapping_store import MemoryLumaQuestionMappingStore
 from app.repositories.luma_registration_store import MemoryLumaRegistrationStore
+from app.services import luma_sync_service as luma_sync_service_module
 from app.services.crm_service import CrmService
 from app.services.luma_sync_service import LumaSyncError, LumaSyncService
 
@@ -216,6 +217,15 @@ def luma_service(crm_service, event_store, registration_store, mapping_store):
     )
 
 
+@pytest.fixture
+def luma_contact_enrichment_enabled(monkeypatch):
+    """Deliberately NOT autouse -- most tests in this file must keep
+    testing this feature's OFF-by-default, byte-identical-to-before
+    behavior. Only the self-report enrichment tests below request this
+    explicitly."""
+    monkeypatch.setattr(luma_sync_service_module.settings, "luma_contact_enrichment_enabled", True)
+
+
 async def _seed_mapping(mapping_store, **overrides):
     mapping = make_mapping(**overrides)
     await mapping_store.create(mapping)
@@ -332,20 +342,23 @@ async def test_no_fuzzy_name_matching_ever_occurs(luma_service, crm_service, map
 
 
 async def test_existing_scalar_field_is_never_overwritten(luma_service, crm_service, mapping_store):
-    await _seed_mapping(
-        mapping_store, question_label="Company", question_type="company", target_field_key="company", extract_key="company"
-    )
-    existing = make_contact(email="alice@example.com", company="Sequoia Capital")
+    """Uses "Department" rather than "Company"/"Title" deliberately --
+    those two now have their OWN dedicated, deliberately-overwriting
+    self-report path (see app/services/luma_contact_enrichment.py and
+    Stage: Luma Contact Enrichment), so they're no longer a valid example
+    of apply_import_mapping()'s generic fill-only rule this test exists
+    to guard. "Department" has no such override and still demonstrates
+    the exact same fill-only semantics unchanged."""
+    await _seed_mapping(mapping_store, question_label="Department", question_type="text", target_field_key="department")
+    existing = make_contact(email="alice@example.com", department="Growth")
     await crm_service.contact_store.create(existing)
 
     guest = make_guest(
-        registration_answers=[
-            {"label": "Company", "question_id": "q-1", "question_type": "company", "value": {"company": "Sequoia"}}
-        ]
+        registration_answers=[{"label": "Department", "question_id": "q-1", "question_type": "text", "value": "Sales"}]
     )
     result = await luma_service.process_guest_event(make_event(), guest)
 
-    assert result.contact.company == "Sequoia Capital"  # NOT overwritten by the conflicting "Sequoia"
+    assert result.contact.department == "Growth"  # NOT overwritten by the conflicting "Sales"
 
 
 async def test_blank_crm_field_is_enriched(luma_service, crm_service, mapping_store):
@@ -1307,3 +1320,216 @@ async def test_a_guest_with_no_investor_signal_gets_no_role_tag(luma_service, ma
     result = await luma_service.process_guest_event(make_event(), guest)
 
     assert "role" not in result.contact.custom_fields
+
+
+# =====================================================================
+# Luma self-report Company/Job Title enrichment -- live webhook path
+# (app/services/luma_contact_enrichment.py). Deliberately NO
+# LumaQuestionMapping seeded in most of these -- the whole point is that
+# this path works independent of that configurable system.
+# =====================================================================
+
+
+async def test_a_new_registration_with_a_company_answer_enriches_the_contact_with_no_mapping_configured(luma_service, luma_contact_enrichment_enabled):
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Where do you work?", "question_id": "q1", "question_type": "company", "value": {"company": "Acme", "job_title": "CEO"}}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company == "Acme"
+    assert result.contact.title == "CEO"
+    assert "company" in result.changed_field_keys
+    assert "title" in result.changed_field_keys
+    assert result.contact.custom_fields["field_provenance"]["company"]["source"] == "luma_self_report"
+
+
+async def test_self_report_replaces_an_existing_different_value_unlike_generic_mapping(luma_service, crm_service, luma_contact_enrichment_enabled):
+    existing = make_contact(email="alice@example.com", company="Sequoia Capital", title="Partner")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(
+        email="alice@example.com",
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Sequoia", "job_title": "GP"}}],
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company == "Sequoia"  # replaced, not fill-only
+    assert result.contact.title == "GP"
+
+
+async def test_an_edited_registration_reapplies_the_self_report(luma_service, luma_contact_enrichment_enabled):
+    guest_v1 = make_guest(
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Acme"}}]
+    )
+    await luma_service.process_guest_event(make_event(), guest_v1, webhook_delivery_id="d1")
+
+    guest_v2 = make_guest(
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Acme Ventures"}}]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest_v2, webhook_delivery_id="d2")
+
+    assert result.contact.company == "Acme Ventures"
+
+
+async def test_a_late_arriving_older_registration_cannot_regress_a_newer_self_report(luma_service, luma_contact_enrichment_enabled):
+    """Two DIFFERENT registrations (different events) for the SAME person
+    -- the newer one is processed FIRST, the older one arrives LATE and is
+    processed SECOND. Recomputing from the complete stored set each time
+    means the older one can never win."""
+    newer_event = make_event(event_id="evt-newer")
+    newer_guest = make_guest(
+        guest_id="gst-newer",
+        registered_at="2026-09-01T10:00:00Z",
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "NewCo"}}],
+    )
+    await luma_service.process_guest_event(newer_event, newer_guest)
+
+    older_event = make_event(event_id="evt-older")
+    older_guest = make_guest(
+        guest_id="gst-older",
+        registered_at="2026-01-01T10:00:00Z",
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "VeryOldCo"}}],
+    )
+    result = await luma_service.process_guest_event(older_event, older_guest)
+
+    assert result.contact.company == "NewCo"  # the late-arriving older registration did not regress it
+
+
+async def test_blank_luma_company_never_erases_an_existing_value(luma_service, crm_service, luma_contact_enrichment_enabled):
+    existing = make_contact(email="alice@example.com", company="Existing Co")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(
+        email="alice@example.com",
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": None, "job_title": None}}],
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company == "Existing Co"
+
+
+async def test_ambiguous_unknown_recency_fires_the_enrichment_ambiguous_activity_event(luma_service, crm_service, luma_contact_enrichment_enabled):
+    guest1 = make_guest(
+        guest_id="gst-1",
+        registered_at=None,
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Co1"}}],
+    )
+    await luma_service.process_guest_event(make_event(event_id="evt-1", start_at=None), guest1)
+
+    guest2 = make_guest(
+        guest_id="gst-2",
+        registered_at=None,
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Co2"}}],
+    )
+    result = await luma_service.process_guest_event(make_event(event_id="evt-2", start_at=None), guest2)
+
+    # The FIRST registration's single, uncontested unknown-recency answer
+    # was legitimately adopted at the time it was the only one available --
+    # that adoption is never retroactively undone. "Ambiguous" means "no
+    # FURTHER guess was made once a second, conflicting unknown-recency
+    # answer showed up" -- not "erase what was already legitimately there".
+    assert result.contact.company == "Co1"
+    assert "company" in result.luma_self_report_ambiguous_fields
+
+    page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
+    ambiguous_events = [e for e in page.items if e.event_type == "luma.contact.enrichment_ambiguous"]
+    assert len(ambiguous_events) == 1
+    assert ambiguous_events[0].metadata == {"fields": ["company"]}
+
+
+async def test_material_company_change_invalidates_stale_website_end_to_end(luma_service, crm_service, luma_contact_enrichment_enabled):
+    existing = make_contact(email="alice@example.com", company="OldCo", company_website="oldco.com")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(
+        email="alice@example.com",
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "NewCo"}}],
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company == "NewCo"
+    assert result.contact.company_website is None  # invalidated, no Tier 1 candidate available
+    assert "company_website" in result.changed_field_keys
+
+
+async def test_material_company_change_repopulates_website_from_tier1_end_to_end(luma_service, crm_service, luma_contact_enrichment_enabled):
+    reference = make_contact(email="reference@example.com", company="NewCo", company_website="newco.com")
+    await crm_service.contact_store.create(reference)
+    existing = make_contact(email="alice@example.com", company="OldCo", company_website="oldco.com")
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        email="alice@example.com",
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "NewCo"}}],
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company_website == "https://newco.com"
+
+
+async def test_enriched_activity_event_includes_self_report_field_keys(luma_service, crm_service, luma_contact_enrichment_enabled):
+    """A brand-new contact's own contact_outcome stays "created" (more
+    informative than downgrading it) -- but the self-report's OWN
+    additional change still gets its own luma.contact.enriched event,
+    fired independently alongside luma.contact.created."""
+    guest = make_guest(
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Acme", "job_title": "CEO"}}]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+    assert result.contact_outcome == "created"
+
+    page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
+    enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
+    assert len(enriched_events) == 1
+    fields_updated = enriched_events[0].metadata["fields_updated"]
+    assert "company" in fields_updated
+    assert "title" in fields_updated
+    assert "custom:field_provenance" in fields_updated
+    # Structural only -- never the self-reported values themselves.
+    assert "Acme" not in str(enriched_events[0].metadata)
+    assert "CEO" not in str(enriched_events[0].metadata)
+
+
+async def test_a_registration_with_no_company_question_answer_does_not_touch_company_or_title(luma_service, crm_service, luma_contact_enrichment_enabled):
+    existing = make_contact(email="alice@example.com", company="Existing Co", title="Existing Title")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(
+        email="alice@example.com",
+        registration_answers=[{"label": "LinkedIn Profile", "question_id": "q1", "question_type": "linkedin", "value": "https://linkedin.com/in/alice"}],
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company == "Existing Co"
+    assert result.contact.title == "Existing Title"
+
+
+async def test_luma_contact_enrichment_disabled_by_default_leaves_the_feature_completely_inert(luma_service, crm_service):
+    """No `luma_contact_enrichment_enabled` fixture requested here --
+    settings.luma_contact_enrichment_enabled is False (its real production
+    default). A structurally perfect question_type=="company" answer must
+    produce ZERO effect: no company/title write, no field_provenance
+    custom field, no new Activity Log event beyond the ordinary
+    created/enriched ones from any OTHER (unrelated) mapped fields."""
+    assert luma_sync_service_module.settings.luma_contact_enrichment_enabled is False
+
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Acme", "job_title": "CEO"}}
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company is None
+    assert result.contact.title is None
+    assert "field_provenance" not in result.contact.custom_fields
+    assert result.luma_self_report_ambiguous_fields == []
+
+    page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
+    assert not any(e.event_type == "luma.contact.enrichment_ambiguous" for e in page.items)
+    enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
+    assert enriched_events == []  # nothing else changed either -- purely a "created" outcome
+
+
+async def test_settings_luma_contact_enrichment_enabled_defaults_false():
+    from app.config import Settings
+
+    assert Settings.model_fields["luma_contact_enrichment_enabled"].default is False
