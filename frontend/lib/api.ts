@@ -1852,7 +1852,7 @@ export function updateClientContact(
 // ClientContact/CrmContact/Luma" rule this API also honors.
 
 export type EngagementType = "dinner" | "sponsorship" | "other";
-export type DinnerType = "investor_dinner" | "fireside_dinner" | "bizdev_dinner";
+export type DinnerType = "investor_dinner" | "fireside_dinner" | "bizdev_dinner" | "donor_dinner" | "custom_dinner";
 export type EngagementStatus = "planned" | "confirmed" | "completed" | "cancelled";
 export type EngagementContractStatus = "not_sent" | "sent" | "signed";
 export type EngagementPaymentStatus = "unpaid" | "partial" | "paid";

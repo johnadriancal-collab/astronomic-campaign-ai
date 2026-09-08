@@ -205,7 +205,7 @@ def test_retired_supernova_galaxy_aurora_terminology_is_gone():
     """Stage 1E.1: Supernova/Galaxy/Aurora were retired internal program
     names -- DinnerType names the underlying dinner kind directly instead."""
     dinner_type_values = {member.value for member in DinnerType}
-    assert dinner_type_values == {"investor_dinner", "fireside_dinner", "bizdev_dinner"}
+    assert dinner_type_values == {"investor_dinner", "fireside_dinner", "bizdev_dinner", "donor_dinner", "custom_dinner"}
     assert not any("supernova" in v or "galaxy" in v or "aurora" in v for v in dinner_type_values)
 
 

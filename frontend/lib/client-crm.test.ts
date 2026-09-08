@@ -362,6 +362,8 @@ test("dinnerTypeLabel maps every real value -- retired Supernova/Galaxy/Aurora t
   assert.equal(dinnerTypeLabel("investor_dinner"), "Investor Dinner");
   assert.equal(dinnerTypeLabel("fireside_dinner"), "Fireside Dinner");
   assert.equal(dinnerTypeLabel("bizdev_dinner"), "BizDev Dinner");
+  assert.equal(dinnerTypeLabel("donor_dinner"), "Donor Dinner");
+  assert.equal(dinnerTypeLabel("custom_dinner"), "Custom Dinner");
 });
 
 test("engagementStatusLabel maps every status, including the new CONFIRMED", () => {

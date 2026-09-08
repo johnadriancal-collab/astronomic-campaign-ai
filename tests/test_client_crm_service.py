@@ -924,4 +924,6 @@ def test_engagement_type_and_dinner_type_enum_values_match_stage_1e1_taxonomy():
     from app.models.client_crm import DinnerType, EngagementType
 
     assert {member.value for member in EngagementType} == {"dinner", "sponsorship", "other"}
-    assert {member.value for member in DinnerType} == {"investor_dinner", "fireside_dinner", "bizdev_dinner"}
+    assert {member.value for member in DinnerType} == {
+        "investor_dinner", "fireside_dinner", "bizdev_dinner", "donor_dinner", "custom_dinner",
+    }

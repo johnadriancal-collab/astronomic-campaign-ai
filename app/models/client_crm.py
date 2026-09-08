@@ -181,11 +181,21 @@ class DinnerType(str, Enum):
     Nullable and normally None for a non-dinner Engagement (e.g.
     SPONSORSHIP) -- see ClientCrmService's own backend-authoritative
     normalization for why this is enforced server-side, not just hidden
-    in the UI."""
+    in the UI.
+
+    DONOR_DINNER and CUSTOM_DINNER (added post-Stage-1E.1) are genuinely
+    current dinner types, not renames of any retired program/brand --
+    unlike the first three members, neither has a corresponding entry in
+    the Stage 1E.1 migration's legacy-program rename table, and none is
+    needed: no retired `dinner_program` value ever meant "donor" or
+    "custom", so no existing row could legitimately migrate to either
+    value."""
 
     INVESTOR_DINNER = "investor_dinner"
     FIRESIDE_DINNER = "fireside_dinner"
     BIZDEV_DINNER = "bizdev_dinner"
+    DONOR_DINNER = "donor_dinner"
+    CUSTOM_DINNER = "custom_dinner"
 
 
 class EngagementContractStatus(str, Enum):

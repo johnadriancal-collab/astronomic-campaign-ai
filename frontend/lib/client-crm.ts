@@ -315,6 +315,8 @@ export const DINNER_TYPE_OPTIONS: { value: DinnerType; label: string }[] = [
   { value: "investor_dinner", label: "Investor Dinner" },
   { value: "fireside_dinner", label: "Fireside Dinner" },
   { value: "bizdev_dinner", label: "BizDev Dinner" },
+  { value: "donor_dinner", label: "Donor Dinner" },
+  { value: "custom_dinner", label: "Custom Dinner" },
 ];
 
 export function dinnerTypeLabel(value: DinnerType | null): string {
