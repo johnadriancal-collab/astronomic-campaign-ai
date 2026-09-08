@@ -1323,6 +1323,181 @@ async def test_a_guest_with_no_investor_signal_gets_no_role_tag(luma_service, ma
 
 
 # =====================================================================
+# Investor-question mappings: question_type=None resilience (the
+# "Deploying Capital" bug fix). Luma began sending question_type="select"
+# for these four questions instead of their historical "dropdown"/
+# "multi-select" -- the mapping's own question_type guard, when set to a
+# specific string, silently stopped matching. The fix is a MAPPING
+# CONFIG change (question_type -> None), not a code change: the
+# `if mapping.question_type and mapping.question_type != question_type`
+# guard in _build_mapped_fields already treats None as "matches any
+# type" (see LinkedIn's own mapping, which already relies on this). These
+# tests seed each of the four real mappings with question_type=None and
+# prove BOTH the historical type and the new "select" type resolve to
+# the exact same destination field with the exact same value semantics.
+# =====================================================================
+
+
+async def test_deploying_capital_matches_both_dropdown_and_select_with_type_none(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type=None, target_field_key="custom:deploying_capital"
+    )
+    guest_dropdown = make_guest(
+        email="dropdown@example.com",
+        registration_answers=[{"label": "Deploying Capital", "question_id": "q-1", "question_type": "dropdown", "value": "Not at the moment"}],
+    )
+    guest_select = make_guest(
+        email="select@example.com",
+        registration_answers=[{"label": "Deploying Capital", "question_id": "q-1", "question_type": "select", "value": "Yes, actively"}],
+    )
+
+    result_dropdown = await luma_service.process_guest_event(make_event(), guest_dropdown)
+    result_select = await luma_service.process_guest_event(make_event(), guest_select)
+
+    # Exact strings preserved -- never reduced to a boolean.
+    assert result_dropdown.contact.custom_fields["deploying_capital"] == "Not at the moment"
+    assert result_select.contact.custom_fields["deploying_capital"] == "Yes, actively"
+    assert result_select.contact.custom_fields["deploying_capital"] is not True
+    assert result_select.contact.custom_fields["deploying_capital"] is not False
+
+
+async def test_deploying_capital_selectively_value_preserved_exactly(luma_service, mapping_store):
+    """The exact regression case this whole investigation started from."""
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type=None, target_field_key="custom:deploying_capital"
+    )
+    guest = make_guest(
+        registration_answers=[{"label": "Deploying Capital", "question_id": "q-1", "question_type": "select", "value": "Selectively"}]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+    assert result.contact.custom_fields["deploying_capital"] == "Selectively"
+
+
+async def test_investor_type_matches_both_multi_select_and_select_with_type_none(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type=None,
+        target_field_key="custom:investor_type", normalizer="investor_type_label",
+    )
+    guest_multi = make_guest(
+        email="multi@example.com",
+        registration_answers=[{"label": "Investor Type", "question_id": "q-1", "question_type": "multi-select", "value": ["Angel Investor"]}],
+    )
+    guest_select = make_guest(
+        email="select@example.com",
+        registration_answers=[{"label": "Investor Type", "question_id": "q-1", "question_type": "select", "value": ["Family Office"]}],
+    )
+
+    result_multi = await luma_service.process_guest_event(make_event(), guest_multi)
+    result_select = await luma_service.process_guest_event(make_event(), guest_select)
+
+    assert result_multi.contact.custom_fields["investor_type"] == ["Angel Investor"]
+    assert result_select.contact.custom_fields["investor_type"] == ["Family Office"]
+
+
+async def test_check_size_matches_both_dropdown_and_select_with_type_none(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Check Size", question_type=None,
+        target_field_key="custom:check_size_personal", normalizer="check_size_personal_bucket",
+    )
+    guest_dropdown = make_guest(
+        email="dropdown@example.com",
+        registration_answers=[{"label": "Check Size", "question_id": "q-1", "question_type": "dropdown", "value": "$25K–$100K"}],
+    )
+    guest_select = make_guest(
+        email="select@example.com",
+        registration_answers=[{"label": "Check Size", "question_id": "q-1", "question_type": "select", "value": "$100K–$250K"}],
+    )
+
+    result_dropdown = await luma_service.process_guest_event(make_event(), guest_dropdown)
+    result_select = await luma_service.process_guest_event(make_event(), guest_select)
+
+    assert result_dropdown.contact.custom_fields["check_size_personal"] == ["$25k - $50k", "$50k - $100k"]
+    assert result_select.contact.custom_fields["check_size_personal"] == ["$100k - $250k"]
+
+
+async def test_investment_industry_matches_both_multi_select_and_select_with_type_none(luma_service, mapping_store):
+    await _seed_mapping(
+        mapping_store, question_label="Investment Industry", question_type=None,
+        target_field_key="custom:investment_industry", normalizer="industry_focus_label",
+    )
+    guest_multi = make_guest(
+        email="multi@example.com",
+        registration_answers=[{"label": "Investment Industry", "question_id": "q-1", "question_type": "multi-select", "value": ["Artificial Intelligence / Machine Learning"]}],
+    )
+    guest_select = make_guest(
+        email="select@example.com",
+        registration_answers=[{"label": "Investment Industry", "question_id": "q-1", "question_type": "select", "value": ["Real Estate & PropTech", "Cybersecurity"]}],
+    )
+
+    result_multi = await luma_service.process_guest_event(make_event(), guest_multi)
+    result_select = await luma_service.process_guest_event(make_event(), guest_select)
+
+    # Exact-match filter against INDUSTRY_OPTIONS -- these two values pass
+    # through verbatim (both are real canonical members), never translated.
+    assert result_multi.contact.custom_fields["investment_industry"] == ["Artificial Intelligence / Machine Learning"]
+    assert set(result_select.contact.custom_fields["investment_industry"]) == {"Real Estate & PropTech", "Cybersecurity"}
+
+
+# --- multi-select destination field determines list-vs-scalar, not Luma's question_type --
+
+
+async def test_a_select_typed_scalar_answer_is_still_wrapped_into_a_list_for_a_multi_select_field(luma_service, mapping_store):
+    """Defensive: even if Luma ever sends a BARE SCALAR (not a list) for
+    a question whose CRM destination is multi_select, the destination
+    field's own definition -- not Luma's question_type string -- decides
+    the shape. _wrap_scalar_for_multi_select already guarantees this;
+    this test proves it holds for the "select" type specifically."""
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type=None,
+        target_field_key="custom:investor_type", normalizer="investor_type_label",
+    )
+    guest = make_guest(
+        registration_answers=[{"label": "Investor Type", "question_id": "q-1", "question_type": "select", "value": "Angel Investor"}]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+    assert result.contact.custom_fields["investor_type"] == ["Angel Investor"]  # wrapped into a list, not a bare string
+
+
+async def test_a_new_select_typed_registration_unions_with_existing_multi_select_selections(luma_service, crm_service, mapping_store):
+    """Must not discard existing selections merely because a LATER
+    registration reports the question as "select" instead of the
+    historical "multi-select" -- union-merge, not replace."""
+    await _seed_mapping(
+        mapping_store, question_label="Investor Type", question_type=None,
+        target_field_key="custom:investor_type", normalizer="investor_type_label",
+    )
+    existing = make_contact(email="alice@example.com", custom_fields={"investor_type": ["Venture Capital"]})
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        email="alice@example.com",
+        registration_answers=[{"label": "Investor Type", "question_id": "q-1", "question_type": "select", "value": ["Family Office"]}],
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert set(result.contact.custom_fields["investor_type"]) == {"Venture Capital", "Family Office"}
+
+
+async def test_deploying_capital_fill_only_is_unaffected_by_type_none(luma_service, crm_service, mapping_store):
+    """deploying_capital is single_select (fill-only, not union-merge) --
+    an ALREADY-SET value must not be overwritten by a later "select"-typed
+    registration, exactly like every other fill-only custom field."""
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type=None, target_field_key="custom:deploying_capital"
+    )
+    existing = make_contact(email="alice@example.com", custom_fields={"deploying_capital": "Not at the moment"})
+    await crm_service.contact_store.create(existing)
+
+    guest = make_guest(
+        email="alice@example.com",
+        registration_answers=[{"label": "Deploying Capital", "question_id": "q-1", "question_type": "select", "value": "Yes, actively"}],
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["deploying_capital"] == "Not at the moment"  # unchanged -- fill-only
+
+
+# =====================================================================
 # Luma self-report Company/Job Title enrichment -- live webhook path
 # (app/services/luma_contact_enrichment.py). Deliberately NO
 # LumaQuestionMapping seeded in most of these -- the whole point is that
