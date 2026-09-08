@@ -21,7 +21,7 @@ trivial, non-breaking addition once that design exists).
 
 from datetime import date, datetime
 from enum import Enum
-from typing import Any
+from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
 
@@ -339,6 +339,89 @@ class ClientNote(BaseModel):
     created_by: str | None = None  # free text, no auth-identity system yet -- same placeholder
     # convention as Client.owner / ActivityEvent.actor.
     occurred_at: datetime
+    created_at: datetime
+    updated_at: datetime
+    archived: bool = False
+
+
+# A non-negative-int-or-null count -- shared by every Stage 1F turnout
+# field. Enforced at the schema layer (same class of validation as an
+# invalid enum value elsewhere in this module) so a negative count is
+# rejected by FastAPI's own request validation, never reaching the
+# service layer. Null means "not entered" (unknown); an explicit 0 means
+# "entered, confirmed zero" -- Pydantic's Optional handling already keeps
+# these distinct (a field never coerces None to 0 or vice versa).
+NonNegativeCount = Annotated[int, Field(ge=0)] | None
+
+
+class EngagementCloseout(BaseModel):
+    """Client CRM Stage 1F -- the same-day factual/qualitative baseline for
+    one Engagement (one dinner), recorded once shortly after it happens.
+    Deliberately its OWN entity, not fields on Engagement and not a
+    structured ClientNote -- see the Stage 1F investigation report for the
+    full architecture reasoning (ClientNote stays human free-text-only;
+    Engagement stays the commercial/delivery record; Closeout is the
+    factual/qualitative same-day snapshot, structurally distinct from a
+    later, judgment-based Day 3/30/90 follow-up, which does not exist yet).
+
+    At most ONE EngagementCloseout is ever created per Engagement -- see
+    ClientCrmService's own Stage 1F docstring for why this is enforced at
+    the service layer (checking EngagementCloseoutStore.get_for_engagement()
+    before create), not a DB uniqueness constraint, matching this
+    codebase's own established "the service layer owns invariants, not the
+    store" convention (see ClientContactStore's own docstring for the
+    identical precedent with is_primary_contact).
+
+    Turnout counts are Stage 1F's own manually-entered aggregate SNAPSHOT,
+    not derived from any per-person record -- Stage 1G (EngagementParticipant,
+    not built yet) will introduce real per-person attendance; whether these
+    aggregate fields stay as the historical snapshot, become computed from
+    participants, or both, is an explicit Stage 1G decision, not made here.
+
+    `attendance_rate` is deliberately NOT a field here at all (not stored,
+    not a computed_field) -- it's purely derived from confirmed_guest_count/
+    cancelled_count/attended_count, all already present on this model, so
+    it's computed client-side only (same "computed, not duplicated"
+    convention already used for e.g. the Clients list's own total-pages
+    calculation) rather than risking it being serialized into the stored
+    JSON blob as a stale/redundant value.
+
+    Qualitative fields are deliberately plain free text for V1 -- no
+    enums invented without a concrete requirement (see Stage 1F's own
+    investigation report)."""
+
+    closeout_id: str
+    engagement_id: str
+    client_id: str  # denormalized, matches Engagement's own client_id column
+
+    # Turnout -- manually-entered aggregate snapshot (Stage 1F). Null means
+    # not entered/unknown; 0 means explicitly confirmed zero. Never
+    # fabricated by this model or any service method.
+    confirmed_guest_count: NonNegativeCount = None
+    attended_count: NonNegativeCount = None
+    no_show_count: NonNegativeCount = None
+    cancelled_count: NonNegativeCount = None
+    unexpected_attendee_count: NonNegativeCount = None
+
+    # Qualitative Closeout -- free text, V1 (see this model's own docstring
+    # for why no enum was invented here without a concrete requirement).
+    guest_quality: str | None = None
+    dinner_dynamics: str | None = None
+    initial_client_experience: str | None = None
+    immediate_outcomes: str | None = None
+    notable_signals: str | None = None
+    issues: str | None = None
+    referrals: str | None = None
+    future_opportunities: str | None = None
+    internal_notes: str | None = None
+
+    # Completion -- a nullable timestamp, not a separate status enum: no
+    # concrete requirement for more than "recorded" vs "not yet recorded"
+    # was found during this stage's own investigation.
+    completed_at: datetime | None = None
+    completed_by: str | None = None  # free text, no auth-identity system yet -- same
+    # placeholder convention as Client.owner / ClientNote.created_by / ActivityEvent.actor.
+
     created_at: datetime
     updated_at: datetime
     archived: bool = False

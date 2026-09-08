@@ -3,10 +3,13 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 // Client CRM Stage 1E's Engagement detail page must not fabricate data for
-// features that don't exist yet (Closeout, Day 3/30/90 follow-ups,
-// Guests, Notes/Activity) -- scanned directly from source, same
+// features that don't exist yet -- scanned directly from source, same
 // "no component-render harness" convention as client-detail-no-fake-
-// features.test.ts.
+// features.test.ts. Stage 1F adds a REAL Closeout section (the
+// EngagementCloseout feature actually exists now), so "no fake Closeout"
+// is no longer part of this guard -- see the Closeout-specific tests
+// below instead. Per-person attendance (Stage 1G), Day 3/30/90
+// follow-ups, and Notes/Activity remain unbuilt and stay forbidden.
 
 const ENGAGEMENT_DETAIL_PAGE = readFileSync(
   new URL("../app/clients/[id]/engagements/[engagementId]/page.tsx", import.meta.url),
@@ -14,21 +17,39 @@ const ENGAGEMENT_DETAIL_PAGE = readFileSync(
 );
 
 test("no hardcoded/fake tab navigation or sections for unbuilt features exists yet", () => {
-  for (const forbidden of [/>Closeout</, />Guests</, />Notes</, />Activity</, /Day 3/, /Day 30/, /Day 90/, /TabsTab/]) {
+  for (const forbidden of [/>Guests</, />Notes</, />Activity</, /Day 3/, /Day 30/, /Day 90/, /TabsTab/]) {
     assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, forbidden);
   }
 });
 
-test("no fabricated turnout/attendance/guest-quality/satisfaction data anywhere", () => {
-  for (const forbidden of [
-    /turnout/i,
-    /attendance rate/i,
-    /guest quality/i,
-    /dinner dynamics/i,
-    /client satisfaction/i,
-    /no-show/i,
-  ]) {
+test("no fabricated per-person attendance (Stage 1G, not built yet) or client-satisfaction language", () => {
+  for (const forbidden of [/EngagementParticipant/, /client satisfaction/i, /walk-in guest list/i]) {
     assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, forbidden);
+  }
+});
+
+// --- Stage 1F: real Closeout section ---------------------------------------
+
+test("a real Closeout section is present, using the shared aggregate-count/free-text fields, not a fake placeholder", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Closeout/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /No closeout recorded yet/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Add Closeout/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Edit Closeout/);
+});
+
+test("Closeout Archive/Restore is present, distinct from any delete action", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Archive Closeout/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Restore Closeout/);
+});
+
+test("no hard-delete control exists for a Closeout either", () => {
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /Delete Closeout/);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /deleteEngagementCloseout/);
+});
+
+test("Closeout turnout fields use the exact labels this stage specified", () => {
+  for (const label of [/Confirmed/, /Attended/, /No-Shows/, /Cancelled/, /Unexpected\/Walk-ins/, /Attendance rate/]) {
+    assert.match(ENGAGEMENT_DETAIL_PAGE, label);
   }
 });
 

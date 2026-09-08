@@ -1918,3 +1918,93 @@ export function updateClientEngagement(
     body: JSON.stringify(patch),
   });
 }
+
+// --- EngagementCloseout (Client CRM Stage 1F, 2026-09-08) -------------------
+// The same-day factual/qualitative baseline for one Engagement -- its own
+// entity, never fields on Engagement, never a structured ClientNote. At
+// most one EngagementCloseout ever exists per Engagement (enforced by the
+// backend service layer, not a DB constraint). `attendance_rate` is
+// deliberately NOT part of this type -- it's computed purely client-side
+// from confirmed_guest_count/cancelled_count/attended_count (see
+// lib/client-crm.ts's engagementCloseoutAttendanceRate), never persisted
+// or returned by the backend.
+
+export interface EngagementCloseout {
+  closeout_id: string;
+  engagement_id: string;
+  client_id: string;
+
+  confirmed_guest_count: number | null;
+  attended_count: number | null;
+  no_show_count: number | null;
+  cancelled_count: number | null;
+  unexpected_attendee_count: number | null;
+
+  guest_quality: string | null;
+  dinner_dynamics: string | null;
+  initial_client_experience: string | null;
+  immediate_outcomes: string | null;
+  notable_signals: string | null;
+  issues: string | null;
+  referrals: string | null;
+  future_opportunities: string | null;
+  internal_notes: string | null;
+
+  completed_at: string | null;
+  completed_by: string | null;
+
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+}
+
+export interface EngagementCloseoutCreateInput {
+  confirmed_guest_count?: number | null;
+  attended_count?: number | null;
+  no_show_count?: number | null;
+  cancelled_count?: number | null;
+  unexpected_attendee_count?: number | null;
+  guest_quality?: string | null;
+  dinner_dynamics?: string | null;
+  initial_client_experience?: string | null;
+  immediate_outcomes?: string | null;
+  notable_signals?: string | null;
+  issues?: string | null;
+  referrals?: string | null;
+  future_opportunities?: string | null;
+  internal_notes?: string | null;
+  completed_at?: string | null;
+  completed_by?: string | null;
+}
+
+export type EngagementCloseoutUpdateInput = Partial<EngagementCloseoutCreateInput> & { archived?: boolean };
+
+function closeoutUrl(clientId: string, engagementId: string): string {
+  return `/client-crm/clients/${clientId}/engagements/${engagementId}/closeout`;
+}
+
+/** 404 (surfaced as an ApiError) means no Closeout has been recorded yet --
+ * callers should treat that as an empty state, not a generic error. */
+export function getEngagementCloseout(clientId: string, engagementId: string): Promise<EngagementCloseout> {
+  return request<EngagementCloseout>(closeoutUrl(clientId, engagementId));
+}
+
+export function createEngagementCloseout(
+  clientId: string,
+  engagementId: string,
+  input: EngagementCloseoutCreateInput
+): Promise<EngagementCloseout> {
+  return post<EngagementCloseout>(closeoutUrl(clientId, engagementId), input);
+}
+
+export function updateEngagementCloseout(
+  clientId: string,
+  engagementId: string,
+  patch: EngagementCloseoutUpdateInput
+): Promise<EngagementCloseout> {
+  return request<EngagementCloseout>(closeoutUrl(clientId, engagementId), {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}

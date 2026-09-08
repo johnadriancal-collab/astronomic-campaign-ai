@@ -9,9 +9,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EngagementFormModal } from "@/components/engagement-form-modal";
-import { ApiError, getClient, getClientEngagement, updateClientEngagement, type Client, type Engagement } from "@/lib/api";
+import { EngagementCloseoutFormModal } from "@/components/engagement-closeout-form-modal";
+import {
+  ApiError,
+  getClient,
+  getClientEngagement,
+  getEngagementCloseout,
+  updateClientEngagement,
+  updateEngagementCloseout,
+  type Client,
+  type Engagement,
+  type EngagementCloseout,
+} from "@/lib/api";
 import {
   dinnerTypeLabel,
+  engagementCloseoutAttendanceRate,
   engagementContractStatusLabel,
   engagementPaymentStatusLabel,
   engagementStatusBadgeClass,
@@ -21,13 +33,14 @@ import {
 } from "@/lib/client-crm";
 import { cn } from "@/lib/utils";
 
-// Stage 1E: Overview only. This will eventually grow (a same-day debrief,
-// staged relationship follow-ups, guest list, notes/activity -- see the
-// Stage 1E investigation report for the planned sections) -- deliberately
-// NOT built as tabs yet with empty/fake other sections, since only
-// Overview has any real, backend-supported data behind it today. Nothing
-// about post-event outcomes is fabricated anywhere on this page -- none
-// of that exists yet.
+// Stage 1E: Overview + Commercial; Stage 1F adds a real Closeout section
+// now that EngagementCloseout actually exists (see this stage's own STOP
+// report). Still deliberately NOT a tabbed page with other empty/fake
+// sections (per-person guest list, staged relationship follow-ups,
+// notes/activity) -- only Overview, Commercial, and Closeout have any
+// real, backend-supported data behind them today. Nothing about turnout,
+// guest quality, or outcomes is fabricated anywhere on this page -- a
+// Closeout only ever renders once one has actually been recorded.
 export default function EngagementDetailPage() {
   const params = useParams<{ id: string; engagementId: string }>();
   const clientId = params.id;
@@ -40,6 +53,15 @@ export default function EngagementDetailPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+
+  // undefined = still loading; null = confirmed no Closeout recorded yet
+  // (a normal, expected state, not an error); an object = the recorded
+  // Closeout (possibly archived -- rendered with its own Archived state).
+  const [closeout, setCloseout] = useState<EngagementCloseout | null | undefined>(undefined);
+  const [closeoutError, setCloseoutError] = useState<string | null>(null);
+  const [closeoutModalOpen, setCloseoutModalOpen] = useState(false);
+  const [archivingCloseout, setArchivingCloseout] = useState(false);
+  const [closeoutActionError, setCloseoutActionError] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -60,10 +82,47 @@ export default function EngagementDetailPage() {
     }
   }
 
+  async function loadCloseout() {
+    try {
+      setCloseout(await getEngagementCloseout(clientId, engagementId));
+      setCloseoutError(null);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        setCloseout(null); // confirmed: none recorded yet
+        setCloseoutError(null);
+        return;
+      }
+      setCloseoutError(
+        err instanceof ApiError ? `Couldn't load the Closeout (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    }
+  }
+
   useEffect(() => {
     load();
+    loadCloseout();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId, engagementId]);
+
+  async function handleArchiveCloseoutToggle() {
+    if (!closeout) return;
+    const nextArchived = !closeout.archived;
+    if (nextArchived) {
+      const confirmed = window.confirm("Archive this Closeout? It can be restored anytime.");
+      if (!confirmed) return;
+    }
+    setArchivingCloseout(true);
+    setCloseoutActionError(null);
+    try {
+      setCloseout(await updateEngagementCloseout(clientId, engagementId, { archived: nextArchived }));
+    } catch (err) {
+      setCloseoutActionError(
+        err instanceof ApiError ? `Couldn't update the Closeout (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    } finally {
+      setArchivingCloseout(false);
+    }
+  }
 
   async function handleArchiveToggle() {
     if (!engagement) return;
@@ -214,6 +273,121 @@ export default function EngagementDetailPage() {
             )}
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-sm">Closeout</CardTitle>
+            {closeout && !closeout.archived && (
+              <div className="flex gap-2">
+                <Button size="sm" variant="outline" onClick={() => setCloseoutModalOpen(true)}>
+                  Edit Closeout
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={archivingCloseout}
+                  className="text-muted-foreground hover:text-destructive"
+                  onClick={handleArchiveCloseoutToggle}
+                >
+                  {archivingCloseout ? "Saving..." : "Archive Closeout"}
+                </Button>
+              </div>
+            )}
+            {closeout && closeout.archived && (
+              <Button size="sm" variant="outline" disabled={archivingCloseout} onClick={handleArchiveCloseoutToggle}>
+                {archivingCloseout ? "Saving..." : "Restore Closeout"}
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent>
+            {closeoutError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{closeoutError}</AlertDescription>
+              </Alert>
+            )}
+            {closeoutActionError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{closeoutActionError}</AlertDescription>
+              </Alert>
+            )}
+
+            {closeout === undefined && !closeoutError && <p className="text-sm text-muted-foreground">Loading…</p>}
+
+            {closeout === null && (
+              <div className="flex flex-col items-start gap-3">
+                <p className="text-sm text-muted-foreground">No closeout recorded yet</p>
+                <Button size="sm" onClick={() => setCloseoutModalOpen(true)}>
+                  Add Closeout
+                </Button>
+              </div>
+            )}
+
+            {closeout && (
+              <div className="space-y-6">
+                {closeout.archived && (
+                  <Alert>
+                    <Lock className="h-4 w-4" />
+                    <AlertTitle>Archived</AlertTitle>
+                    <AlertDescription>This Closeout is archived. Its record is unchanged and can be restored anytime.</AlertDescription>
+                  </Alert>
+                )}
+
+                <div>
+                  <p className="mb-2 text-xs font-medium text-muted-foreground">Turnout</p>
+                  <div className="grid gap-4 sm:grid-cols-5">
+                    <OverviewField label="Confirmed" value={formatCloseoutCount(closeout.confirmed_guest_count)} />
+                    <OverviewField label="Attended" value={formatCloseoutCount(closeout.attended_count)} />
+                    <OverviewField label="No-Shows" value={formatCloseoutCount(closeout.no_show_count)} />
+                    <OverviewField label="Cancelled" value={formatCloseoutCount(closeout.cancelled_count)} />
+                    <OverviewField label="Unexpected/Walk-ins" value={formatCloseoutCount(closeout.unexpected_attendee_count)} />
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Attendance rate: {formatAttendanceRate(engagementCloseoutAttendanceRate(closeout))}
+                  </p>
+                </div>
+
+                {(closeout.guest_quality || closeout.dinner_dynamics || closeout.initial_client_experience) && (
+                  <div>
+                    <p className="mb-2 text-xs font-medium text-muted-foreground">Dinner Review</p>
+                    <div className="space-y-3">
+                      {closeout.guest_quality && <OverviewField label="Guest Quality" value={closeout.guest_quality} />}
+                      {closeout.dinner_dynamics && <OverviewField label="Dinner Dynamics" value={closeout.dinner_dynamics} />}
+                      {closeout.initial_client_experience && (
+                        <OverviewField label="Initial Client Experience" value={closeout.initial_client_experience} />
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {(closeout.immediate_outcomes || closeout.notable_signals || closeout.issues || closeout.referrals || closeout.future_opportunities) && (
+                  <div>
+                    <p className="mb-2 text-xs font-medium text-muted-foreground">Outcomes</p>
+                    <div className="space-y-3">
+                      {closeout.immediate_outcomes && <OverviewField label="Immediate Outcomes" value={closeout.immediate_outcomes} />}
+                      {closeout.notable_signals && <OverviewField label="Notable Signals" value={closeout.notable_signals} />}
+                      {closeout.issues && <OverviewField label="Issues / Problems" value={closeout.issues} />}
+                      {closeout.referrals && <OverviewField label="Referrals" value={closeout.referrals} />}
+                      {closeout.future_opportunities && <OverviewField label="Future Opportunities" value={closeout.future_opportunities} />}
+                    </div>
+                  </div>
+                )}
+
+                <div>
+                  <p className="mb-2 text-xs font-medium text-muted-foreground">Internal</p>
+                  <div className="grid gap-4 sm:grid-cols-2">
+                    {closeout.internal_notes && (
+                      <div className="sm:col-span-2">
+                        <OverviewField label="Internal Closeout Notes" value={closeout.internal_notes} />
+                      </div>
+                    )}
+                    <OverviewField label="Completed By" value={closeout.completed_by || "—"} />
+                    <OverviewField label="Completed At" value={formatEngagementDate(closeout.completed_at)} />
+                  </div>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <EngagementFormModal
@@ -223,8 +397,24 @@ export default function EngagementDetailPage() {
         existingEngagement={engagement}
         onSaved={setEngagement}
       />
+      <EngagementCloseoutFormModal
+        open={closeoutModalOpen}
+        onOpenChange={setCloseoutModalOpen}
+        client={client}
+        engagement={engagement}
+        existingCloseout={closeout ?? null}
+        onSaved={setCloseout}
+      />
     </div>
   );
+}
+
+function formatCloseoutCount(value: number | null): string {
+  return value === null ? "—" : String(value);
+}
+
+function formatAttendanceRate(rate: number | null): string {
+  return rate === null ? "—" : `${Math.round(rate * 100)}%`;
 }
 
 function OverviewField({ label, value }: { label: string; value: string }) {

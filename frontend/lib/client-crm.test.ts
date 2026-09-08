@@ -17,7 +17,12 @@ import {
   dinnerTypeLabel,
   emptyClientContactFormState,
   emptyClientFormState,
+  emptyEngagementCloseoutFormState,
   emptyEngagementFormState,
+  engagementCloseoutAttendanceRate,
+  engagementCloseoutCreatePayload,
+  engagementCloseoutFormStateFromCloseout,
+  engagementCloseoutUpdatePatch,
   engagementCreatePayload,
   engagementFormStateFromEngagement,
   engagementStatusLabel,
@@ -29,7 +34,7 @@ import {
   isDinnerShapedEngagementType,
   isEngagementFormValid,
 } from "./client-crm.ts";
-import type { Client, ClientContact, Engagement } from "./api.ts";
+import type { Client, ClientContact, Engagement, EngagementCloseout } from "./api.ts";
 
 function makeClient(overrides: Partial<Client> = {}): Client {
   return {
@@ -490,4 +495,185 @@ test("engagementUpdatePatch reflects a fee change", () => {
   const form = engagementFormStateFromEngagement(engagement);
   form.fee = "7500";
   assert.deepEqual(engagementUpdatePatch(form, engagement), { fee: 7500 });
+});
+
+// --- EngagementCloseout (Stage 1F) -----------------------------------------
+
+function makeEngagementCloseout(overrides: Partial<EngagementCloseout> = {}): EngagementCloseout {
+  return {
+    closeout_id: "co1",
+    engagement_id: "e1",
+    client_id: "c1",
+    confirmed_guest_count: null,
+    attended_count: null,
+    no_show_count: null,
+    cancelled_count: null,
+    unexpected_attendee_count: null,
+    guest_quality: null,
+    dinner_dynamics: null,
+    initial_client_experience: null,
+    immediate_outcomes: null,
+    notable_signals: null,
+    issues: null,
+    referrals: null,
+    future_opportunities: null,
+    internal_notes: null,
+    completed_at: null,
+    completed_by: null,
+    created_at: "2026-09-08T00:00:00Z",
+    updated_at: "2026-09-08T00:00:00Z",
+    archived: false,
+    ...overrides,
+  };
+}
+
+// --- attendance rate -----------------------------------------------------
+
+test("engagementCloseoutAttendanceRate is attended / confirmed_guest_count -- cancelled_count is NOT subtracted", () => {
+  const rate = engagementCloseoutAttendanceRate({ confirmed_guest_count: 10, attended_count: 8 });
+  assert.equal(rate, 0.8);
+});
+
+test("engagementCloseoutAttendanceRate returns null when either input is missing", () => {
+  assert.equal(engagementCloseoutAttendanceRate({ confirmed_guest_count: null, attended_count: 8 }), null);
+  assert.equal(engagementCloseoutAttendanceRate({ confirmed_guest_count: 10, attended_count: null }), null);
+  assert.equal(engagementCloseoutAttendanceRate({ confirmed_guest_count: null, attended_count: null }), null);
+});
+
+test("engagementCloseoutAttendanceRate returns null rather than dividing by a zero or negative confirmed count", () => {
+  assert.equal(engagementCloseoutAttendanceRate({ confirmed_guest_count: 0, attended_count: 0 }), null);
+});
+
+test("engagementCloseoutAttendanceRate excludes cancelled/unexpected/no-show counts from the formula entirely", () => {
+  // V1 definition: confirmed_guest_count IS the expected/confirmed guest
+  // count -- cancelled_count is never subtracted from it (the system
+  // makes no assumption about whether cancellations were already
+  // reflected in how a human entered Confirmed Guests). No-shows and
+  // walk-ins stay separately recorded fields, not folded into this
+  // formula either.
+  const base = { confirmed_guest_count: 10, attended_count: 8 };
+  const withExtras = engagementCloseoutAttendanceRate({
+    ...base,
+    // @ts-expect-error -- extra fields the function's Pick type ignores
+    cancelled_count: 3,
+    unexpected_attendee_count: 5,
+    no_show_count: 2,
+  });
+  assert.equal(withExtras, engagementCloseoutAttendanceRate(base));
+});
+
+test("engagementCloseoutAttendanceRate can exceed 100% if attendance data implies more attendees than expected", () => {
+  // Not clamped -- an honest reflection of what was entered, not silently
+  // capped to hide a possible data-entry inconsistency.
+  const rate = engagementCloseoutAttendanceRate({ confirmed_guest_count: 10, attended_count: 12 });
+  assert.equal(rate, 1.2);
+});
+
+// --- form state / payload / patch -----------------------------------------
+
+test("emptyEngagementCloseoutFormState starts fully blank", () => {
+  const form = emptyEngagementCloseoutFormState();
+  assert.equal(form.confirmedGuestCount, "");
+  assert.equal(form.attendedCount, "");
+  assert.equal(form.guestQuality, "");
+  assert.equal(form.completedAt, "");
+});
+
+test("engagementCloseoutCreatePayload distinguishes blank (null) from an explicit zero", () => {
+  const payload = engagementCloseoutCreatePayload({
+    ...emptyEngagementCloseoutFormState(),
+    confirmedGuestCount: "10",
+    noShowCount: "0",
+    cancelledCount: "",
+  });
+  assert.equal(payload.confirmed_guest_count, 10);
+  assert.equal(payload.no_show_count, 0);
+  assert.equal(payload.cancelled_count, null);
+});
+
+test("engagementCloseoutCreatePayload never sends a negative count -- treats it as not entered", () => {
+  const payload = engagementCloseoutCreatePayload({ ...emptyEngagementCloseoutFormState(), attendedCount: "-5" });
+  assert.equal(payload.attended_count, null);
+});
+
+test("engagementCloseoutCreatePayload trims and nulls blank qualitative fields", () => {
+  const payload = engagementCloseoutCreatePayload({ ...emptyEngagementCloseoutFormState(), guestQuality: "  Strong  " });
+  assert.equal(payload.guest_quality, "Strong");
+  assert.equal(payload.dinner_dynamics, null);
+});
+
+test("engagementCloseoutCreatePayload carries every field through when filled in", () => {
+  const payload = engagementCloseoutCreatePayload({
+    confirmedGuestCount: "12",
+    attendedCount: "10",
+    noShowCount: "2",
+    cancelledCount: "0",
+    unexpectedAttendeeCount: "1",
+    guestQuality: "Strong",
+    dinnerDynamics: "Energetic",
+    initialClientExperience: "Thrilled",
+    immediateOutcomes: "Two intros",
+    notableSignals: "Co-investing interest",
+    issues: "Ran late",
+    referrals: "One referral",
+    futureOpportunities: "Possible Q1 follow-on",
+    internalNotes: "Reuse venue",
+    completedAt: "2026-09-08",
+    completedBy: "Chris",
+  });
+  assert.equal(payload.confirmed_guest_count, 12);
+  assert.equal(payload.attended_count, 10);
+  assert.equal(payload.no_show_count, 2);
+  assert.equal(payload.cancelled_count, 0);
+  assert.equal(payload.unexpected_attendee_count, 1);
+  assert.equal(payload.guest_quality, "Strong");
+  assert.equal(payload.completed_by, "Chris");
+  assert.equal(payload.completed_at, new Date("2026-09-08T00:00:00Z").toISOString());
+});
+
+test("engagementCloseoutUpdatePatch is empty when nothing changed", () => {
+  const closeout = makeEngagementCloseout({ attended_count: 10, guest_quality: "Strong" });
+  const form = engagementCloseoutFormStateFromCloseout(closeout);
+  assert.deepEqual(engagementCloseoutUpdatePatch(form, closeout), {});
+});
+
+test("engagementCloseoutUpdatePatch includes only the field that actually changed", () => {
+  const closeout = makeEngagementCloseout({ attended_count: 10 });
+  const form = engagementCloseoutFormStateFromCloseout(closeout);
+  form.attendedCount = "11";
+  assert.deepEqual(engagementCloseoutUpdatePatch(form, closeout), { attended_count: 11 });
+});
+
+test("engagementCloseoutUpdatePatch can clear a previously-set count back to null", () => {
+  const closeout = makeEngagementCloseout({ cancelled_count: 2 });
+  const form = engagementCloseoutFormStateFromCloseout(closeout);
+  form.cancelledCount = "";
+  assert.deepEqual(engagementCloseoutUpdatePatch(form, closeout), { cancelled_count: null });
+});
+
+test("engagementCloseoutUpdatePatch can set a previously-null count to an explicit zero", () => {
+  const closeout = makeEngagementCloseout({ no_show_count: null });
+  const form = engagementCloseoutFormStateFromCloseout(closeout);
+  form.noShowCount = "0";
+  assert.deepEqual(engagementCloseoutUpdatePatch(form, closeout), { no_show_count: 0 });
+});
+
+test("engagementCloseoutUpdatePatch never includes closeout_id/engagement_id/client_id/created_at/updated_at", () => {
+  const closeout = makeEngagementCloseout();
+  const form = engagementCloseoutFormStateFromCloseout(closeout);
+  form.guestQuality = "Changed";
+  const patch = engagementCloseoutUpdatePatch(form, closeout);
+  assert.ok(!("closeout_id" in patch));
+  assert.ok(!("engagement_id" in patch));
+  assert.ok(!("client_id" in patch));
+  assert.ok(!("created_at" in patch));
+  assert.ok(!("updated_at" in patch));
+});
+
+test("engagementCloseoutUpdatePatch reflects multiple simultaneous changes", () => {
+  const closeout = makeEngagementCloseout({ attended_count: 8, guest_quality: null });
+  const form = engagementCloseoutFormStateFromCloseout(closeout);
+  form.attendedCount = "9";
+  form.guestQuality = "Strong";
+  assert.deepEqual(engagementCloseoutUpdatePatch(form, closeout), { attended_count: 9, guest_quality: "Strong" });
 });

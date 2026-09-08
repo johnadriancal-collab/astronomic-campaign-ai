@@ -22,6 +22,8 @@ from datetime import date, datetime, timezone
 import pytest
 import pytest_asyncio
 
+from pydantic import ValidationError
+
 from app.models.client_crm import (
     Client,
     ClientContact,
@@ -31,6 +33,7 @@ from app.models.client_crm import (
     ClientStatus,
     DinnerType,
     Engagement,
+    EngagementCloseout,
     EngagementContractStatus,
     EngagementPaymentStatus,
     EngagementStatus,
@@ -39,10 +42,12 @@ from app.models.client_crm import (
 from app.repositories.client_contact_store import ClientContactNotFoundError, MemoryClientContactStore
 from app.repositories.client_note_store import ClientNoteNotFoundError, MemoryClientNoteStore
 from app.repositories.client_store import ClientNotFoundError, MemoryClientStore
+from app.repositories.engagement_closeout_store import EngagementCloseoutNotFoundError, MemoryEngagementCloseoutStore
 from app.repositories.engagement_store import EngagementNotFoundError, MemoryEngagementStore
 from app.repositories.sqlite_client_contact_store import SQLiteClientContactStore
 from app.repositories.sqlite_client_note_store import SQLiteClientNoteStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
+from app.repositories.sqlite_engagement_closeout_store import SQLiteEngagementCloseoutStore
 from app.repositories.sqlite_engagement_store import SQLiteEngagementStore
 
 pytestmark = pytest.mark.asyncio
@@ -68,6 +73,17 @@ def _engagement(engagement_id="e1", client_id="c1", created_at=NOW, updated_at=N
         client_id=client_id,
         title=overrides.pop("title", "SF Investor Dinner"),
         engagement_type=overrides.pop("engagement_type", EngagementType.DINNER),
+        created_at=created_at,
+        updated_at=updated_at,
+        **overrides,
+    )
+
+
+def _closeout(closeout_id="co1", engagement_id="e1", client_id="c1", created_at=NOW, updated_at=NOW, **overrides) -> EngagementCloseout:
+    return EngagementCloseout(
+        closeout_id=closeout_id,
+        engagement_id=engagement_id,
+        client_id=client_id,
         created_at=created_at,
         updated_at=updated_at,
         **overrides,
@@ -105,6 +121,14 @@ async def sqlite_client_contact_store(tmp_path):
 @pytest_asyncio.fixture
 async def sqlite_engagement_store(tmp_path):
     s = SQLiteEngagementStore(str(tmp_path / "engagements.db"))
+    await s.connect()
+    yield s
+    await s.close()
+
+
+@pytest_asyncio.fixture
+async def sqlite_engagement_closeout_store(tmp_path):
+    s = SQLiteEngagementCloseoutStore(str(tmp_path / "engagement_closeouts.db"))
     await s.connect()
     yield s
     await s.close()
@@ -223,6 +247,76 @@ def test_engagement_defaults_to_planned_with_no_deal_relationship_field():
     # report) -- Engagement carries no deal_id or other Deal-shaped field
     # at all, not even a reserved one, until that domain is designed.
     assert "deal_id" not in Engagement.model_fields
+
+
+# =====================================================================
+# EngagementCloseout -- Client CRM Stage 1F (2026-09-08)
+# =====================================================================
+
+
+def test_engagement_closeout_json_round_trip_preserves_every_field():
+    closeout = _closeout(
+        confirmed_guest_count=12,
+        attended_count=10,
+        no_show_count=2,
+        cancelled_count=0,
+        unexpected_attendee_count=1,
+        guest_quality="Strong",
+        dinner_dynamics="Energetic",
+        initial_client_experience="Thrilled",
+        immediate_outcomes="Two intros",
+        notable_signals="Co-investing interest",
+        issues="Ran late",
+        referrals="One referral offered",
+        future_opportunities="Possible Q1 follow-on",
+        internal_notes="Reuse venue",
+        completed_at=NOW,
+        completed_by="Chris",
+    )
+    restored = EngagementCloseout.model_validate_json(closeout.model_dump_json())
+    assert restored == closeout
+
+
+def test_engagement_closeout_counts_default_to_none_not_zero():
+    closeout = _closeout()
+    assert closeout.confirmed_guest_count is None
+    assert closeout.attended_count is None
+    assert closeout.no_show_count is None
+    assert closeout.cancelled_count is None
+    assert closeout.unexpected_attendee_count is None
+
+
+def test_engagement_closeout_distinguishes_explicit_zero_from_null():
+    closeout = _closeout(no_show_count=0, cancelled_count=None)
+    assert closeout.no_show_count == 0
+    assert closeout.cancelled_count is None
+    restored = EngagementCloseout.model_validate_json(closeout.model_dump_json())
+    assert restored.no_show_count == 0
+    assert restored.cancelled_count is None
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["confirmed_guest_count", "attended_count", "no_show_count", "cancelled_count", "unexpected_attendee_count"],
+)
+def test_engagement_closeout_rejects_a_negative_count_for_every_count_field(field):
+    with pytest.raises(ValidationError):
+        _closeout(**{field: -1})
+
+
+def test_engagement_closeout_defaults_not_completed_and_not_archived():
+    closeout = _closeout()
+    assert closeout.completed_at is None
+    assert closeout.completed_by is None
+    assert closeout.archived is False
+
+
+def test_engagement_closeout_has_no_status_enum_field():
+    """No dedicated Closeout status enum was invented -- see this
+    model's own docstring and the Stage 1F investigation report:
+    completed_at (nullable timestamp) already answers "recorded or not"
+    without a redundant enum."""
+    assert "status" not in EngagementCloseout.model_fields
 
 
 def test_client_note_json_round_trip_preserves_every_field():
@@ -522,6 +616,77 @@ async def test_sqlite_engagement_save_and_archive(sqlite_engagement_store):
     assert fresh.status == EngagementStatus.CANCELLED
     with pytest.raises(EngagementNotFoundError):
         await store.save(_engagement("e-missing"))
+
+
+# =====================================================================
+# EngagementCloseout store -- Memory + SQLite parity
+# =====================================================================
+
+
+async def test_memory_engagement_closeout_create_and_get_for_engagement():
+    store = MemoryEngagementCloseoutStore()
+    await store.create(_closeout("co1", "e1", "c1"))
+
+    assert (await store.get_for_engagement("e1")).closeout_id == "co1"
+    assert await store.get_for_engagement("e-missing") is None
+
+
+async def test_sqlite_engagement_closeout_create_and_get_for_engagement(sqlite_engagement_closeout_store):
+    store = sqlite_engagement_closeout_store
+    await store.create(_closeout("co1", "e1", "c1"))
+
+    assert (await store.get_for_engagement("e1")).closeout_id == "co1"
+    assert await store.get_for_engagement("e-missing") is None
+
+
+async def test_memory_engagement_closeout_only_matches_its_own_engagement():
+    store = MemoryEngagementCloseoutStore()
+    await store.create(_closeout("co1", "e1", "c1"))
+    await store.create(_closeout("co2", "e2", "c1"))
+
+    assert (await store.get_for_engagement("e1")).closeout_id == "co1"
+    assert (await store.get_for_engagement("e2")).closeout_id == "co2"
+
+
+async def test_sqlite_engagement_closeout_only_matches_its_own_engagement(sqlite_engagement_closeout_store):
+    store = sqlite_engagement_closeout_store
+    await store.create(_closeout("co1", "e1", "c1"))
+    await store.create(_closeout("co2", "e2", "c1"))
+
+    assert (await store.get_for_engagement("e1")).closeout_id == "co1"
+    assert (await store.get_for_engagement("e2")).closeout_id == "co2"
+
+
+async def test_memory_engagement_closeout_save_and_archive():
+    store = MemoryEngagementCloseoutStore()
+    await store.create(_closeout())
+    updated = (await store.get("co1")).model_copy(update={"archived": True, "attended_count": 10})
+    await store.save(updated)
+    fresh = await store.get("co1")
+    assert fresh.archived is True
+    assert fresh.attended_count == 10
+    with pytest.raises(EngagementCloseoutNotFoundError):
+        await store.save(_closeout("co-missing"))
+
+
+async def test_sqlite_engagement_closeout_save_and_archive(sqlite_engagement_closeout_store):
+    store = sqlite_engagement_closeout_store
+    await store.create(_closeout())
+    updated = (await store.get("co1")).model_copy(update={"archived": True, "attended_count": 10})
+    await store.save(updated)
+    fresh = await store.get("co1")
+    assert fresh.archived is True
+    assert fresh.attended_count == 10
+    with pytest.raises(EngagementCloseoutNotFoundError):
+        await store.save(_closeout("co-missing"))
+
+
+async def test_sqlite_engagement_closeout_preserves_null_vs_zero_across_a_real_roundtrip(sqlite_engagement_closeout_store):
+    store = sqlite_engagement_closeout_store
+    await store.create(_closeout(no_show_count=0, cancelled_count=None))
+    fresh = await store.get("co1")
+    assert fresh.no_show_count == 0
+    assert fresh.cancelled_count is None
 
 
 # =====================================================================

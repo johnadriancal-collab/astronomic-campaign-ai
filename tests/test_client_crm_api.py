@@ -21,6 +21,7 @@ from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.client_contact_store import MemoryClientContactStore
 from app.repositories.client_store import MemoryClientStore
 from app.repositories.crm_contact_store import MemoryCrmContactStore
+from app.repositories.engagement_closeout_store import MemoryEngagementCloseoutStore
 from app.repositories.engagement_store import MemoryEngagementStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.client_crm_service import ClientCrmService
@@ -34,6 +35,7 @@ def test_client():
         client_contact_store=MemoryClientContactStore(),
         crm_contact_store=MemoryCrmContactStore(),
         engagement_store=MemoryEngagementStore(),
+        engagement_closeout_store=MemoryEngagementCloseoutStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -53,6 +55,7 @@ def contact_test_client():
         client_contact_store=MemoryClientContactStore(),
         crm_contact_store=crm_contact_store,
         engagement_store=MemoryEngagementStore(),
+        engagement_closeout_store=MemoryEngagementCloseoutStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -601,3 +604,184 @@ def test_no_delete_route_exists_for_engagements(test_client):
     ).json()
     resp = client.delete(f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}")
     assert resp.status_code in (404, 405)
+
+
+# =====================================================================
+# EngagementCloseout -- Client CRM Stage 1F (2026-09-08)
+# =====================================================================
+
+
+def _create_client_and_engagement(client) -> tuple[dict, dict]:
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    engagement = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "SF Dinner", "engagement_type": "dinner", "dinner_type": "investor_dinner"},
+    ).json()
+    return created_client, engagement
+
+
+def _closeout_url(client_id: str, engagement_id: str) -> str:
+    return f"/client-crm/clients/{client_id}/engagements/{engagement_id}/closeout"
+
+
+def test_get_engagement_closeout_missing_is_404(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.get(_closeout_url(created_client["client_id"], engagement["engagement_id"]))
+    assert resp.status_code == 404
+
+
+def test_get_engagement_closeout_missing_client_is_404(test_client):
+    client, _service = test_client
+    resp = client.get(_closeout_url("does-not-exist", "also-does-not-exist"))
+    assert resp.status_code == 404
+
+
+def test_create_engagement_closeout_minimal(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.post(_closeout_url(created_client["client_id"], engagement["engagement_id"]), json={})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["engagement_id"] == engagement["engagement_id"]
+    assert body["client_id"] == created_client["client_id"]
+    assert body["confirmed_guest_count"] is None
+    assert body["archived"] is False
+
+
+def test_create_engagement_closeout_with_full_fields(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.post(
+        _closeout_url(created_client["client_id"], engagement["engagement_id"]),
+        json={
+            "confirmed_guest_count": 12,
+            "attended_count": 10,
+            "no_show_count": 2,
+            "cancelled_count": 0,
+            "unexpected_attendee_count": 1,
+            "guest_quality": "Strong",
+            "dinner_dynamics": "Energetic",
+            "initial_client_experience": "Thrilled",
+            "immediate_outcomes": "Two intros",
+            "notable_signals": "Co-investing interest",
+            "issues": "Ran late",
+            "referrals": "One referral offered",
+            "future_opportunities": "Possible Q1 follow-on",
+            "internal_notes": "Reuse venue",
+            "completed_by": "Chris",
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["confirmed_guest_count"] == 12
+    assert body["no_show_count"] == 2
+    assert body["cancelled_count"] == 0  # explicit zero preserved
+    assert body["guest_quality"] == "Strong"
+    assert body["completed_by"] == "Chris"
+
+
+def test_create_engagement_closeout_negative_count_is_422(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.post(
+        _closeout_url(created_client["client_id"], engagement["engagement_id"]), json={"attended_count": -1}
+    )
+    assert resp.status_code == 422
+
+
+def test_create_engagement_closeout_missing_engagement_is_404(test_client):
+    client, _service = test_client
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(_closeout_url(created_client["client_id"], "does-not-exist"), json={})
+    assert resp.status_code == 404
+
+
+def test_create_engagement_closeout_duplicate_is_409(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _closeout_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={})
+
+    resp = client.post(url, json={})
+    assert resp.status_code == 409
+
+
+def test_get_engagement_closeout_after_create(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _closeout_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={"attended_count": 10})
+
+    resp = client.get(url)
+    assert resp.status_code == 200
+    assert resp.json()["attended_count"] == 10
+
+
+def test_update_engagement_closeout_partial_patch(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _closeout_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={"attended_count": 10, "guest_quality": "Strong"})
+
+    resp = client.patch(url, json={"attended_count": 11})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["attended_count"] == 11
+    assert body["guest_quality"] == "Strong"
+
+
+def test_update_engagement_closeout_negative_count_is_422(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _closeout_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={})
+
+    resp = client.patch(url, json={"no_show_count": -1})
+    assert resp.status_code == 422
+
+
+def test_update_engagement_closeout_missing_is_404(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.patch(_closeout_url(created_client["client_id"], engagement["engagement_id"]), json={"attended_count": 5})
+    assert resp.status_code == 404
+
+
+def test_archive_and_restore_engagement_closeout_via_patch(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _closeout_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={})
+
+    archived = client.patch(url, json={"archived": True})
+    assert archived.status_code == 200
+    assert archived.json()["archived"] is True
+
+    restored = client.patch(url, json={"archived": False})
+    assert restored.status_code == 200
+    assert restored.json()["archived"] is False
+
+
+def test_no_delete_route_exists_for_engagement_closeout(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _closeout_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={})
+
+    resp = client.delete(url)
+    assert resp.status_code in (404, 405)
+
+
+def test_engagement_closeout_isolation_across_clients(test_client):
+    client, _service = test_client
+    created_client_a, engagement_a = _create_client_and_engagement(client)
+    created_client_b = client.post("/client-crm/clients", json={"name": "Other Co"}).json()
+    url_a = _closeout_url(created_client_a["client_id"], engagement_a["engagement_id"])
+    client.post(url_a, json={"attended_count": 10})
+
+    resp = client.get(_closeout_url(created_client_b["client_id"], engagement_a["engagement_id"]))
+    assert resp.status_code == 404
+
+    resp = client.patch(_closeout_url(created_client_b["client_id"], engagement_a["engagement_id"]), json={"attended_count": 1})
+    assert resp.status_code == 404

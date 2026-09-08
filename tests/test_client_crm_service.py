@@ -18,11 +18,19 @@ from app.repositories.client_contact_store import ClientContactStore, MemoryClie
 from app.repositories.client_note_store import MemoryClientNoteStore
 from app.repositories.client_store import ClientStore, MemoryClientStore
 from app.repositories.crm_contact_store import CrmContactStore, MemoryCrmContactStore
+from app.repositories.engagement_closeout_store import EngagementCloseoutStore, MemoryEngagementCloseoutStore
 from app.repositories.engagement_store import EngagementStore, MemoryEngagementStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.services.activity_log_service import ActivityLogService
 from app.repositories.activity_event_store import MemoryActivityEventStore
-from app.services.client_crm_service import ClientContactNotFound, ClientCrmService, ClientNotFound, EngagementNotFound
+from app.services.client_crm_service import (
+    ClientContactNotFound,
+    ClientCrmService,
+    ClientNotFound,
+    EngagementCloseoutAlreadyExists,
+    EngagementCloseoutNotFound,
+    EngagementNotFound,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -33,6 +41,7 @@ def _make_service(
     client_contact_store: ClientContactStore | None = None,
     crm_contact_store: CrmContactStore | None = None,
     engagement_store: EngagementStore | None = None,
+    engagement_closeout_store: EngagementCloseoutStore | None = None,
 ) -> tuple[ClientCrmService, ActivityLogService]:
     activity_log = ActivityLogService(MemoryActivityEventStore())
     service = ClientCrmService(
@@ -41,6 +50,7 @@ def _make_service(
         client_contact_store=client_contact_store or MemoryClientContactStore(),
         crm_contact_store=crm_contact_store or MemoryCrmContactStore(),
         engagement_store=engagement_store or MemoryEngagementStore(),
+        engagement_closeout_store=engagement_closeout_store or MemoryEngagementCloseoutStore(),
     )
     return service, activity_log
 
@@ -113,6 +123,19 @@ def engagement_service():
     engagement_store = MemoryEngagementStore()
     service, activity_log = _make_service(client_store, engagement_store=engagement_store)
     return service, activity_log, engagement_store
+
+
+@pytest.fixture
+def engagement_closeout_service():
+    """Same as engagement_service, but ALSO exposes the
+    EngagementCloseoutStore directly."""
+    client_store = MemoryClientStore()
+    engagement_store = MemoryEngagementStore()
+    engagement_closeout_store = MemoryEngagementCloseoutStore()
+    service, activity_log = _make_service(
+        client_store, engagement_store=engagement_store, engagement_closeout_store=engagement_closeout_store
+    )
+    return service, activity_log, engagement_closeout_store
 
 
 # =====================================================================
@@ -927,3 +950,288 @@ def test_engagement_type_and_dinner_type_enum_values_match_stage_1e1_taxonomy():
     assert {member.value for member in DinnerType} == {
         "investor_dinner", "fireside_dinner", "bizdev_dinner", "donor_dinner", "custom_dinner",
     }
+
+
+# =====================================================================
+# EngagementCloseout -- Client CRM Stage 1F (2026-09-08)
+# =====================================================================
+
+
+async def _make_client_and_engagement(service, **engagement_overrides):
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    fields = {"title": "SF Investor Dinner", "engagement_type": "dinner", "dinner_type": "investor_dinner"}
+    fields.update(engagement_overrides)
+    engagement = await service.create_client_engagement(client.client_id, fields)
+    return client, engagement
+
+
+async def test_get_engagement_closeout_raises_not_found_when_none_recorded_yet(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(EngagementCloseoutNotFound):
+        await service.get_engagement_closeout(client.client_id, engagement.engagement_id)
+
+
+async def test_get_engagement_closeout_requires_a_real_engagement(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+
+    with pytest.raises(EngagementNotFound):
+        await service.get_engagement_closeout(client.client_id, "does-not-exist")
+
+
+async def test_create_engagement_closeout_minimal(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    closeout = await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+
+    assert closeout.closeout_id
+    assert closeout.engagement_id == engagement.engagement_id
+    assert closeout.client_id == client.client_id
+    assert closeout.confirmed_guest_count is None
+    assert closeout.attended_count is None
+    assert closeout.archived is False
+    assert closeout.created_at == closeout.updated_at
+
+
+async def test_create_engagement_closeout_distinguishes_null_from_explicit_zero(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    closeout = await service.create_engagement_closeout(
+        client.client_id,
+        engagement.engagement_id,
+        {"confirmed_guest_count": 10, "no_show_count": 0, "cancelled_count": None},
+    )
+
+    assert closeout.confirmed_guest_count == 10
+    assert closeout.no_show_count == 0  # explicit zero, not None
+    assert closeout.cancelled_count is None  # not entered
+
+
+async def test_create_engagement_closeout_accepts_every_field(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    now = datetime.now(timezone.utc)
+
+    closeout = await service.create_engagement_closeout(
+        client.client_id,
+        engagement.engagement_id,
+        {
+            "confirmed_guest_count": 12,
+            "attended_count": 10,
+            "no_show_count": 2,
+            "cancelled_count": 1,
+            "unexpected_attendee_count": 1,
+            "guest_quality": "Strong investor turnout",
+            "dinner_dynamics": "Energetic, good cross-table conversation",
+            "initial_client_experience": "Client seemed thrilled",
+            "immediate_outcomes": "Two intro requests",
+            "notable_signals": "One guest asked about co-investing",
+            "issues": "Ran 20 minutes over",
+            "referrals": "Guest offered to refer a colleague",
+            "future_opportunities": "Possible follow-on dinner in Q1",
+            "internal_notes": "Use this venue again",
+            "completed_at": now,
+            "completed_by": "Chris",
+        },
+    )
+
+    assert closeout.confirmed_guest_count == 12
+    assert closeout.attended_count == 10
+    assert closeout.no_show_count == 2
+    assert closeout.cancelled_count == 1
+    assert closeout.unexpected_attendee_count == 1
+    assert closeout.guest_quality == "Strong investor turnout"
+    assert closeout.completed_by == "Chris"
+    assert closeout.completed_at == now
+
+
+async def test_create_engagement_closeout_rejects_negative_counts(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(ValueError):
+        await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {"attended_count": -1})
+
+
+async def test_create_engagement_closeout_requires_a_real_engagement(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+
+    with pytest.raises(EngagementNotFound):
+        await service.create_engagement_closeout(client.client_id, "does-not-exist", {})
+
+
+async def test_create_engagement_closeout_emits_activity_event_without_qualitative_content(engagement_closeout_service):
+    service, activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    await service.create_engagement_closeout(
+        client.client_id,
+        engagement.engagement_id,
+        {"guest_quality": "Very sensitive commercial detail", "attended_count": 10},
+    )
+
+    page = await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)
+    created_event = next(e for e in page.items if e.event_type == "engagement_closeout.created")
+    assert created_event.metadata == {"client_id": client.client_id, "engagement_id": engagement.engagement_id}
+    # The qualitative text must never leak into Activity Log metadata/summary.
+    assert "Very sensitive commercial detail" not in created_event.summary
+    assert "Very sensitive commercial detail" not in str(created_event.metadata)
+    assert "10" not in created_event.summary  # counts excluded too
+
+
+# --- 1:1 enforcement ---------------------------------------------------
+
+
+async def test_create_engagement_closeout_second_attempt_raises_already_exists(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+
+    with pytest.raises(EngagementCloseoutAlreadyExists):
+        await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+
+
+async def test_create_engagement_closeout_second_attempt_does_not_overwrite_the_first(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    first = await service.create_engagement_closeout(
+        client.client_id, engagement.engagement_id, {"attended_count": 10}
+    )
+
+    with pytest.raises(EngagementCloseoutAlreadyExists):
+        await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {"attended_count": 999})
+
+    refreshed = await service.get_engagement_closeout(client.client_id, engagement.engagement_id)
+    assert refreshed.closeout_id == first.closeout_id
+    assert refreshed.attended_count == 10
+
+
+async def test_create_engagement_closeout_still_blocked_after_archiving(engagement_closeout_service):
+    """At most one Closeout is EVER created per Engagement -- archiving
+    the existing one does not free up a slot for a new one; PATCH/restore
+    the existing one instead."""
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+    await service.update_engagement_closeout(client.client_id, engagement.engagement_id, {"archived": True})
+
+    with pytest.raises(EngagementCloseoutAlreadyExists):
+        await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+
+
+# --- Partial update / archive / restore ---------------------------------
+
+
+async def test_update_engagement_closeout_is_a_genuine_partial_patch(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_closeout(
+        client.client_id, engagement.engagement_id, {"attended_count": 10, "guest_quality": "Strong"}
+    )
+
+    updated = await service.update_engagement_closeout(
+        client.client_id, engagement.engagement_id, {"attended_count": 11}
+    )
+
+    assert updated.attended_count == 11
+    assert updated.guest_quality == "Strong"  # untouched
+
+
+async def test_update_engagement_closeout_rejects_negative_counts(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+
+    with pytest.raises(ValueError):
+        await service.update_engagement_closeout(
+            client.client_id, engagement.engagement_id, {"no_show_count": -1}
+        )
+
+
+async def test_update_engagement_closeout_missing_raises_not_found(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(EngagementCloseoutNotFound):
+        await service.update_engagement_closeout(client.client_id, engagement.engagement_id, {"attended_count": 5})
+
+
+async def test_archive_and_restore_engagement_closeout_via_patch(engagement_closeout_service):
+    service, activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+
+    archived = await service.update_engagement_closeout(client.client_id, engagement.engagement_id, {"archived": True})
+    assert archived.archived is True
+    restored = await service.update_engagement_closeout(client.client_id, engagement.engagement_id, {"archived": False})
+    assert restored.archived is False
+
+    events = [e.event_type for e in (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items]
+    assert "engagement_closeout.archived" in events
+    assert "engagement_closeout.restored" in events
+
+
+async def test_no_hard_delete_of_engagement_closeout(engagement_closeout_service):
+    service, _activity_log, store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service)
+    closeout = await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {})
+    await service.update_engagement_closeout(client.client_id, engagement.engagement_id, {"archived": True})
+
+    assert not hasattr(store, "delete")
+    assert await store.get(closeout.closeout_id) is not None
+
+
+# --- Cross-client / cross-engagement isolation ---------------------------
+
+
+async def test_engagement_closeout_requested_through_wrong_client_is_not_found(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client_a, engagement_a = await _make_client_and_engagement(service)
+    client_b = await service.create_client({"name": "Other Co"})
+    await service.create_engagement_closeout(client_a.client_id, engagement_a.engagement_id, {"attended_count": 10})
+
+    with pytest.raises(EngagementNotFound):
+        await service.get_engagement_closeout(client_b.client_id, engagement_a.engagement_id)
+    with pytest.raises(EngagementNotFound):
+        await service.update_engagement_closeout(client_b.client_id, engagement_a.engagement_id, {"attended_count": 1})
+    with pytest.raises(EngagementNotFound):
+        await service.create_engagement_closeout(client_b.client_id, engagement_a.engagement_id, {})
+
+
+async def test_engagement_closeout_does_not_leak_across_two_engagements_on_the_same_client(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement_a = await _make_client_and_engagement(service)
+    engagement_b = await service.create_client_engagement(
+        client.client_id, {"title": "Second Dinner", "engagement_type": "dinner"}
+    )
+    await service.create_engagement_closeout(client.client_id, engagement_a.engagement_id, {"attended_count": 10})
+
+    with pytest.raises(EngagementCloseoutNotFound):
+        await service.get_engagement_closeout(client.client_id, engagement_b.engagement_id)
+    # Creating one for engagement_b is still allowed -- it's a different Engagement.
+    closeout_b = await service.create_engagement_closeout(client.client_id, engagement_b.engagement_id, {})
+    assert closeout_b.engagement_id == engagement_b.engagement_id
+
+
+# --- Never a side-effect source -------------------------------------------
+
+
+async def test_engagement_closeout_never_mutates_engagement_or_client(engagement_closeout_service):
+    service, _activity_log, _store = engagement_closeout_service
+    client, engagement = await _make_client_and_engagement(service, status="confirmed", owner="Chris")
+
+    await service.create_engagement_closeout(client.client_id, engagement.engagement_id, {"attended_count": 10})
+    await service.update_engagement_closeout(client.client_id, engagement.engagement_id, {"attended_count": 11})
+
+    refreshed_engagement = await service.get_client_engagement(client.client_id, engagement.engagement_id)
+    assert refreshed_engagement.status == "confirmed"
+    assert refreshed_engagement.owner == "Chris"
+
+    refreshed_client = await service.get_client(client.client_id)
+    assert refreshed_client.relationship_classification is None
+    assert refreshed_client.next_action is None

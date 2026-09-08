@@ -1,7 +1,8 @@
 """
 Client CRM API -- Stage 1B (2026-09-07) Client CRUD, extended for
-ClientContact (Stage 1D) and Engagement (Stage 1E, 2026-09-07).
-ClientNote has no routes yet (a later stage).
+ClientContact (Stage 1D), Engagement (Stage 1E, 2026-09-07), and
+EngagementCloseout (Stage 1F, 2026-09-08). ClientNote has no routes yet
+(a later stage).
 
 Deliberately its own prefix ("/client-crm", NOT "/crm") -- the existing
 read-only service token's scope is hardcoded to any path starting with
@@ -25,10 +26,11 @@ a raw dict body suits better. A typed model gets real request validation
 meaningful downside for a model this size.
 """
 
-from datetime import date
+from datetime import date, datetime
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.dependencies import get_client_crm_service
 from app.models.client_crm import (
@@ -39,6 +41,7 @@ from app.models.client_crm import (
     ClientStatus,
     DinnerType,
     Engagement,
+    EngagementCloseout,
     EngagementContractStatus,
     EngagementPaymentStatus,
     EngagementStatus,
@@ -48,6 +51,8 @@ from app.services.client_crm_service import (
     ClientContactNotFound,
     ClientCrmService,
     ClientNotFound,
+    EngagementCloseoutAlreadyExists,
+    EngagementCloseoutNotFound,
     EngagementNotFound,
 )
 
@@ -151,6 +156,62 @@ class EngagementUpdateRequest(BaseModel):
     signed_date: date | None = None
     payment_status: EngagementPaymentStatus | None = None
     luma_event_id: str | None = None
+    archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
+
+
+_NonNegativeCountField = Annotated[int, Field(ge=0)] | None
+
+
+class EngagementCloseoutCreateRequest(BaseModel):
+    """Client CRM Stage 1F. Every count is nullable and non-negative --
+    Field(ge=0) rejects a negative count with a 422 before this ever
+    reaches the service layer. Null means "not entered"; an explicit 0
+    means "entered, confirmed zero" -- this request model never coerces
+    one into the other."""
+
+    confirmed_guest_count: _NonNegativeCountField = None
+    attended_count: _NonNegativeCountField = None
+    no_show_count: _NonNegativeCountField = None
+    cancelled_count: _NonNegativeCountField = None
+    unexpected_attendee_count: _NonNegativeCountField = None
+
+    guest_quality: str | None = None
+    dinner_dynamics: str | None = None
+    initial_client_experience: str | None = None
+    immediate_outcomes: str | None = None
+    notable_signals: str | None = None
+    issues: str | None = None
+    referrals: str | None = None
+    future_opportunities: str | None = None
+    internal_notes: str | None = None
+
+    completed_at: datetime | None = None
+    completed_by: str | None = None
+
+
+class EngagementCloseoutUpdateRequest(BaseModel):
+    """Every field optional -- a genuine partial PATCH. `closeout_id`/
+    `engagement_id`/`client_id`/`created_at`/`updated_at` have no fields
+    here at all."""
+
+    confirmed_guest_count: _NonNegativeCountField = None
+    attended_count: _NonNegativeCountField = None
+    no_show_count: _NonNegativeCountField = None
+    cancelled_count: _NonNegativeCountField = None
+    unexpected_attendee_count: _NonNegativeCountField = None
+
+    guest_quality: str | None = None
+    dinner_dynamics: str | None = None
+    initial_client_experience: str | None = None
+    immediate_outcomes: str | None = None
+    notable_signals: str | None = None
+    issues: str | None = None
+    referrals: str | None = None
+    future_opportunities: str | None = None
+    internal_notes: str | None = None
+
+    completed_at: datetime | None = None
+    completed_by: str | None = None
     archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
 
 
@@ -295,6 +356,57 @@ async def update_client_engagement(
     try:
         return await service.update_client_engagement(client_id, engagement_id, payload.model_dump(exclude_unset=True))
     except (ClientNotFound, EngagementNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/clients/{client_id}/engagements/{engagement_id}/closeout", response_model=EngagementCloseout)
+async def get_engagement_closeout(
+    client_id: str, engagement_id: str, service: ClientCrmService = Depends(get_client_crm_service)
+):
+    """404 when no Closeout has been recorded yet -- a normal, expected
+    state the frontend renders as its own empty state, not a generic
+    error (same convention the rest of this API already uses for a
+    genuinely-missing resource)."""
+    try:
+        return await service.get_engagement_closeout(client_id, engagement_id)
+    except (ClientNotFound, EngagementNotFound, EngagementCloseoutNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/clients/{client_id}/engagements/{engagement_id}/closeout", response_model=EngagementCloseout)
+async def create_engagement_closeout(
+    client_id: str,
+    engagement_id: str,
+    payload: EngagementCloseoutCreateRequest,
+    service: ClientCrmService = Depends(get_client_crm_service),
+):
+    """409 if this Engagement already has a Closeout -- at most one is
+    ever created; PATCH the existing one instead."""
+    try:
+        return await service.create_engagement_closeout(client_id, engagement_id, payload.model_dump())
+    except (ClientNotFound, EngagementNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except EngagementCloseoutAlreadyExists as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/clients/{client_id}/engagements/{engagement_id}/closeout", response_model=EngagementCloseout)
+async def update_engagement_closeout(
+    client_id: str,
+    engagement_id: str,
+    payload: EngagementCloseoutUpdateRequest,
+    service: ClientCrmService = Depends(get_client_crm_service),
+):
+    """`exclude_unset=True` is what makes this a genuine partial PATCH --
+    same convention as every other Client CRM update route. 404 if no
+    Closeout exists yet -- use POST to create one first."""
+    try:
+        return await service.update_engagement_closeout(client_id, engagement_id, payload.model_dump(exclude_unset=True))
+    except (ClientNotFound, EngagementNotFound, EngagementCloseoutNotFound) as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

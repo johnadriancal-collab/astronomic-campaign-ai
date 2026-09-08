@@ -51,10 +51,12 @@ from app.models.client_crm import (
     ClientRelationshipClassification,
     ClientStatus,
     Engagement,
+    EngagementCloseout,
 )
 from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
 from app.repositories.crm_contact_store import CrmContactStore
+from app.repositories.engagement_closeout_store import EngagementCloseoutStore
 from app.repositories.engagement_store import EngagementStore
 from app.services.activity_log_service import ActivityLogService
 
@@ -105,6 +107,29 @@ class EngagementNotFound(Exception):
         super().__init__(f"Engagement not found: {engagement_id}")
 
 
+class EngagementCloseoutNotFound(Exception):
+    """Raised when an Engagement has no EngagementCloseout yet -- a
+    normal, expected state (not an error the caller did anything wrong
+    to reach), mapped to a plain 404 at the API layer so the frontend can
+    render its own "no closeout recorded yet" empty state rather than a
+    generic error."""
+
+    def __init__(self, engagement_id: str):
+        self.engagement_id = engagement_id
+        super().__init__(f"EngagementCloseout not found for Engagement: {engagement_id}")
+
+
+class EngagementCloseoutAlreadyExists(Exception):
+    """Raised by create_engagement_closeout() when this Engagement
+    already has one (archived or not) -- at most ONE EngagementCloseout
+    is ever created per Engagement (see EngagementCloseout's own
+    docstring); callers must PATCH the existing one instead."""
+
+    def __init__(self, engagement_id: str):
+        self.engagement_id = engagement_id
+        super().__init__(f"Engagement {engagement_id} already has a Closeout.")
+
+
 class ClientCrmService:
     def __init__(
         self,
@@ -114,12 +139,14 @@ class ClientCrmService:
         client_contact_store: ClientContactStore,
         crm_contact_store: CrmContactStore,
         engagement_store: EngagementStore,
+        engagement_closeout_store: EngagementCloseoutStore,
     ):
         self.client_store = client_store
         self.activity_log = activity_log
         self.client_contact_store = client_contact_store
         self.crm_contact_store = crm_contact_store
         self.engagement_store = engagement_store
+        self.engagement_closeout_store = engagement_closeout_store
 
     async def _require_client(self, client_id: str) -> Client:
         client = await self.client_store.get(client_id)
@@ -520,4 +547,120 @@ class ClientCrmService:
             entity_id=after.engagement_id,
             entity_name=after.title,
             metadata={"client_id": after.client_id},
+        )
+
+    # =====================================================================
+    # EngagementCloseout -- Client CRM Stage 1F (2026-09-08). The same-day
+    # factual/qualitative baseline for one Engagement -- see
+    # EngagementCloseout's own model docstring for the full architecture
+    # boundary (own entity, never Engagement fields, never a structured
+    # ClientNote; at most one per Engagement, enforced here, not at the
+    # store layer; turnout counts are Stage 1F's own manual snapshot, NOT
+    # derived from any per-person record -- Stage 1G, not built yet, will
+    # decide separately whether/how that changes).
+    # =====================================================================
+
+    _CLOSEOUT_COUNT_FIELDS = (
+        "confirmed_guest_count",
+        "attended_count",
+        "no_show_count",
+        "cancelled_count",
+        "unexpected_attendee_count",
+    )
+
+    @classmethod
+    def _validate_non_negative_counts(cls, fields: dict[str, Any]) -> None:
+        """Defense in depth: the API layer's own request models already
+        reject a negative count with a 422 (Field(ge=0)), and constructing
+        a fresh EngagementCloseout already enforces the same constraint --
+        but update_engagement_closeout() applies a patch via model_copy(),
+        which does NOT re-run field validators. This is the one path that
+        needs an explicit check to give the same guarantee to a direct
+        service-layer caller as an HTTP caller already gets for free."""
+        for field in cls._CLOSEOUT_COUNT_FIELDS:
+            value = fields.get(field)
+            if value is not None and value < 0:
+                raise ValueError(f"{field} cannot be negative.")
+
+    async def _require_engagement_closeout(self, client_id: str, engagement_id: str) -> EngagementCloseout:
+        await self._require_engagement(client_id, engagement_id)
+        closeout = await self.engagement_closeout_store.get_for_engagement(engagement_id)
+        if closeout is None:
+            raise EngagementCloseoutNotFound(engagement_id)
+        return closeout
+
+    async def get_engagement_closeout(self, client_id: str, engagement_id: str) -> EngagementCloseout:
+        """Raises EngagementCloseoutNotFound (-> 404) when none has been
+        recorded yet -- a normal, expected state the frontend renders as
+        its own "no closeout recorded yet" empty state, not a generic
+        error. Returns the closeout regardless of archived state (same
+        convention as Engagement/Client themselves) -- the caller decides
+        how to render an archived one."""
+        return await self._require_engagement_closeout(client_id, engagement_id)
+
+    async def create_engagement_closeout(self, client_id: str, engagement_id: str, fields: dict[str, Any]) -> EngagementCloseout:
+        """At most ONE EngagementCloseout is ever created per Engagement --
+        raises EngagementCloseoutAlreadyExists (-> 409) if one already
+        exists, archived or not; callers must PATCH the existing one
+        instead of creating a second."""
+        await self._require_engagement(client_id, engagement_id)
+        existing = await self.engagement_closeout_store.get_for_engagement(engagement_id)
+        if existing is not None:
+            raise EngagementCloseoutAlreadyExists(engagement_id)
+
+        self._validate_non_negative_counts(fields)
+        now = datetime.now(timezone.utc)
+        closeout = EngagementCloseout(
+            closeout_id=str(uuid.uuid4()),
+            engagement_id=engagement_id,
+            client_id=client_id,
+            created_at=now,
+            updated_at=now,
+            **fields,
+        )
+        await self.engagement_closeout_store.create(closeout)
+        await self.activity_log.record(
+            event_type="engagement_closeout.created",
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary="An Engagement Closeout was recorded.",
+            entity_type="engagement_closeout",
+            entity_id=closeout.closeout_id,
+            entity_name=None,
+            # Deliberately NOT the qualitative text fields or turnout counts
+            # -- see this stage's own explicit Activity Log privacy rule.
+            metadata={"client_id": client_id, "engagement_id": engagement_id},
+        )
+        return closeout
+
+    async def update_engagement_closeout(self, client_id: str, engagement_id: str, patch: dict[str, Any]) -> EngagementCloseout:
+        """Direct partial update -- same "no merge rule" base case as
+        update_client()/update_client_engagement(). Archive/restore is not
+        a separate method -- both are just update_engagement_closeout(...,
+        {"archived": True/False}), same convention as every other Client
+        CRM entity."""
+        closeout = await self._require_engagement_closeout(client_id, engagement_id)
+        self._validate_non_negative_counts(patch)
+
+        updated = closeout.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
+        await self.engagement_closeout_store.save(updated)
+        await self._record_engagement_closeout_update_activity(closeout, updated)
+        return updated
+
+    async def _record_engagement_closeout_update_activity(self, before: EngagementCloseout, after: EngagementCloseout) -> None:
+        if before.archived == after.archived:
+            event_type, verb = "engagement_closeout.updated", "updated"
+        elif after.archived:
+            event_type, verb = "engagement_closeout.archived", "archived"
+        else:
+            event_type, verb = "engagement_closeout.restored", "restored"
+        await self.activity_log.record(
+            event_type=event_type,
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f"An Engagement Closeout was {verb}.",
+            entity_type="engagement_closeout",
+            entity_id=after.closeout_id,
+            entity_name=None,
+            metadata={"client_id": after.client_id, "engagement_id": after.engagement_id},
         )

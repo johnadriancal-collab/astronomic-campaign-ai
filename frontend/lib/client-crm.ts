@@ -17,6 +17,9 @@ import type {
   ClientUpdateInput,
   DinnerType,
   Engagement,
+  EngagementCloseout,
+  EngagementCloseoutCreateInput,
+  EngagementCloseoutUpdateInput,
   EngagementContractStatus,
   EngagementCreateInput,
   EngagementPaymentStatus,
@@ -491,6 +494,198 @@ export function engagementUpdatePatch(form: EngagementFormState, original: Engag
   if (signedDate !== original.signed_date) patch.signed_date = signedDate;
 
   if (form.paymentStatus !== original.payment_status) patch.payment_status = form.paymentStatus;
+
+  return patch;
+}
+
+// --- EngagementCloseout (Stage 1F) -----------------------------------------
+
+/** Purely derived from fields already on EngagementCloseout -- never
+ * stored or returned by the backend (see EngagementCloseout's own model
+ * docstring on the backend for why). V1 definition: attended /
+ * confirmed_guest_count -- `confirmed_guest_count` IS the expected/
+ * confirmed guest count for the dinner; this deliberately does NOT
+ * subtract `cancelled_count` from it, since that would assume
+ * cancellations were never already reflected in how a human entered
+ * Confirmed Guests, an assumption this stage has no basis to make.
+ * No-shows/cancellations/walk-ins stay separately recorded fields, not
+ * folded into this formula. Returns null (not computable) unless both
+ * confirmed_guest_count and attended_count are present and
+ * confirmed_guest_count > 0 -- never a guessed or defaulted rate. Not
+ * clamped to 100% -- an aggregate entry that implies over-attendance is
+ * preserved as entered, not silently altered; Stage 1G's future
+ * person-level attendance is what will make a truly reliable derived
+ * metric possible. */
+export function engagementCloseoutAttendanceRate(
+  closeout: Pick<EngagementCloseout, "confirmed_guest_count" | "attended_count">
+): number | null {
+  const { confirmed_guest_count, attended_count } = closeout;
+  if (confirmed_guest_count === null || attended_count === null) return null;
+  if (confirmed_guest_count <= 0) return null;
+  return attended_count / confirmed_guest_count;
+}
+
+export interface EngagementCloseoutFormState {
+  confirmedGuestCount: string;
+  attendedCount: string;
+  noShowCount: string;
+  cancelledCount: string;
+  unexpectedAttendeeCount: string;
+  guestQuality: string;
+  dinnerDynamics: string;
+  initialClientExperience: string;
+  immediateOutcomes: string;
+  notableSignals: string;
+  issues: string;
+  referrals: string;
+  futureOpportunities: string;
+  internalNotes: string;
+  completedAt: string; // "" or "YYYY-MM-DD"
+  completedBy: string;
+}
+
+export function emptyEngagementCloseoutFormState(): EngagementCloseoutFormState {
+  return {
+    confirmedGuestCount: "",
+    attendedCount: "",
+    noShowCount: "",
+    cancelledCount: "",
+    unexpectedAttendeeCount: "",
+    guestQuality: "",
+    dinnerDynamics: "",
+    initialClientExperience: "",
+    immediateOutcomes: "",
+    notableSignals: "",
+    issues: "",
+    referrals: "",
+    futureOpportunities: "",
+    internalNotes: "",
+    completedAt: "",
+    completedBy: "",
+  };
+}
+
+export function engagementCloseoutFormStateFromCloseout(closeout: EngagementCloseout): EngagementCloseoutFormState {
+  return {
+    confirmedGuestCount: closeout.confirmed_guest_count === null ? "" : String(closeout.confirmed_guest_count),
+    attendedCount: closeout.attended_count === null ? "" : String(closeout.attended_count),
+    noShowCount: closeout.no_show_count === null ? "" : String(closeout.no_show_count),
+    cancelledCount: closeout.cancelled_count === null ? "" : String(closeout.cancelled_count),
+    unexpectedAttendeeCount: closeout.unexpected_attendee_count === null ? "" : String(closeout.unexpected_attendee_count),
+    guestQuality: closeout.guest_quality ?? "",
+    dinnerDynamics: closeout.dinner_dynamics ?? "",
+    initialClientExperience: closeout.initial_client_experience ?? "",
+    immediateOutcomes: closeout.immediate_outcomes ?? "",
+    notableSignals: closeout.notable_signals ?? "",
+    issues: closeout.issues ?? "",
+    referrals: closeout.referrals ?? "",
+    futureOpportunities: closeout.future_opportunities ?? "",
+    internalNotes: closeout.internal_notes ?? "",
+    completedAt: closeout.completed_at ? closeout.completed_at.slice(0, 10) : "",
+    completedBy: closeout.completed_by ?? "",
+  };
+}
+
+/** Blank, negative, or non-numeric input is treated as "not entered"
+ * (null) -- the frontend never sends a negative count; the backend's own
+ * Field(ge=0) rejection is the authoritative guarantee, this is just a
+ * graceful client-side fallback so a stray "-1" keystroke can't even be
+ * submitted as one. */
+function parseNonNegativeCount(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.trunc(parsed);
+}
+
+function completedAtIsoFromFormValue(value: string): string | null {
+  return value ? new Date(`${value}T00:00:00Z`).toISOString() : null;
+}
+
+/** CREATE only. Every field is optional -- there is no required field on
+ * a Closeout (unlike Engagement's title), so this always produces a
+ * valid payload even from a completely blank form. */
+export function engagementCloseoutCreatePayload(form: EngagementCloseoutFormState): EngagementCloseoutCreateInput {
+  return {
+    confirmed_guest_count: parseNonNegativeCount(form.confirmedGuestCount),
+    attended_count: parseNonNegativeCount(form.attendedCount),
+    no_show_count: parseNonNegativeCount(form.noShowCount),
+    cancelled_count: parseNonNegativeCount(form.cancelledCount),
+    unexpected_attendee_count: parseNonNegativeCount(form.unexpectedAttendeeCount),
+    guest_quality: form.guestQuality.trim() || null,
+    dinner_dynamics: form.dinnerDynamics.trim() || null,
+    initial_client_experience: form.initialClientExperience.trim() || null,
+    immediate_outcomes: form.immediateOutcomes.trim() || null,
+    notable_signals: form.notableSignals.trim() || null,
+    issues: form.issues.trim() || null,
+    referrals: form.referrals.trim() || null,
+    future_opportunities: form.futureOpportunities.trim() || null,
+    internal_notes: form.internalNotes.trim() || null,
+    completed_at: completedAtIsoFromFormValue(form.completedAt),
+    completed_by: form.completedBy.trim() || null,
+  };
+}
+
+/** A genuine partial PATCH, same diff-only convention as
+ * clientUpdatePatch/clientContactUpdatePatch/engagementUpdatePatch. */
+export function engagementCloseoutUpdatePatch(
+  form: EngagementCloseoutFormState,
+  original: EngagementCloseout
+): EngagementCloseoutUpdateInput {
+  const patch: EngagementCloseoutUpdateInput = {};
+
+  const confirmedGuestCount = parseNonNegativeCount(form.confirmedGuestCount);
+  if (confirmedGuestCount !== original.confirmed_guest_count) patch.confirmed_guest_count = confirmedGuestCount;
+
+  const attendedCount = parseNonNegativeCount(form.attendedCount);
+  if (attendedCount !== original.attended_count) patch.attended_count = attendedCount;
+
+  const noShowCount = parseNonNegativeCount(form.noShowCount);
+  if (noShowCount !== original.no_show_count) patch.no_show_count = noShowCount;
+
+  const cancelledCount = parseNonNegativeCount(form.cancelledCount);
+  if (cancelledCount !== original.cancelled_count) patch.cancelled_count = cancelledCount;
+
+  const unexpectedAttendeeCount = parseNonNegativeCount(form.unexpectedAttendeeCount);
+  if (unexpectedAttendeeCount !== original.unexpected_attendee_count) {
+    patch.unexpected_attendee_count = unexpectedAttendeeCount;
+  }
+
+  const guestQuality = form.guestQuality.trim() || null;
+  if (guestQuality !== original.guest_quality) patch.guest_quality = guestQuality;
+
+  const dinnerDynamics = form.dinnerDynamics.trim() || null;
+  if (dinnerDynamics !== original.dinner_dynamics) patch.dinner_dynamics = dinnerDynamics;
+
+  const initialClientExperience = form.initialClientExperience.trim() || null;
+  if (initialClientExperience !== original.initial_client_experience) {
+    patch.initial_client_experience = initialClientExperience;
+  }
+
+  const immediateOutcomes = form.immediateOutcomes.trim() || null;
+  if (immediateOutcomes !== original.immediate_outcomes) patch.immediate_outcomes = immediateOutcomes;
+
+  const notableSignals = form.notableSignals.trim() || null;
+  if (notableSignals !== original.notable_signals) patch.notable_signals = notableSignals;
+
+  const issues = form.issues.trim() || null;
+  if (issues !== original.issues) patch.issues = issues;
+
+  const referrals = form.referrals.trim() || null;
+  if (referrals !== original.referrals) patch.referrals = referrals;
+
+  const futureOpportunities = form.futureOpportunities.trim() || null;
+  if (futureOpportunities !== original.future_opportunities) patch.future_opportunities = futureOpportunities;
+
+  const internalNotes = form.internalNotes.trim() || null;
+  if (internalNotes !== original.internal_notes) patch.internal_notes = internalNotes;
+
+  const originalCompletedAtDate = original.completed_at ? original.completed_at.slice(0, 10) : "";
+  if (form.completedAt !== originalCompletedAtDate) patch.completed_at = completedAtIsoFromFormValue(form.completedAt);
+
+  const completedBy = form.completedBy.trim() || null;
+  if (completedBy !== original.completed_by) patch.completed_by = completedBy;
 
   return patch;
 }
