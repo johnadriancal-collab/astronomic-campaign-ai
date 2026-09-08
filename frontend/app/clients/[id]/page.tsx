@@ -28,7 +28,7 @@ import {
   clientRelationshipClassificationLabel,
   clientStatusBadgeClass,
   clientStatusLabel,
-  dinnerProgramLabel,
+  dinnerTypeLabel,
   engagementStatusBadgeClass,
   engagementStatusLabel,
   engagementTypeLabel,
@@ -461,10 +461,10 @@ export default function ClientDetailPage() {
                       </p>
                       <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
                         <span>{engagementTypeLabel(engagement.engagement_type)}</span>
-                        {engagement.dinner_program && (
+                        {engagement.dinner_type && (
                           <>
                             <span>·</span>
-                            <span>{dinnerProgramLabel(engagement.dinner_program)}</span>
+                            <span>{dinnerTypeLabel(engagement.dinner_type)}</span>
                           </>
                         )}
                         <span>·</span>

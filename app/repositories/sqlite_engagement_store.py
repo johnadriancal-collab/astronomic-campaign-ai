@@ -9,13 +9,17 @@ step if/when such a view is actually built (CREATE TABLE IF NOT EXISTS is
 trivially idempotent, matching every other store in this codebase).
 
 Stage 1A (2026-09-07): a brand-new table, no prior deployed shape to
-accommodate.
+accommodate. Stage 1E.1 (2026-09-08) is the first time this DOES need to
+accommodate a prior deployed shape -- see engagement_taxonomy_migration.py's
+own module docstring for why that migration runs synchronously here, in
+connect(), before this store (or the app) is usable.
 """
 
 import aiosqlite
 
 from app.models.client_crm import Engagement
 from app.repositories.engagement_store import EngagementNotFoundError, EngagementStore
+from app.repositories.engagement_taxonomy_migration import migrate_legacy_dinner_taxonomy_rows
 from app.repositories.sqlite_connection import open_sqlite_connection
 from app.repositories.sqlite_txn import sqlite_write
 
@@ -48,6 +52,10 @@ class SQLiteEngagementStore(EngagementStore):
         await self._conn.execute(CREATE_TABLE_SQL)
         await self._conn.execute(CREATE_CLIENT_INDEX_SQL)
         await self._conn.commit()
+        # Must run BEFORE this store (or the app) serves any request --
+        # see engagement_taxonomy_migration.py's own module docstring for
+        # why this can't safely be a separate, later-timed step.
+        await migrate_legacy_dinner_taxonomy_rows(self._conn)
 
     async def close(self) -> None:
         if self._conn is not None:

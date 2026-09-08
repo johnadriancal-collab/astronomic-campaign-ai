@@ -15,7 +15,7 @@ import type {
   ClientRelationshipClassification,
   ClientStatus,
   ClientUpdateInput,
-  DinnerProgram,
+  DinnerType,
   Engagement,
   EngagementContractStatus,
   EngagementCreateInput,
@@ -293,8 +293,7 @@ export function clientContactUpdatePatch(form: ClientContactFormState, original:
 // --- Engagement (Stage 1E) -----------------------------------------------
 
 export const ENGAGEMENT_TYPE_OPTIONS: { value: EngagementType; label: string }[] = [
-  { value: "investor_dinner", label: "Investor Dinner" },
-  { value: "customer_dinner", label: "Customer Dinner" },
+  { value: "dinner", label: "Dinner" },
   { value: "sponsorship", label: "Sponsorship" },
   { value: "other", label: "Other" },
 ];
@@ -303,27 +302,24 @@ export function engagementTypeLabel(value: EngagementType): string {
   return ENGAGEMENT_TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value;
 }
 
-// Only these two engagement_type values are "dinner-shaped" -- matches
-// the backend's own authoritative normalization in ClientCrmService
-// (_normalize_dinner_program). The frontend uses this ONLY to decide
-// whether to show/clear the Dinner Program field -- the backend remains
-// the source of truth regardless of what the frontend sends.
-const DINNER_SHAPED_ENGAGEMENT_TYPES = new Set<EngagementType>(["investor_dinner", "customer_dinner"]);
-
+// Only "dinner" is dinner-shaped -- matches the backend's own
+// authoritative normalization in ClientCrmService (_normalize_dinner_type).
+// The frontend uses this ONLY to decide whether to show/clear the Dinner
+// Type field -- the backend remains the source of truth regardless of
+// what the frontend sends.
 export function isDinnerShapedEngagementType(value: EngagementType): boolean {
-  return DINNER_SHAPED_ENGAGEMENT_TYPES.has(value);
+  return value === "dinner";
 }
 
-export const DINNER_PROGRAM_OPTIONS: { value: DinnerProgram; label: string }[] = [
-  { value: "supernova", label: "Supernova" },
-  { value: "galaxy", label: "Galaxy" },
-  { value: "aurora", label: "Aurora" },
-  { value: "other", label: "Other" },
+export const DINNER_TYPE_OPTIONS: { value: DinnerType; label: string }[] = [
+  { value: "investor_dinner", label: "Investor Dinner" },
+  { value: "fireside_dinner", label: "Fireside Dinner" },
+  { value: "bizdev_dinner", label: "BizDev Dinner" },
 ];
 
-export function dinnerProgramLabel(value: DinnerProgram | null): string {
+export function dinnerTypeLabel(value: DinnerType | null): string {
   if (value === null) return "—";
-  return DINNER_PROGRAM_OPTIONS.find((o) => o.value === value)?.label ?? value;
+  return DINNER_TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value;
 }
 
 export const ENGAGEMENT_STATUS_OPTIONS: { value: EngagementStatus; label: string }[] = [
@@ -380,7 +376,7 @@ export function formatEngagementDate(iso: string | null): string {
 export interface EngagementFormState {
   title: string;
   engagementType: EngagementType;
-  dinnerProgram: DinnerProgram | "";
+  dinnerType: DinnerType | "";
   engagementDate: string; // "" or "YYYY-MM-DD"
   location: string;
   status: EngagementStatus;
@@ -395,8 +391,8 @@ export interface EngagementFormState {
 export function emptyEngagementFormState(): EngagementFormState {
   return {
     title: "",
-    engagementType: "investor_dinner",
-    dinnerProgram: "",
+    engagementType: "dinner",
+    dinnerType: "investor_dinner",
     engagementDate: "",
     location: "",
     status: "planned",
@@ -413,7 +409,7 @@ export function engagementFormStateFromEngagement(engagement: Engagement): Engag
   return {
     title: engagement.title,
     engagementType: engagement.engagement_type,
-    dinnerProgram: engagement.dinner_program ?? "",
+    dinnerType: engagement.dinner_type ?? "",
     engagementDate: engagement.engagement_date ?? "",
     location: engagement.location ?? "",
     status: engagement.status,
@@ -437,7 +433,7 @@ function parseEngagementFee(fee: string): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-/** CREATE only. `dinner_program` is sent exactly as chosen in the form --
+/** CREATE only. `dinner_type` is sent exactly as chosen in the form --
  * the backend remains authoritative and will clear it server-side if
  * `engagement_type` isn't dinner-shaped, but the form itself also hides/
  * clears the field for a non-dinner type (see isDinnerShapedEngagementType)
@@ -446,7 +442,7 @@ export function engagementCreatePayload(form: EngagementFormState): EngagementCr
   return {
     title: form.title.trim(),
     engagement_type: form.engagementType,
-    dinner_program: isDinnerShapedEngagementType(form.engagementType) ? form.dinnerProgram || null : null,
+    dinner_type: isDinnerShapedEngagementType(form.engagementType) ? form.dinnerType || null : null,
     engagement_date: form.engagementDate || null,
     location: form.location.trim() || null,
     status: form.status,
@@ -467,8 +463,8 @@ export function engagementUpdatePatch(form: EngagementFormState, original: Engag
   if (title !== original.title) patch.title = title;
   if (form.engagementType !== original.engagement_type) patch.engagement_type = form.engagementType;
 
-  const dinnerProgram = isDinnerShapedEngagementType(form.engagementType) ? form.dinnerProgram || null : null;
-  if (dinnerProgram !== original.dinner_program) patch.dinner_program = dinnerProgram;
+  const dinnerType = isDinnerShapedEngagementType(form.engagementType) ? form.dinnerType || null : null;
+  if (dinnerType !== original.dinner_type) patch.dinner_type = dinnerType;
 
   const engagementDate = form.engagementDate || null;
   if (engagementDate !== original.engagement_date) patch.engagement_date = engagementDate;

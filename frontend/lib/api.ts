@@ -1851,8 +1851,8 @@ export function updateClientContact(
 // Stage 1E docstring for the "never a side-effect source for Client/
 // ClientContact/CrmContact/Luma" rule this API also honors.
 
-export type EngagementType = "investor_dinner" | "customer_dinner" | "sponsorship" | "other";
-export type DinnerProgram = "supernova" | "galaxy" | "aurora" | "other";
+export type EngagementType = "dinner" | "sponsorship" | "other";
+export type DinnerType = "investor_dinner" | "fireside_dinner" | "bizdev_dinner";
 export type EngagementStatus = "planned" | "confirmed" | "completed" | "cancelled";
 export type EngagementContractStatus = "not_sent" | "sent" | "signed";
 export type EngagementPaymentStatus = "unpaid" | "partial" | "paid";
@@ -1862,7 +1862,7 @@ export interface Engagement {
   client_id: string;
   title: string;
   engagement_type: EngagementType;
-  dinner_program: DinnerProgram | null;
+  dinner_type: DinnerType | null;
   engagement_date: string | null;
   location: string | null;
   status: EngagementStatus;
@@ -1881,7 +1881,7 @@ export interface Engagement {
 export interface EngagementCreateInput {
   title: string;
   engagement_type: EngagementType;
-  dinner_program?: DinnerProgram | null;
+  dinner_type?: DinnerType | null;
   engagement_date?: string | null;
   location?: string | null;
   status?: EngagementStatus;

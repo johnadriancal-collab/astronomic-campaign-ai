@@ -47,3 +47,19 @@ test("no Luma picker/sync UI exists on the Engagement form -- luma_event_id is n
   assert.doesNotMatch(modal, /luma_event_id/);
   assert.doesNotMatch(modal, /Luma/);
 });
+
+test("retired Supernova/Galaxy/Aurora program terminology does not appear anywhere in Client CRM's frontend source (Stage 1E.1)", () => {
+  const files = [
+    "../lib/client-crm.ts",
+    "../lib/api.ts",
+    "../components/engagement-form-modal.tsx",
+    "../app/clients/[id]/page.tsx",
+    "../app/clients/[id]/engagements/[engagementId]/page.tsx",
+  ];
+  for (const relativePath of files) {
+    const source = readFileSync(new URL(relativePath, import.meta.url), "utf-8");
+    for (const forbidden of [/supernova/i, /galaxy/i, /aurora/i]) {
+      assert.doesNotMatch(source, forbidden, `${relativePath} must not reference retired dinner-program terminology`);
+    }
+  }
+});

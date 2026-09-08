@@ -11,7 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EngagementFormModal } from "@/components/engagement-form-modal";
 import { ApiError, getClient, getClientEngagement, updateClientEngagement, type Client, type Engagement } from "@/lib/api";
 import {
-  dinnerProgramLabel,
+  dinnerTypeLabel,
   engagementContractStatusLabel,
   engagementPaymentStatusLabel,
   engagementStatusBadgeClass,
@@ -183,7 +183,7 @@ export default function EngagementDetailPage() {
           </CardHeader>
           <CardContent className="grid gap-4 sm:grid-cols-2">
             <OverviewField label="Engagement Type" value={engagementTypeLabel(engagement.engagement_type)} />
-            <OverviewField label="Dinner Program" value={dinnerProgramLabel(engagement.dinner_program)} />
+            <OverviewField label="Dinner Type" value={dinnerTypeLabel(engagement.dinner_type)} />
             <OverviewField label="Date" value={formatEngagementDate(engagement.engagement_date)} />
             <OverviewField label="Location" value={engagement.location || "—"} />
             <OverviewField label="Owner" value={engagement.owner || "—"} />

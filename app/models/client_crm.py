@@ -140,14 +140,17 @@ class ClientContact(BaseModel):
 
 
 class EngagementType(str, Enum):
-    """Not exhaustive of every future Astronomic service -- OTHER exists
-    precisely so a new kind of engagement is never blocked on a code
-    change before it can be recorded; a real, named value can be added
-    later purely additively (a str Enum's existing stored rows are
-    unaffected by adding a new member)."""
+    """Stage 1E.1: the commercial/delivery *category* of an Engagement,
+    deliberately collapsed to three values -- DINNER no longer names which
+    kind of dinner (that's `DinnerType`'s own job, a separate axis, only
+    meaningful when engagement_type is DINNER). Not exhaustive of every
+    future Astronomic service -- OTHER exists precisely so a new kind of
+    engagement is never blocked on a code change before it can be
+    recorded; a real, named value can be added later purely additively (a
+    str Enum's existing stored rows are unaffected by adding a new
+    member)."""
 
-    INVESTOR_DINNER = "investor_dinner"
-    CUSTOMER_DINNER = "customer_dinner"
+    DINNER = "dinner"
     SPONSORSHIP = "sponsorship"
     OTHER = "other"
 
@@ -168,20 +171,21 @@ class EngagementStatus(str, Enum):
     CANCELLED = "cancelled"
 
 
-class DinnerProgram(str, Enum):
-    """Astronomic's named dinner program/format -- e.g. Supernova is an
-    investor/fundraising-purpose dinner, Galaxy is a fireside/luxury-home
-    format, Aurora is a business-development/customer-purpose dinner.
-    Deliberately a SEPARATE axis from `engagement_type` (Stage 1E): a
-    Galaxy-format dinner can serve either an investor or a customer
-    purpose, so collapsing "which named program" and "what commercial
-    purpose" into one enum would lose real information. Nullable and
-    normally None for a non-dinner Engagement (e.g. SPONSORSHIP)."""
+class DinnerType(str, Enum):
+    """Stage 1E.1: which kind of dinner this Engagement is, ONLY
+    meaningful when `engagement_type == DINNER`. Replaces the retired
+    Stage 1E `DinnerProgram` enum (Supernova/Galaxy/Aurora) -- those were
+    Astronomic's own past internal program/brand names for these same
+    three dinner kinds, retired from current use; this enum names the
+    underlying dinner kind directly instead of via a retired brand name.
+    Nullable and normally None for a non-dinner Engagement (e.g.
+    SPONSORSHIP) -- see ClientCrmService's own backend-authoritative
+    normalization for why this is enforced server-side, not just hidden
+    in the UI."""
 
-    SUPERNOVA = "supernova"
-    GALAXY = "galaxy"
-    AURORA = "aurora"
-    OTHER = "other"
+    INVESTOR_DINNER = "investor_dinner"
+    FIRESIDE_DINNER = "fireside_dinner"
+    BIZDEV_DINNER = "bizdev_dinner"
 
 
 class EngagementContractStatus(str, Enum):
@@ -197,9 +201,9 @@ class EngagementPaymentStatus(str, Enum):
 
 
 class Engagement(BaseModel):
-    """One delivered or planned Astronomic engagement for a Client -- an
-    investor dinner, a customer dinner, a sponsorship, or (OTHER) some
-    future service. A Client may have many Engagements over time; an
+    """One delivered or planned Astronomic engagement for a Client -- a
+    dinner (see `dinner_type` for which kind), a sponsorship, or (OTHER)
+    some future service. A Client may have many Engagements over time; an
     Engagement never implies or requires a single all-time "the deal."
 
     Deliberately has NO Deal/Pipeline relationship field yet -- Deal
@@ -243,12 +247,11 @@ class Engagement(BaseModel):
     client_id: str
     title: str
     engagement_type: EngagementType
-    # `dinner_program` is Stage 1E's own separate axis -- see
-    # DinnerProgram's own docstring for why this isn't merged into
-    # engagement_type. Normally None for a non-dinner engagement_type
-    # (e.g. SPONSORSHIP); the API layer keeps this authoritative even if
-    # the frontend hides/clears the field for non-dinner types.
-    dinner_program: DinnerProgram | None = None
+    # `dinner_type` is its own separate axis -- see DinnerType's own
+    # docstring for why this isn't merged into engagement_type. Only ever
+    # meaningful when engagement_type == DINNER; the API layer keeps this
+    # authoritative even if the frontend hides/clears the field otherwise.
+    dinner_type: DinnerType | None = None
     # NOT named `date` -- a Pydantic field literally named the same as its
     # own `date` type breaks: Python's annotated-assignment evaluation
     # order binds the default value to the name BEFORE evaluating the

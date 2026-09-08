@@ -29,7 +29,7 @@ from app.models.client_crm import (
     ClientNoteType,
     ClientRelationshipClassification,
     ClientStatus,
-    DinnerProgram,
+    DinnerType,
     Engagement,
     EngagementContractStatus,
     EngagementPaymentStatus,
@@ -67,7 +67,7 @@ def _engagement(engagement_id="e1", client_id="c1", created_at=NOW, updated_at=N
         engagement_id=engagement_id,
         client_id=client_id,
         title=overrides.pop("title", "SF Investor Dinner"),
-        engagement_type=overrides.pop("engagement_type", EngagementType.INVESTOR_DINNER),
+        engagement_type=overrides.pop("engagement_type", EngagementType.DINNER),
         created_at=created_at,
         updated_at=updated_at,
         **overrides,
@@ -167,7 +167,7 @@ def test_client_contact_crm_contact_id_defaults_to_none():
 
 def test_engagement_json_round_trip_preserves_every_field():
     engagement = _engagement(
-        dinner_program=DinnerProgram.SUPERNOVA,
+        dinner_type=DinnerType.INVESTOR_DINNER,
         engagement_date=date(2026, 9, 22),
         location="San Francisco",
         status=EngagementStatus.COMPLETED,
@@ -190,15 +190,23 @@ def test_engagement_status_includes_confirmed():
     assert engagement.status == EngagementStatus.CONFIRMED
 
 
-def test_dinner_program_defaults_to_none():
+def test_dinner_type_defaults_to_none():
     engagement = _engagement()
-    assert engagement.dinner_program is None
+    assert engagement.dinner_type is None
 
 
-def test_dinner_program_every_value_round_trips():
-    for program in DinnerProgram:
-        engagement = _engagement(dinner_program=program)
-        assert Engagement.model_validate_json(engagement.model_dump_json()).dinner_program == program
+def test_dinner_type_every_value_round_trips():
+    for dinner_type in DinnerType:
+        engagement = _engagement(dinner_type=dinner_type)
+        assert Engagement.model_validate_json(engagement.model_dump_json()).dinner_type == dinner_type
+
+
+def test_retired_supernova_galaxy_aurora_terminology_is_gone():
+    """Stage 1E.1: Supernova/Galaxy/Aurora were retired internal program
+    names -- DinnerType names the underlying dinner kind directly instead."""
+    dinner_type_values = {member.value for member in DinnerType}
+    assert dinner_type_values == {"investor_dinner", "fireside_dinner", "bizdev_dinner"}
+    assert not any("supernova" in v or "galaxy" in v or "aurora" in v for v in dinner_type_values)
 
 
 def test_engagement_owner_defaults_to_none():

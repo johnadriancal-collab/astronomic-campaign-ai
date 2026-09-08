@@ -14,7 +14,7 @@ import {
   clientStatusLabel,
   clientUpdatePatch,
   defaultClientListFilters,
-  dinnerProgramLabel,
+  dinnerTypeLabel,
   emptyClientContactFormState,
   emptyClientFormState,
   emptyEngagementFormState,
@@ -316,15 +316,15 @@ test("clientContactUpdatePatch reflects switching is_primary_contact", () => {
   assert.deepEqual(clientContactUpdatePatch(form, contact), { is_primary_contact: true });
 });
 
-// --- Engagement (Stage 1E) -----------------------------------------------
+// --- Engagement (Stage 1E, taxonomy corrected in Stage 1E.1) --------------
 
 function makeEngagement(overrides: Partial<Engagement> = {}): Engagement {
   return {
     engagement_id: "e1",
     client_id: "c1",
     title: "SF Investor Dinner",
-    engagement_type: "investor_dinner",
-    dinner_program: null,
+    engagement_type: "dinner",
+    dinner_type: null,
     engagement_date: "2026-09-22",
     location: "San Francisco",
     status: "planned",
@@ -343,28 +343,25 @@ function makeEngagement(overrides: Partial<Engagement> = {}): Engagement {
 }
 
 test("engagementTypeLabel maps every type", () => {
-  assert.equal(engagementTypeLabel("investor_dinner"), "Investor Dinner");
-  assert.equal(engagementTypeLabel("customer_dinner"), "Customer Dinner");
+  assert.equal(engagementTypeLabel("dinner"), "Dinner");
   assert.equal(engagementTypeLabel("sponsorship"), "Sponsorship");
   assert.equal(engagementTypeLabel("other"), "Other");
 });
 
-test("isDinnerShapedEngagementType is true only for investor/customer dinner", () => {
-  assert.equal(isDinnerShapedEngagementType("investor_dinner"), true);
-  assert.equal(isDinnerShapedEngagementType("customer_dinner"), true);
+test("isDinnerShapedEngagementType is true only for dinner", () => {
+  assert.equal(isDinnerShapedEngagementType("dinner"), true);
   assert.equal(isDinnerShapedEngagementType("sponsorship"), false);
   assert.equal(isDinnerShapedEngagementType("other"), false);
 });
 
-test("dinnerProgramLabel renders null as a plain em-dash", () => {
-  assert.equal(dinnerProgramLabel(null), "—");
+test("dinnerTypeLabel renders null as a plain em-dash", () => {
+  assert.equal(dinnerTypeLabel(null), "—");
 });
 
-test("dinnerProgramLabel maps every real value", () => {
-  assert.equal(dinnerProgramLabel("supernova"), "Supernova");
-  assert.equal(dinnerProgramLabel("galaxy"), "Galaxy");
-  assert.equal(dinnerProgramLabel("aurora"), "Aurora");
-  assert.equal(dinnerProgramLabel("other"), "Other");
+test("dinnerTypeLabel maps every real value -- retired Supernova/Galaxy/Aurora terminology never appears", () => {
+  assert.equal(dinnerTypeLabel("investor_dinner"), "Investor Dinner");
+  assert.equal(dinnerTypeLabel("fireside_dinner"), "Fireside Dinner");
+  assert.equal(dinnerTypeLabel("bizdev_dinner"), "BizDev Dinner");
 });
 
 test("engagementStatusLabel maps every status, including the new CONFIRMED", () => {
@@ -382,13 +379,13 @@ test("formatEngagementDate renders a date-only value without inventing a time-of
   assert.equal(formatEngagementDate("2026-09-22"), "Sep 22, 2026");
 });
 
-test("emptyEngagementFormState defaults to planned/investor_dinner/not_sent/unpaid", () => {
+test("emptyEngagementFormState defaults to planned/dinner/investor_dinner/not_sent/unpaid", () => {
   const form = emptyEngagementFormState();
   assert.equal(form.status, "planned");
-  assert.equal(form.engagementType, "investor_dinner");
+  assert.equal(form.engagementType, "dinner");
   assert.equal(form.contractStatus, "not_sent");
   assert.equal(form.paymentStatus, "unpaid");
-  assert.equal(form.dinnerProgram, "");
+  assert.equal(form.dinnerType, "investor_dinner");
 });
 
 test("isEngagementFormValid requires a non-blank title", () => {
@@ -400,8 +397,8 @@ test("isEngagementFormValid requires a non-blank title", () => {
 test("engagementCreatePayload carries every field through when filled in", () => {
   const payload = engagementCreatePayload({
     title: "SF Investor Dinner",
-    engagementType: "investor_dinner",
-    dinnerProgram: "supernova",
+    engagementType: "dinner",
+    dinnerType: "investor_dinner",
     engagementDate: "2026-09-22",
     location: "The Battery, San Francisco",
     status: "confirmed",
@@ -414,8 +411,8 @@ test("engagementCreatePayload carries every field through when filled in", () =>
   });
   assert.deepEqual(payload, {
     title: "SF Investor Dinner",
-    engagement_type: "investor_dinner",
-    dinner_program: "supernova",
+    engagement_type: "dinner",
+    dinner_type: "investor_dinner",
     engagement_date: "2026-09-22",
     location: "The Battery, San Francisco",
     status: "confirmed",
@@ -428,19 +425,19 @@ test("engagementCreatePayload carries every field through when filled in", () =>
   });
 });
 
-test("engagementCreatePayload clears dinner_program for a non-dinner-shaped engagement_type even if the form still holds one", () => {
+test("engagementCreatePayload clears dinner_type for a non-dinner engagement_type even if the form still holds one", () => {
   const payload = engagementCreatePayload({
     ...emptyEngagementFormState(),
     title: "Fall Sponsorship",
     engagementType: "sponsorship",
-    dinnerProgram: "supernova",
+    dinnerType: "investor_dinner",
   });
-  assert.equal(payload.dinner_program, null);
+  assert.equal(payload.dinner_type, null);
 });
 
 test("engagementCreatePayload defaults blank optional fields to null", () => {
-  const payload = engagementCreatePayload({ ...emptyEngagementFormState(), title: "SF Dinner" });
-  assert.equal(payload.dinner_program, null);
+  const payload = engagementCreatePayload({ ...emptyEngagementFormState(), title: "SF Dinner", dinnerType: "" });
+  assert.equal(payload.dinner_type, null);
   assert.equal(payload.location, null);
   assert.equal(payload.owner, null);
   assert.equal(payload.fee, null);
@@ -472,11 +469,11 @@ test("engagementUpdatePatch never includes engagement_id/client_id/created_at/up
   assert.ok(!("updated_at" in patch));
 });
 
-test("engagementUpdatePatch clears dinner_program when engagement_type changes to a non-dinner type in the same patch", () => {
-  const engagement = makeEngagement({ engagement_type: "investor_dinner", dinner_program: "supernova" });
+test("engagementUpdatePatch clears dinner_type when engagement_type changes to a non-dinner type in the same patch", () => {
+  const engagement = makeEngagement({ engagement_type: "dinner", dinner_type: "investor_dinner" });
   const form = engagementFormStateFromEngagement(engagement);
   form.engagementType = "sponsorship";
-  assert.deepEqual(engagementUpdatePatch(form, engagement), { engagement_type: "sponsorship", dinner_program: null });
+  assert.deepEqual(engagementUpdatePatch(form, engagement), { engagement_type: "sponsorship", dinner_type: null });
 });
 
 test("engagementUpdatePatch reflects the new CONFIRMED status", () => {

@@ -37,7 +37,7 @@ from app.models.client_crm import (
     ClientPage,
     ClientRelationshipClassification,
     ClientStatus,
-    DinnerProgram,
+    DinnerType,
     Engagement,
     EngagementContractStatus,
     EngagementPaymentStatus,
@@ -110,18 +110,18 @@ class ClientContactUpdateRequest(BaseModel):
 
 
 class EngagementCreateRequest(BaseModel):
-    """Client CRM Stage 1E. `dinner_program` is only ever meaningful for a
-    dinner-shaped `engagement_type` -- the service layer is the
-    authoritative enforcement of that (forces it to None otherwise), this
-    request model just accepts whatever the caller sends. `luma_event_id`
-    is accepted here (reference-only, "expose the reference appropriately"
-    per this stage's own approved scope) but is deliberately NOT exposed
-    in the frontend Add/Engagement form yet -- no Luma picker/sync/auto-
-    create is part of Stage 1E."""
+    """Client CRM Stage 1E, taxonomy corrected in Stage 1E.1. `dinner_type`
+    is only ever meaningful when `engagement_type == DINNER` -- the
+    service layer is the authoritative enforcement of that (forces it to
+    None otherwise), this request model just accepts whatever the caller
+    sends. `luma_event_id` is accepted here (reference-only, "expose the
+    reference appropriately" per Stage 1E's own approved scope) but is
+    deliberately NOT exposed in the frontend Add/Engagement form yet -- no
+    Luma picker/sync/auto-create is part of Client CRM yet."""
 
     title: str
     engagement_type: EngagementType
-    dinner_program: DinnerProgram | None = None
+    dinner_type: DinnerType | None = None
     engagement_date: date | None = None
     location: str | None = None
     status: EngagementStatus = EngagementStatus.PLANNED
@@ -140,7 +140,7 @@ class EngagementUpdateRequest(BaseModel):
 
     title: str | None = None
     engagement_type: EngagementType | None = None
-    dinner_program: DinnerProgram | None = None
+    dinner_type: DinnerType | None = None
     engagement_date: date | None = None
     location: str | None = None
     status: EngagementStatus | None = None

@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { ApiError, createClientEngagement, updateClientEngagement, type Client, type Engagement, type EngagementType } from "@/lib/api";
 import { formatApiErrorMessage } from "@/lib/add-prospects-flow";
 import {
-  DINNER_PROGRAM_OPTIONS,
+  DINNER_TYPE_OPTIONS,
   ENGAGEMENT_CONTRACT_STATUS_OPTIONS,
   ENGAGEMENT_PAYMENT_STATUS_OPTIONS,
   ENGAGEMENT_STATUS_OPTIONS,
@@ -60,11 +60,11 @@ export function EngagementFormModal({
   }
 
   function handleEngagementTypeChange(value: EngagementType) {
-    // The form clears/hides Dinner Program for a non-dinner type -- the
-    // backend remains authoritative regardless (see engagementCreatePayload/
+    // The form clears/hides Dinner Type for a non-dinner engagement type --
+    // the backend remains authoritative regardless (see engagementCreatePayload/
     // engagementUpdatePatch), this is just keeping the UI honest about
     // what will actually be saved.
-    update({ engagementType: value, dinnerProgram: isDinnerShapedEngagementType(value) ? form.dinnerProgram : "" });
+    update({ engagementType: value, dinnerType: isDinnerShapedEngagementType(value) ? form.dinnerType : "" });
   }
 
   function handleOpenChange(next: boolean) {
@@ -89,7 +89,7 @@ export function EngagementFormModal({
     }
   }
 
-  const showDinnerProgram = isDinnerShapedEngagementType(form.engagementType);
+  const showDinnerType = isDinnerShapedEngagementType(form.engagementType);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -135,17 +135,17 @@ export function EngagementFormModal({
                 ))}
               </select>
             </div>
-            {showDinnerProgram && (
+            {showDinnerType && (
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground">Dinner Program</label>
+                <label className="text-xs font-medium text-muted-foreground">Dinner Type</label>
                 <select
-                  value={form.dinnerProgram}
-                  onChange={(e) => update({ dinnerProgram: e.target.value as EngagementFormState["dinnerProgram"] })}
+                  value={form.dinnerType}
+                  onChange={(e) => update({ dinnerType: e.target.value as EngagementFormState["dinnerType"] })}
                   disabled={saving}
                   className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <option value="">-- none --</option>
-                  {DINNER_PROGRAM_OPTIONS.map((o) => (
+                  {DINNER_TYPE_OPTIONS.map((o) => (
                     <option key={o.value} value={o.value}>
                       {o.label}
                     </option>

@@ -432,7 +432,7 @@ async def test_archiving_a_client_does_not_mutate_client_contact_engagement_or_n
     await engagement_store.create(
         Engagement(
             engagement_id="e1", client_id=client.client_id, title="Dinner",
-            engagement_type=EngagementType.INVESTOR_DINNER, created_at=now, updated_at=now,
+            engagement_type=EngagementType.DINNER, created_at=now, updated_at=now,
         )
     )
     await note_store.create(
@@ -706,7 +706,7 @@ async def test_no_hard_delete_of_client_contact(contact_service):
 async def test_create_engagement_requires_a_real_parent_client(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     with pytest.raises(ClientNotFound):
-        await service.create_client_engagement("does-not-exist", {"title": "SF Investor Dinner", "engagement_type": "investor_dinner"})
+        await service.create_client_engagement("does-not-exist", {"title": "SF Investor Dinner", "engagement_type": "dinner"})
 
 
 async def test_list_engagements_requires_a_real_parent_client(engagement_service):
@@ -719,14 +719,14 @@ async def test_create_engagement_rejects_blank_title(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
     with pytest.raises(ValueError):
-        await service.create_client_engagement(client.client_id, {"title": "   ", "engagement_type": "investor_dinner"})
+        await service.create_client_engagement(client.client_id, {"title": "   ", "engagement_type": "dinner"})
 
 
 async def test_create_engagement_minimal_generates_id_and_defaults(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
     engagement = await service.create_client_engagement(
-        client.client_id, {"title": "SF Investor Dinner", "engagement_type": "investor_dinner"}
+        client.client_id, {"title": "SF Investor Dinner", "engagement_type": "dinner"}
     )
     assert engagement.engagement_id
     assert engagement.client_id == client.client_id
@@ -734,7 +734,7 @@ async def test_create_engagement_minimal_generates_id_and_defaults(engagement_se
     assert engagement.status == "planned"
     assert engagement.contract_status == "not_sent"
     assert engagement.payment_status == "unpaid"
-    assert engagement.dinner_program is None
+    assert engagement.dinner_type is None
     assert engagement.owner is None
     assert engagement.archived is False
 
@@ -746,8 +746,8 @@ async def test_create_engagement_accepts_every_field(engagement_service):
         client.client_id,
         {
             "title": "SF Investor Dinner",
-            "engagement_type": "investor_dinner",
-            "dinner_program": "supernova",
+            "engagement_type": "dinner",
+            "dinner_type": "investor_dinner",
             "engagement_date": date(2026, 9, 22),
             "location": "The Battery, San Francisco",
             "status": "confirmed",
@@ -760,7 +760,7 @@ async def test_create_engagement_accepts_every_field(engagement_service):
             "luma_event_id": "luma-123",
         },
     )
-    assert engagement.dinner_program == "supernova"
+    assert engagement.dinner_type == "investor_dinner"
     assert engagement.status == "confirmed"
     assert engagement.owner == "Chris"
     assert engagement.fee == 5000.0
@@ -771,31 +771,31 @@ async def test_create_engagement_accepts_every_field(engagement_service):
     assert engagement.luma_event_id == "luma-123"
 
 
-async def test_create_engagement_clears_dinner_program_for_non_dinner_type(engagement_service):
+async def test_create_engagement_clears_dinner_type_for_non_dinner_type(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
     engagement = await service.create_client_engagement(
         client.client_id,
-        {"title": "Fall Sponsorship", "engagement_type": "sponsorship", "dinner_program": "supernova"},
+        {"title": "Fall Sponsorship", "engagement_type": "sponsorship", "dinner_type": "investor_dinner"},
     )
-    assert engagement.dinner_program is None
+    assert engagement.dinner_type is None
 
 
-async def test_create_engagement_keeps_dinner_program_for_customer_dinner(engagement_service):
+async def test_create_engagement_keeps_dinner_type_for_dinner_engagement(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
     engagement = await service.create_client_engagement(
         client.client_id,
-        {"title": "Aurora Night", "engagement_type": "customer_dinner", "dinner_program": "aurora"},
+        {"title": "Fireside Night", "engagement_type": "dinner", "dinner_type": "fireside_dinner"},
     )
-    assert engagement.dinner_program == "aurora"
+    assert engagement.dinner_type == "fireside_dinner"
 
 
 async def test_create_engagement_emits_activity_event(engagement_service):
     service, activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
     engagement = await service.create_client_engagement(
-        client.client_id, {"title": "SF Investor Dinner", "engagement_type": "investor_dinner"}
+        client.client_id, {"title": "SF Investor Dinner", "engagement_type": "dinner"}
     )
     page = await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)
     assert page.items[0].event_type == "engagement.created"
@@ -806,8 +806,8 @@ async def test_list_client_engagements_scoped_to_client(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client_a = await service.create_client({"name": "Hive ASMBLD"})
     client_b = await service.create_client({"name": "Other Co"})
-    await service.create_client_engagement(client_a.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner"})
-    await service.create_client_engagement(client_b.client_id, {"title": "Other Dinner", "engagement_type": "investor_dinner"})
+    await service.create_client_engagement(client_a.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
+    await service.create_client_engagement(client_b.client_id, {"title": "Other Dinner", "engagement_type": "dinner"})
 
     engagements = await service.list_client_engagements(client_a.client_id)
     assert len(engagements) == 1
@@ -817,7 +817,7 @@ async def test_list_client_engagements_scoped_to_client(engagement_service):
 async def test_get_client_engagement_existing(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
-    created = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner"})
+    created = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
     fetched = await service.get_client_engagement(client.client_id, created.engagement_id)
     assert fetched == created
 
@@ -836,7 +836,7 @@ async def test_engagement_requested_through_wrong_client_is_not_found(engagement
     service, _activity_log, _engagement_store = engagement_service
     client_a = await service.create_client({"name": "Hive ASMBLD"})
     client_b = await service.create_client({"name": "Other Co"})
-    engagement = await service.create_client_engagement(client_a.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner"})
+    engagement = await service.create_client_engagement(client_a.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
 
     with pytest.raises(EngagementNotFound):
         await service.get_client_engagement(client_b.client_id, engagement.engagement_id)
@@ -848,7 +848,7 @@ async def test_update_client_engagement_is_a_genuine_partial_patch(engagement_se
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
     engagement = await service.create_client_engagement(
-        client.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner", "owner": "Chris"}
+        client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "owner": "Chris"}
     )
     updated = await service.update_client_engagement(client.client_id, engagement.engagement_id, {"status": "confirmed"})
     assert updated.status == "confirmed"
@@ -860,25 +860,25 @@ async def test_update_client_engagement_is_a_genuine_partial_patch(engagement_se
 async def test_update_client_engagement_rejects_blank_title(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
-    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner"})
+    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
     with pytest.raises(ValueError):
         await service.update_client_engagement(client.client_id, engagement.engagement_id, {"title": "   "})
 
 
-async def test_update_client_engagement_clears_dinner_program_when_type_changes_to_non_dinner(engagement_service):
+async def test_update_client_engagement_clears_dinner_type_when_type_changes_to_non_dinner(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
     engagement = await service.create_client_engagement(
-        client.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner", "dinner_program": "supernova"}
+        client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "dinner_type": "investor_dinner"}
     )
     updated = await service.update_client_engagement(client.client_id, engagement.engagement_id, {"engagement_type": "sponsorship"})
-    assert updated.dinner_program is None
+    assert updated.dinner_type is None
 
 
 async def test_archive_and_restore_engagement_via_patch(engagement_service):
     service, activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
-    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner"})
+    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
 
     archived = await service.update_client_engagement(client.client_id, engagement.engagement_id, {"archived": True})
     assert archived.archived is True
@@ -893,7 +893,7 @@ async def test_archive_and_restore_engagement_via_patch(engagement_service):
 async def test_no_hard_delete_of_engagement(engagement_service):
     service, _activity_log, engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
-    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner"})
+    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
     await service.update_client_engagement(client.client_id, engagement.engagement_id, {"archived": True})
 
     assert not hasattr(engagement_store, "delete")
@@ -907,7 +907,7 @@ async def test_engagement_update_never_mutates_client(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD", "owner": "Chris", "next_action": "Schedule Q1 check-in"})
     engagement = await service.create_client_engagement(
-        client.client_id, {"title": "SF Dinner", "engagement_type": "investor_dinner", "owner": "Ria"}
+        client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "owner": "Ria"}
     )
     await service.update_client_engagement(client.client_id, engagement.engagement_id, {"status": "completed"})
 
@@ -915,3 +915,13 @@ async def test_engagement_update_never_mutates_client(engagement_service):
     assert refreshed_client.owner == "Chris"
     assert refreshed_client.next_action == "Schedule Q1 check-in"
     assert refreshed_client.relationship_classification is None
+
+
+def test_engagement_type_and_dinner_type_enum_values_match_stage_1e1_taxonomy():
+    """Stage 1E.1: engagement_type collapsed to DINNER/SPONSORSHIP/OTHER;
+    dinner_type replaces the retired DinnerProgram (Supernova/Galaxy/
+    Aurora) with the underlying dinner kind named directly."""
+    from app.models.client_crm import DinnerType, EngagementType
+
+    assert {member.value for member in EngagementType} == {"dinner", "sponsorship", "other"}
+    assert {member.value for member in DinnerType} == {"investor_dinner", "fireside_dinner", "bizdev_dinner"}

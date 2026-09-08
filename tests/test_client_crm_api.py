@@ -406,7 +406,7 @@ def test_create_engagement_missing_client_is_404(test_client):
     client, _service = test_client
     resp = client.post(
         "/client-crm/clients/does-not-exist/engagements",
-        json={"title": "SF Investor Dinner", "engagement_type": "investor_dinner"},
+        json={"title": "SF Investor Dinner", "engagement_type": "dinner"},
     )
     assert resp.status_code == 404
 
@@ -423,7 +423,7 @@ def test_create_engagement_blank_title_is_400(test_client):
     created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     resp = client.post(
         f"/client-crm/clients/{created['client_id']}/engagements",
-        json={"title": "   ", "engagement_type": "investor_dinner"},
+        json={"title": "   ", "engagement_type": "dinner"},
     )
     assert resp.status_code == 400
 
@@ -443,14 +443,14 @@ def test_create_engagement_minimal(test_client):
     created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     resp = client.post(
         f"/client-crm/clients/{created['client_id']}/engagements",
-        json={"title": "SF Investor Dinner", "engagement_type": "investor_dinner"},
+        json={"title": "SF Investor Dinner", "engagement_type": "dinner"},
     )
     assert resp.status_code == 200
     body = resp.json()
     assert body["title"] == "SF Investor Dinner"
     assert body["client_id"] == created["client_id"]
     assert body["status"] == "planned"
-    assert body["dinner_program"] is None
+    assert body["dinner_type"] is None
     assert body["archived"] is False
 
 
@@ -461,8 +461,8 @@ def test_create_engagement_with_full_fields(test_client):
         f"/client-crm/clients/{created['client_id']}/engagements",
         json={
             "title": "SF Investor Dinner",
-            "engagement_type": "investor_dinner",
-            "dinner_program": "supernova",
+            "engagement_type": "dinner",
+            "dinner_type": "investor_dinner",
             "engagement_date": "2026-09-22",
             "location": "The Battery, San Francisco",
             "status": "confirmed",
@@ -476,7 +476,7 @@ def test_create_engagement_with_full_fields(test_client):
     )
     assert resp.status_code == 200
     body = resp.json()
-    assert body["dinner_program"] == "supernova"
+    assert body["dinner_type"] == "investor_dinner"
     assert body["status"] == "confirmed"
     assert body["owner"] == "Chris"
     assert body["fee"] == 5000.0
@@ -484,15 +484,15 @@ def test_create_engagement_with_full_fields(test_client):
     assert body["payment_status"] == "partial"
 
 
-def test_create_engagement_clears_dinner_program_for_sponsorship(test_client):
+def test_create_engagement_clears_dinner_type_for_sponsorship(test_client):
     client, _service = test_client
     created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     resp = client.post(
         f"/client-crm/clients/{created['client_id']}/engagements",
-        json={"title": "Fall Sponsorship", "engagement_type": "sponsorship", "dinner_program": "supernova"},
+        json={"title": "Fall Sponsorship", "engagement_type": "sponsorship", "dinner_type": "investor_dinner"},
     )
     assert resp.status_code == 200
-    assert resp.json()["dinner_program"] is None
+    assert resp.json()["dinner_type"] is None
 
 
 def test_get_engagement_existing(test_client):
@@ -500,7 +500,7 @@ def test_get_engagement_existing(test_client):
     created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     created = client.post(
         f"/client-crm/clients/{created_client['client_id']}/engagements",
-        json={"title": "SF Dinner", "engagement_type": "investor_dinner"},
+        json={"title": "SF Dinner", "engagement_type": "dinner"},
     ).json()
     resp = client.get(f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}")
     assert resp.status_code == 200
@@ -522,7 +522,7 @@ def test_engagement_isolation_across_clients(test_client):
     client_b = client.post("/client-crm/clients", json={"name": "Other Co"}).json()
     engagement = client.post(
         f"/client-crm/clients/{client_a['client_id']}/engagements",
-        json={"title": "SF Dinner", "engagement_type": "investor_dinner"},
+        json={"title": "SF Dinner", "engagement_type": "dinner"},
     ).json()
 
     resp = client.get(f"/client-crm/clients/{client_b['client_id']}/engagements/{engagement['engagement_id']}")
@@ -540,7 +540,7 @@ def test_list_client_engagements_after_create(test_client):
     created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     client.post(
         f"/client-crm/clients/{created_client['client_id']}/engagements",
-        json={"title": "SF Dinner", "engagement_type": "investor_dinner"},
+        json={"title": "SF Dinner", "engagement_type": "dinner"},
     )
     resp = client.get(f"/client-crm/clients/{created_client['client_id']}/engagements")
     assert resp.status_code == 200
@@ -552,7 +552,7 @@ def test_update_engagement_partial_patch(test_client):
     created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     created = client.post(
         f"/client-crm/clients/{created_client['client_id']}/engagements",
-        json={"title": "SF Dinner", "engagement_type": "investor_dinner", "owner": "Chris"},
+        json={"title": "SF Dinner", "engagement_type": "dinner", "owner": "Chris"},
     ).json()
     resp = client.patch(
         f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}",
@@ -579,7 +579,7 @@ def test_archive_and_restore_engagement_via_patch(test_client):
     created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     created = client.post(
         f"/client-crm/clients/{created_client['client_id']}/engagements",
-        json={"title": "SF Dinner", "engagement_type": "investor_dinner"},
+        json={"title": "SF Dinner", "engagement_type": "dinner"},
     ).json()
     engagement_url = f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}"
 
@@ -597,7 +597,7 @@ def test_no_delete_route_exists_for_engagements(test_client):
     created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
     created = client.post(
         f"/client-crm/clients/{created_client['client_id']}/engagements",
-        json={"title": "SF Dinner", "engagement_type": "investor_dinner"},
+        json={"title": "SF Dinner", "engagement_type": "dinner"},
     ).json()
     resp = client.delete(f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}")
     assert resp.status_code in (404, 405)

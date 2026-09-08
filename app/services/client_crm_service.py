@@ -424,20 +424,17 @@ class ClientCrmService:
     # a side-effect source for Client/ClientContact/CrmContact/Luma" rule.
     # =====================================================================
 
-    _DINNER_SHAPED_ENGAGEMENT_TYPES = frozenset({"investor_dinner", "customer_dinner"})
-
     @classmethod
-    def _normalize_dinner_program(cls, engagement_type: Any, dinner_program: Any) -> Any:
+    def _normalize_dinner_type(cls, engagement_type: Any, dinner_type: Any) -> Any:
         """Backend stays authoritative regardless of what the frontend
-        sends or fails to clear: `dinner_program` is only ever meaningful
-        for a dinner-shaped `engagement_type` (INVESTOR_DINNER/
-        CUSTOMER_DINNER) -- anything else (SPONSORSHIP/OTHER) always gets
-        it silently forced to None on write, never rejected with an
-        error."""
+        sends or fails to clear: `dinner_type` is only ever meaningful when
+        `engagement_type == DINNER` -- anything else (SPONSORSHIP/OTHER)
+        always gets it silently forced to None on write, never rejected
+        with an error."""
         value = engagement_type.value if hasattr(engagement_type, "value") else engagement_type
-        if value not in cls._DINNER_SHAPED_ENGAGEMENT_TYPES:
+        if value != "dinner":
             return None
-        return dinner_program
+        return dinner_type
 
     async def list_client_engagements(self, client_id: str) -> list[Engagement]:
         await self._require_client(client_id)
@@ -463,7 +460,7 @@ class ClientCrmService:
             **{**fields, "title": title},
         )
         engagement = engagement.model_copy(
-            update={"dinner_program": self._normalize_dinner_program(engagement.engagement_type, engagement.dinner_program)}
+            update={"dinner_type": self._normalize_dinner_type(engagement.engagement_type, engagement.dinner_type)}
         )
         await self.engagement_store.create(engagement)
         await self.activity_log.record(
@@ -498,7 +495,7 @@ class ClientCrmService:
 
         updated = engagement.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
         updated = updated.model_copy(
-            update={"dinner_program": self._normalize_dinner_program(updated.engagement_type, updated.dinner_program)}
+            update={"dinner_type": self._normalize_dinner_type(updated.engagement_type, updated.dinner_type)}
         )
         await self.engagement_store.save(updated)
         await self._record_engagement_update_activity(engagement, updated)
