@@ -1771,3 +1771,87 @@ async def test_a_registration_whose_answer_already_matches_causes_zero_save_and_
     page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
     enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
     assert enriched_events == []
+
+
+# --- production-readiness: independence from investor-question mapping, ----
+# and no automatic historical replay from merely flipping the flag --------
+# (verified 2026-09-08 before enabling LUMA_CONTACT_ENRICHMENT_ENABLED live)
+
+
+async def test_investor_mapping_and_company_title_enrichment_both_apply_from_one_event_when_flag_is_on(
+    luma_service, mapping_store, luma_contact_enrichment_enabled
+):
+    """The generic LumaQuestionMapping path (investor_type/deploying_capital/
+    etc.) and the self-report Company/Title path are two independent code
+    paths in _process_guest_event_locked -- mapped_fields is always built
+    and applied FIRST, unconditionally; the self-report block runs after,
+    gated only by the flag. One registration carrying both kinds of
+    answers must produce both kinds of results from the same webhook call."""
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type=None, target_field_key="custom:deploying_capital",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Acme", "job_title": "CEO"}},
+            {"label": "Deploying Capital", "question_id": "q2", "question_type": "select", "value": "Yes, actively"},
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.company == "Acme"
+    assert result.contact.title == "CEO"
+    assert result.contact.custom_fields["deploying_capital"] == "Yes, actively"
+
+
+async def test_investor_mapping_still_applies_when_enrichment_flag_is_off(luma_service, mapping_store):
+    """The reverse direction: with the flag OFF (this file's real
+    production default -- no luma_contact_enrichment_enabled fixture
+    requested), the investor-question mapping must be completely
+    unaffected -- it was already live and independent of this flag before
+    Company/Title enrichment existed, and must remain so after enabling it
+    elsewhere."""
+    assert luma_sync_service_module.settings.luma_contact_enrichment_enabled is False
+    await _seed_mapping(
+        mapping_store, question_label="Deploying Capital", question_type=None, target_field_key="custom:deploying_capital",
+    )
+    guest = make_guest(
+        registration_answers=[
+            {"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Acme", "job_title": "CEO"}},
+            {"label": "Deploying Capital", "question_id": "q2", "question_type": "select", "value": "Yes, actively"},
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.custom_fields["deploying_capital"] == "Yes, actively"
+    assert result.contact.company is None  # self-report enrichment stays completely inert
+    assert result.contact.title is None
+
+
+def test_only_the_live_webhook_path_and_the_explicit_backfill_script_ever_call_the_self_report_merge_functions():
+    """Structural guard: proves enabling LUMA_CONTACT_ENRICHMENT_ENABLED
+    cannot, by itself, trigger any kind of historical replay. The self-
+    report merge functions (apply_luma_self_report / resolve_contact_luma_
+    fields) run ONLY in response to an explicit call -- either a real live
+    webhook event reaching LumaSyncService._apply_luma_contact_self_report,
+    or an explicit, human-invoked run of the historical backfill script.
+    There is no scheduled job, startup hook, or config-change listener
+    anywhere in the app that calls either function -- this test scans
+    every .py file under app/ and fails the moment a THIRD call site
+    (outside the enrichment module's own definition, luma_sync_service.py,
+    and luma_contact_enrichment_backfill.py) ever appears."""
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    allowed_files = {
+        repo_root / "app" / "services" / "luma_contact_enrichment.py",  # the functions' own definitions
+        repo_root / "app" / "services" / "luma_sync_service.py",  # the live webhook path
+        repo_root / "app" / "services" / "luma_contact_enrichment_backfill.py",  # the explicit backfill driver
+    }
+    offending_files = []
+    for path in (repo_root / "app").rglob("*.py"):
+        if path in allowed_files:
+            continue
+        text = path.read_text()
+        if "apply_luma_self_report(" in text or "resolve_contact_luma_fields(" in text:
+            offending_files.append(str(path))
+    assert offending_files == []
