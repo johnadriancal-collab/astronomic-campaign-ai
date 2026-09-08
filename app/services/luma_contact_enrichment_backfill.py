@@ -272,14 +272,20 @@ async def run_luma_contact_enrichment_backfill(
 
         company_updated = "company" in outcome.changed_field_keys
         title_updated = "title" in outcome.changed_field_keys
-        if company_updated and title_updated:
+        # "unchanged" means EXACTLY "zero save would occur" -- gated on
+        # changed_field_keys as a whole, not just company/title, so a
+        # (rare) website-only change (a blank company_website populated
+        # from Tier 1 while Company/Title both happen to already match)
+        # is correctly EXCLUDED from "unchanged" even though it doesn't
+        # fit the company/title/both buckets either.
+        if not outcome.changed_field_keys:
+            counts.contacts_unchanged += 1
+        elif company_updated and title_updated:
             counts.contacts_would_update_both += 1
         elif company_updated:
             counts.contacts_would_update_company += 1
         elif title_updated:
             counts.contacts_would_update_title += 1
-        else:
-            counts.contacts_unchanged += 1
 
         company_from_unknown = company_updated and resolutions.company.resolved.tier == RecencyTier.UNKNOWN
         title_from_unknown = title_updated and resolutions.title.resolved.tier == RecencyTier.UNKNOWN

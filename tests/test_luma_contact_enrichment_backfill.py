@@ -494,3 +494,29 @@ async def test_unchanged_counter_reflects_actual_field_equality_not_just_presenc
 
     assert report.counts.contacts_unchanged == 1
     assert report.counts.contacts_would_update_both == 1
+
+
+async def test_a_website_only_change_is_excluded_from_unchanged_and_still_gets_saved():
+    """Edge case the "unchanged" bucket must NOT swallow: Company/Title
+    both already match Luma exactly (so neither counts as "updated"), but
+    a currently-blank website gets populated via Tier 1 -- a REAL save
+    still occurs, so this must never be counted as "unchanged"."""
+    contact_store, registration_store, event_store = MemoryCrmContactStore(), MemoryLumaRegistrationStore(), MemoryLumaEventStore()
+    reference = make_contact(company="Acme", company_website="acme.com")
+    await contact_store.create(reference)
+    target = make_contact(company="Acme", title="CEO", company_website=None)
+    await contact_store.create(target)
+    await registration_store.save(
+        make_registration(crm_contact_id=target.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("Acme", "CEO")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=False)
+
+    assert report.counts.contacts_unchanged == 0  # NOT counted as unchanged
+    assert report.counts.contacts_would_update_company == 0
+    assert report.counts.contacts_would_update_title == 0
+    assert report.counts.contacts_would_update_both == 0
+    assert report.counts.websites_populated_from_blank_tier1 == 1
+    assert report.counts.contacts_saved == 1  # a real save DID occur
+    persisted = await contact_store.get(target.crm_contact_id)
+    assert persisted.company_website == "https://acme.com"
