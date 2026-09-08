@@ -154,6 +154,80 @@ def test_derive_investor_mode_mixed_multiple_types_is_both():
     ) == "Both"
 
 
+# --- derive_investor_mode(): Corporate Venture / Fund Manager / Other -------
+# (added to investor_type's options 2026-09-08, classified 2026-09-08 --
+# see PRIVATE_INVESTOR_TYPES/INSTITUTIONAL_INVESTOR_TYPES's own comment)
+
+
+def test_derive_investor_mode_corporate_venture_is_institutional():
+    assert derive_investor_mode(["Corporate Venture"]) == "Institutionally"
+
+
+def test_derive_investor_mode_fund_manager_general_partner_is_institutional():
+    assert derive_investor_mode(["Fund Manager / General Partner"]) == "Institutionally"
+
+
+def test_derive_investor_mode_other_alone_gives_no_signal():
+    """"Other" is deliberately classified into neither set -- there's no
+    way to know what archetype a bare "Other" answer means, so it must
+    never guess."""
+    assert derive_investor_mode(["Other"]) is None
+
+
+def test_derive_investor_mode_other_combined_with_private_type_stays_privately():
+    """"Other" contributes no signal of its own -- combined with a real
+    private-type answer, the result is still just "Privately", never
+    upgraded to "Both" by Other's mere presence."""
+    assert derive_investor_mode(["Angel Investor", "Other"]) == "Privately"
+
+
+def test_derive_investor_mode_other_combined_with_institutional_type_stays_institutionally():
+    assert derive_investor_mode(["Venture Capital", "Other"]) == "Institutionally"
+
+
+def test_derive_investor_mode_corporate_venture_plus_private_type_is_both():
+    assert derive_investor_mode(["Corporate Venture", "Angel Investor"]) == "Both"
+
+
+def test_derive_investor_mode_fund_manager_plus_private_type_is_both():
+    assert derive_investor_mode(["Fund Manager / General Partner", "Private Investor"]) == "Both"
+
+
+def test_derive_investor_mode_corporate_venture_and_fund_manager_together_stay_institutionally():
+    """Two institutional-only archetypes together are still just
+    "Institutionally", not "Both" -- no private signal present."""
+    assert derive_investor_mode(["Corporate Venture", "Fund Manager / General Partner"]) == "Institutionally"
+
+
+def test_derive_investor_mode_corporate_venture_combines_with_existing_institutional_types():
+    """A new institutional archetype alongside a pre-existing one is still
+    just "Institutionally" -- confirms the new values integrate with the
+    existing classification, not just in isolation."""
+    assert derive_investor_mode(["Corporate Venture", "Family Office", "Fund LP"]) == "Institutionally"
+
+
+def test_derive_investor_mode_all_three_new_values_with_no_other_types_only_other_gives_no_signal():
+    """Corporate Venture and Fund Manager both carry institutional signal;
+    Other carries none -- the combination is still just "Institutionally"."""
+    assert derive_investor_mode(["Corporate Venture", "Fund Manager / General Partner", "Other"]) == "Institutionally"
+
+
+# --- regression: existing classifications are completely unaffected --------
+
+
+def test_derive_investor_mode_existing_private_types_unchanged():
+    for investor_type in [
+        "Angel Investor", "I sponsor deals that I find", "Invest with group of Angels",
+        "Participate in syndicated investments", "Private Investor",
+    ]:
+        assert derive_investor_mode([investor_type]) == "Privately", investor_type
+
+
+def test_derive_investor_mode_existing_institutional_types_unchanged():
+    for investor_type in ["Family Office", "Fund LP", "Institutional Investor", "Private Equity", "Venture Capital"]:
+        assert derive_investor_mode([investor_type]) == "Institutionally", investor_type
+
+
 def test_crm_contact_defaults_to_not_manually_overridden():
     contact = CrmContact(crm_contact_id="1", created_at=datetime.now(timezone.utc), updated_at=datetime.now(timezone.utc))
     assert contact.thesis_investor_mode_manual_override is False

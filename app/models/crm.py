@@ -218,6 +218,17 @@ DIETARY_PREFERENCE_OPTIONS = [
 # investor archetype -- distinct from this Investor Thesis Q6 mode -- but each
 # archetype implies a private-vs-institutional signal, which is what
 # derive_investor_mode() below turns into thesis_investor_mode automatically.
+#
+# "Corporate Venture" and "Fund Manager / General Partner" were added to the
+# live investor_type field's options 2026-09-08 (Luma <-> CRM schema-
+# alignment fix) and classified into INSTITUTIONAL_INVESTOR_TYPES below on
+# 2026-09-08 -- both archetypes invest institutional/managed capital, not a
+# personal check, matching the same private-vs-institutional logic already
+# applied to every other type here. "Other" was added to investor_type's
+# options in that same fix but is deliberately left out of BOTH sets --
+# there's no way to know what archetype a bare "Other" answer actually means,
+# so it correctly carries no signal at all, per this function's own
+# "never guess" contract.
 PRIVATE_INVESTOR_TYPES = frozenset(
     {
         "Angel Investor",
@@ -229,8 +240,10 @@ PRIVATE_INVESTOR_TYPES = frozenset(
 )
 INSTITUTIONAL_INVESTOR_TYPES = frozenset(
     {
+        "Corporate Venture",
         "Family Office",
         "Fund LP",
+        "Fund Manager / General Partner",
         "Institutional Investor",
         "Private Equity",
         "Venture Capital",
