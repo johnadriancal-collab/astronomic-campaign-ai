@@ -127,3 +127,98 @@ async def test_write_mode_is_idempotent_on_rerun(tmp_path):
     assert second.returncode == 0
 
     assert "contacts_saved                             0" in second.stdout
+
+
+# --- --exclude: prefix resolution, fail-closed --------------------------------
+
+
+async def _seed_two_contacts_sharing_a_prefix(db_path: str) -> tuple[str, str]:
+    """Two Contact IDs sharing the literal prefix "shared-" -- used to
+    exercise the fail-closed multi-match case."""
+    contact_store = SQLiteCrmContactStore(db_path)
+    registration_store = SQLiteLumaRegistrationStore(db_path)
+    await contact_store.connect()
+    await registration_store.connect()
+    now = datetime.now(timezone.utc)
+    c1 = CrmContact(crm_contact_id="shared-aaaa-0000-0000-000000000001", created_at=now, updated_at=now, company="Co1")
+    c2 = CrmContact(crm_contact_id="shared-bbbb-0000-0000-000000000002", created_at=now, updated_at=now, company="Co2")
+    await contact_store.create(c1)
+    await contact_store.create(c2)
+    for c, new_val in ((c1, "New1"), (c2, "New2")):
+        await registration_store.save(
+            LumaRegistration(
+                luma_guest_id=str(uuid.uuid4()),
+                luma_event_id="e1",
+                crm_contact_id=c.crm_contact_id,
+                match_status=LumaMatchStatus.MATCHED,
+                approval_status=LumaApprovalStatus.APPROVED,
+                registered_at=now,
+                synced_at=now,
+                updated_at=now,
+                registration_answers=[LumaRegistrationAnswer(question_id="q1", label="Company", question_type="company", value={"company": new_val})],
+            )
+        )
+    await contact_store.close()
+    await registration_store.close()
+    return c1.crm_contact_id, c2.crm_contact_id
+
+
+async def test_exclude_with_a_unique_prefix_skips_only_that_contact(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    contact_id = await _seed_db(db_path)
+
+    result = _run_script(db_path, "--write", "--confirm-production-writes", "--exclude", contact_id[:8])
+
+    assert result.returncode == 0
+    assert "contacts_excluded                          1" in result.stdout
+    assert contact_id in result.stdout  # listed under Excluded Contacts
+    contact_store = SQLiteCrmContactStore(db_path)
+    await contact_store.connect()
+    persisted = await contact_store.get(contact_id)
+    await contact_store.close()
+    assert persisted.company == "OldCo"  # untouched by the write run
+
+
+async def test_exclude_with_a_zero_match_prefix_fails_closed(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    contact_id = await _seed_db(db_path)
+
+    result = _run_script(db_path, "--write", "--confirm-production-writes", "--exclude", "zzzzzzzz")
+
+    assert result.returncode == 2
+    assert "Refusing to run" in result.stderr
+    assert "matched ZERO Contacts" in result.stderr
+    contact_store = SQLiteCrmContactStore(db_path)
+    await contact_store.connect()
+    persisted = await contact_store.get(contact_id)
+    await contact_store.close()
+    assert persisted.company == "OldCo"  # nothing was written -- refused before running at all
+
+
+async def test_exclude_with_an_ambiguous_prefix_fails_closed(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    c1_id, c2_id = await _seed_two_contacts_sharing_a_prefix(db_path)
+
+    result = _run_script(db_path, "--exclude", "shared-")
+
+    assert result.returncode == 2
+    assert "Refusing to run" in result.stderr
+    assert "matched MULTIPLE Contacts" in result.stderr
+    contact_store = SQLiteCrmContactStore(db_path)
+    await contact_store.connect()
+    c1 = await contact_store.get(c1_id)
+    c2 = await contact_store.get(c2_id)
+    await contact_store.close()
+    assert c1.company == "Co1"  # nothing touched -- refused before reading further
+    assert c2.company == "Co2"
+
+
+async def test_exclude_accepts_comma_separated_and_repeated_flags(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    c1_id, c2_id = await _seed_two_contacts_sharing_a_prefix(db_path)
+
+    # Unique-enough prefixes for each (their own distinguishing suffix).
+    result = _run_script(db_path, "--exclude", f"{c1_id[:11]},{c2_id[:11]}")
+
+    assert result.returncode == 0
+    assert "contacts_excluded                          2" in result.stdout

@@ -52,6 +52,27 @@ Suspicious-case flags (`BackfillExample.flags`) are deliberately
 conservative and NEVER block/alter anything -- purely a note for the
 human reviewer, same spirit as scripts/audit_contact_names.py's own
 flagging. A contact can carry zero or several flags.
+
+`excluded_contact_ids` (backfill-only precaution): an explicit set of
+FULL CrmContact IDs to skip entirely for THIS run -- no resolution is
+computed, apply_luma_self_report() is never called, no
+Contact/provenance/Activity Log change of any kind occurs for an
+excluded Contact, and it is never added to any other count/bucket
+(would_update_*/unchanged/ambiguous/website_*/examples) -- it simply
+does not exist as far as the rest of this function is concerned, other
+than being counted in `contacts_excluded` and listed in
+`excluded_contact_ids`. This is a ONE-RUN, IN-MEMORY parameter only --
+nothing is persisted, no new CrmContact field, no general suppression
+mechanism, and it has zero effect on the live webhook path (which never
+passes this parameter at all -- see luma_sync_service.py's own call
+site, unmodified by this capability). Registration-level counts
+(registrations_examined, the recency-tier tallies) are computed from the
+RAW registration data before grouping and are deliberately UNAFFECTED by
+exclusion -- they describe the dataset, not what got processed.
+Resolving a short ID prefix to a full CrmContact ID is the CALLER's
+job (see scripts/run_luma_contact_enrichment_backfill.py's own
+prefix-resolution, which fails closed on zero or multiple matches) --
+this function only ever accepts and compares full IDs.
 """
 
 from __future__ import annotations
@@ -120,6 +141,14 @@ class BackfillCounts:
     websites_tier2_free_excluded: int = 0
     websites_still_unresolved: int = 0
     contacts_saved: int = 0  # only nonzero when dry_run=False
+    # Backfill-only precaution -- see module docstring. Counts Contacts in
+    # `excluded_contact_ids` that were ACTUALLY present in this run's
+    # dataset (had at least one registration) and were therefore really
+    # skipped; a requested exclusion ID with no registrations at all has
+    # nothing to skip and is not counted here (see
+    # BackfillReport.excluded_contact_ids_not_found for transparency on
+    # that case instead).
+    contacts_excluded: int = 0
 
 
 @dataclass
@@ -158,6 +187,12 @@ class BackfillReport:
     ambiguous_contact_ids: list[str] = field(default_factory=list)
     tier1_ambiguous_examples: list[dict] = field(default_factory=list)
     website_review_needed_contact_ids: list[str] = field(default_factory=list)
+    # Backfill-only precaution -- see module docstring.
+    excluded_contact_ids: list[str] = field(default_factory=list)
+    # Requested exclusion IDs that had no registrations at all in this
+    # run's dataset -- nothing to skip, but surfaced so a caller never
+    # silently assumes an exclusion "took" when it was actually a no-op.
+    excluded_contact_ids_not_found: list[str] = field(default_factory=list)
     dry_run: bool = True
 
 
@@ -202,7 +237,9 @@ async def run_luma_contact_enrichment_backfill(
     *,
     dry_run: bool = True,
     example_cap: int = 20,
+    excluded_contact_ids: frozenset[str] | set[str] | None = None,
 ) -> BackfillReport:
+    excluded = frozenset(excluded_contact_ids or ())
     all_contacts = await crm_contact_store.list()
     all_registrations = await registration_store.list()
     all_events = await event_store.list()
@@ -236,8 +273,17 @@ async def run_luma_contact_enrichment_backfill(
     counts.unique_contacts_represented = len(regs_by_contact)
 
     report = BackfillReport(counts=counts, dry_run=dry_run)
+    report.excluded_contact_ids_not_found = sorted(excluded - set(regs_by_contact.keys()))
 
     for crm_contact_id, regs in regs_by_contact.items():
+        if crm_contact_id in excluded:
+            # Skip ENTIRELY -- no resolution, no merge call, no
+            # Contact/provenance/Activity Log change, not counted toward
+            # any other bucket. See module docstring.
+            counts.contacts_excluded += 1
+            report.excluded_contact_ids.append(crm_contact_id)
+            continue
+
         contact = contacts_by_id.get(crm_contact_id)
         if contact is None:
             continue  # dangling crm_contact_id reference -- data-integrity edge, not expected; skip defensively
@@ -373,4 +419,5 @@ async def run_luma_contact_enrichment_backfill(
             await crm_contact_store.save(outcome.contact)
             counts.contacts_saved += 1
 
+    report.excluded_contact_ids.sort()
     return report

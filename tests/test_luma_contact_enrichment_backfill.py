@@ -520,3 +520,120 @@ async def test_a_website_only_change_is_excluded_from_unchanged_and_still_gets_s
     assert report.counts.contacts_saved == 1  # a real save DID occur
     persisted = await contact_store.get(target.crm_contact_id)
     assert persisted.company_website == "https://acme.com"
+
+
+# --- backfill-only exclusion capability -------------------------------------
+
+
+async def test_excluded_contact_is_skipped_entirely_zero_changes(stores):
+    contact_store, registration_store, event_store = stores
+    excluded = make_contact(company="OldCo", title="Old Title")
+    included = make_contact(company="OldCo2", title="Old Title 2")
+    await contact_store.create(excluded)
+    await contact_store.create(included)
+    await registration_store.save(
+        make_registration(crm_contact_id=excluded.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo", "New Title")])
+    )
+    await registration_store.save(
+        make_registration(crm_contact_id=included.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo2", "New Title 2")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store, registration_store, event_store, dry_run=False, excluded_contact_ids={excluded.crm_contact_id}
+    )
+
+    assert report.counts.contacts_excluded == 1
+    assert report.excluded_contact_ids == [excluded.crm_contact_id]
+    assert report.counts.contacts_would_update_both == 1  # only the included contact
+    assert report.counts.contacts_saved == 1  # only the included contact
+
+    persisted_excluded = await contact_store.get(excluded.crm_contact_id)
+    assert persisted_excluded.company == "OldCo"  # completely untouched
+    assert persisted_excluded.title == "Old Title"
+    assert "field_provenance" not in persisted_excluded.custom_fields
+
+    persisted_included = await contact_store.get(included.crm_contact_id)
+    assert persisted_included.company == "NewCo2"
+
+
+async def test_excluded_contact_never_appears_in_any_other_bucket_or_examples(stores):
+    contact_store, registration_store, event_store = stores
+    excluded = make_contact(company="OldCo")
+    await contact_store.create(excluded)
+    await registration_store.save(
+        make_registration(crm_contact_id=excluded.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store, registration_store, event_store, dry_run=True, excluded_contact_ids={excluded.crm_contact_id}
+    )
+
+    assert report.counts.contacts_would_update_company == 0
+    assert report.counts.contacts_would_update_both == 0
+    assert report.counts.contacts_unchanged == 0
+    assert report.examples == []
+    assert excluded.crm_contact_id not in report.ambiguous_contact_ids
+    assert excluded.crm_contact_id not in report.website_review_needed_contact_ids
+
+
+async def test_excluded_contacts_registrations_still_count_toward_raw_registration_tallies(stores):
+    """Registration-level counts describe the raw dataset, not what got
+    processed -- deliberately unaffected by exclusion (see module
+    docstring)."""
+    contact_store, registration_store, event_store = stores
+    excluded = make_contact(company="OldCo")
+    await contact_store.create(excluded)
+    await registration_store.save(
+        make_registration(crm_contact_id=excluded.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store, registration_store, event_store, dry_run=True, excluded_contact_ids={excluded.crm_contact_id}
+    )
+
+    assert report.counts.registrations_examined == 1
+    assert report.counts.registrations_using_registered_at == 1
+    assert report.counts.unique_contacts_represented == 1  # still "represented" in the dataset
+
+
+async def test_a_requested_exclusion_id_with_no_registrations_is_reported_as_not_found(stores):
+    contact_store, registration_store, event_store = stores
+    lonely = make_contact(company="NoRegistrations")
+    await contact_store.create(lonely)
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store, registration_store, event_store, dry_run=True, excluded_contact_ids={lonely.crm_contact_id, "does-not-exist-at-all"}
+    )
+
+    assert report.counts.contacts_excluded == 0  # nothing to skip -- no registrations at all
+    assert sorted(report.excluded_contact_ids_not_found) == sorted([lonely.crm_contact_id, "does-not-exist-at-all"])
+
+
+async def test_exclusion_has_no_default_effect_when_not_provided(stores):
+    """Backward compatible -- omitting excluded_contact_ids entirely
+    behaves exactly as before this capability existed."""
+    contact_store, registration_store, event_store = stores
+    contact = make_contact(company="OldCo")
+    await contact_store.create(contact)
+    await registration_store.save(
+        make_registration(crm_contact_id=contact.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=True)
+
+    assert report.counts.contacts_excluded == 0
+    assert report.excluded_contact_ids == []
+    assert report.counts.contacts_would_update_company == 1
+
+
+def test_backfill_driver_exclusion_parameter_is_not_referenced_by_the_live_webhook_path():
+    """Structural guard: excluded_contact_ids must remain a
+    backfill-only, one-run, in-memory parameter -- never threaded into
+    the live webhook path."""
+    import inspect
+
+    from app.services import luma_sync_service as module
+
+    source = inspect.getsource(module)
+    assert "excluded_contact_ids" not in source
+    assert "excluded" not in source.lower()

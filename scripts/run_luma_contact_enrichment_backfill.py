@@ -19,11 +19,23 @@ Never prints environment variables, secrets, or raw Luma payloads --
 only the aggregate counts and a small, capped set of examples (IDs and
 the actual before/after field values only).
 
+--exclude (backfill-only precaution, repeatable, comma-separable): skips
+the given Contacts ENTIRELY for this one run -- see
+run_luma_contact_enrichment_backfill's own docstring for exactly what
+"entirely" means. Each value is a short ID PREFIX, matched against every
+CrmContact's real `crm_contact_id` -- NEVER assume/reconstruct a full
+UUID from a shortened display ID. Resolution FAILS CLOSED: a prefix that
+matches zero or more than one Contact aborts the ENTIRE run (dry-run
+included) before anything is read or written, rather than silently
+proceeding with a partial/ambiguous exclusion list. Only the resolved
+FULL Contact IDs are ever passed to the driver.
+
 Usage (run as a module from the repo root, so `app.*` imports resolve):
     python3 -m scripts.run_luma_contact_enrichment_backfill
     python3 -m scripts.run_luma_contact_enrichment_backfill --dry-run
     python3 -m scripts.run_luma_contact_enrichment_backfill --write --confirm-production-writes
     python3 -m scripts.run_luma_contact_enrichment_backfill --database-path /app/data/campaigns.db --example-cap 25
+    python3 -m scripts.run_luma_contact_enrichment_backfill --exclude 1176e159 --exclude 9dfe0207,f39ef8c6
 """
 
 from __future__ import annotations
@@ -33,10 +45,32 @@ import asyncio
 import sys
 
 from app.config import settings
+from app.repositories.crm_contact_store import CrmContactStore
 from app.repositories.sqlite_crm_contact_store import SQLiteCrmContactStore
 from app.repositories.sqlite_luma_event_store import SQLiteLumaEventStore
 from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrationStore
 from app.services.luma_contact_enrichment_backfill import BackfillReport, run_luma_contact_enrichment_backfill
+
+
+async def _resolve_exclusion_prefixes(contact_store: CrmContactStore, prefixes: list[str]) -> tuple[list[str], list[str]]:
+    """Each prefix must match EXACTLY ONE CrmContact.crm_contact_id
+    (startswith) -- fails closed (returns an error, never a guess) on
+    zero or multiple matches. Never assumes/reconstructs a full UUID from
+    a shortened display ID."""
+    if not prefixes:
+        return [], []
+    all_contacts = await contact_store.list()
+    resolved: list[str] = []
+    errors: list[str] = []
+    for prefix in prefixes:
+        matches = sorted({c.crm_contact_id for c in all_contacts if c.crm_contact_id.startswith(prefix)})
+        if len(matches) == 0:
+            errors.append(f"{prefix!r} matched ZERO Contacts")
+        elif len(matches) > 1:
+            errors.append(f"{prefix!r} matched MULTIPLE Contacts ({len(matches)}): {matches}")
+        else:
+            resolved.append(matches[0])
+    return resolved, errors
 
 
 def _print_report(report: BackfillReport) -> None:
@@ -45,6 +79,14 @@ def _print_report(report: BackfillReport) -> None:
     counts = report.counts
     for field_name in counts.__dataclass_fields__:
         print(f"  {field_name:42s} {getattr(counts, field_name)}")
+
+    print(f"\n=== Excluded Contacts (backfill-only precaution, this run only) -- {len(report.excluded_contact_ids)} ===")
+    for contact_id in report.excluded_contact_ids:
+        print(f"  {contact_id}")
+    if report.excluded_contact_ids_not_found:
+        print(f"  NOTE: {len(report.excluded_contact_ids_not_found)} requested exclusion ID(s) had no registrations at all -- nothing to skip:")
+        for contact_id in report.excluded_contact_ids_not_found:
+            print(f"    {contact_id}")
 
     print(f"\n=== Ambiguous Contacts (unknown-recency conflict, capped) -- {len(report.ambiguous_contact_ids)} ===")
     for contact_id in report.ambiguous_contact_ids:
@@ -91,8 +133,22 @@ async def _run(args: argparse.Namespace) -> BackfillReport:
     await registration_store.connect()
     await event_store.connect()
     try:
+        resolved_exclusions, errors = await _resolve_exclusion_prefixes(contact_store, args.exclude)
+        if errors:
+            print("Refusing to run: exclusion prefix resolution failed closed. Nothing was read or written beyond this lookup.", file=sys.stderr)
+            for error in errors:
+                print(f"  {error}", file=sys.stderr)
+            sys.exit(2)
+        if args.exclude:
+            print(f"Resolved {len(args.exclude)} exclusion prefix(es) to {len(resolved_exclusions)} full Contact ID(s).", file=sys.stderr)
+
         return await run_luma_contact_enrichment_backfill(
-            contact_store, registration_store, event_store, dry_run=args.dry_run, example_cap=args.example_cap
+            contact_store,
+            registration_store,
+            event_store,
+            dry_run=args.dry_run,
+            example_cap=args.example_cap,
+            excluded_contact_ids=set(resolved_exclusions),
         )
     finally:
         await contact_store.close()
@@ -115,7 +171,18 @@ def main() -> None:
     )
     parser.add_argument("--database-path", default=None, help="Override the DB path (defaults to the app's own configured database_path).")
     parser.add_argument("--example-cap", type=int, default=20)
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help="Backfill-only precaution: skip a Contact entirely for this run. Repeatable; each value may also be "
+        "comma-separated. Short ID PREFIX, resolved against the real Contact store -- fails closed if a prefix "
+        "matches zero or multiple Contacts.",
+    )
     args = parser.parse_args()
+    # Flatten repeatable + comma-separated values into one list of raw prefixes.
+    args.exclude = [p.strip() for raw in args.exclude for p in raw.split(",") if p.strip()]
 
     if args.write and not args.confirm_production_writes:
         print(
