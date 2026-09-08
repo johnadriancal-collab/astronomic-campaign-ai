@@ -222,3 +222,49 @@ async def test_exclude_accepts_comma_separated_and_repeated_flags(tmp_path):
 
     assert result.returncode == 0
     assert "contacts_excluded                          2" in result.stdout
+
+
+# --- --include: allowlist, fail-closed ----------------------------------------
+
+
+async def test_include_restricts_write_to_only_the_allowlisted_contact(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    c1_id, c2_id = await _seed_two_contacts_sharing_a_prefix(db_path)
+
+    result = _run_script(db_path, "--write", "--confirm-production-writes", "--include", f"{c1_id[:11]}")
+
+    assert result.returncode == 0
+    contact_store = SQLiteCrmContactStore(db_path)
+    await contact_store.connect()
+    c1 = await contact_store.get(c1_id)
+    c2 = await contact_store.get(c2_id)
+    await contact_store.close()
+    assert c1.company == "New1"  # in the allowlist -- written
+    assert c2.company == "Co2"  # NOT in the allowlist -- untouched
+
+
+async def test_include_with_a_zero_match_prefix_fails_closed(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    contact_id = await _seed_db(db_path)
+
+    result = _run_script(db_path, "--write", "--confirm-production-writes", "--include", "zzzzzzzz")
+
+    assert result.returncode == 2
+    assert "Refusing to run" in result.stderr
+    assert "matched ZERO Contacts" in result.stderr
+    contact_store = SQLiteCrmContactStore(db_path)
+    await contact_store.connect()
+    persisted = await contact_store.get(contact_id)
+    await contact_store.close()
+    assert persisted.company == "OldCo"
+
+
+async def test_include_with_an_ambiguous_prefix_fails_closed(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    c1_id, c2_id = await _seed_two_contacts_sharing_a_prefix(db_path)
+
+    result = _run_script(db_path, "--include", "shared-")
+
+    assert result.returncode == 2
+    assert "Refusing to run" in result.stderr
+    assert "matched MULTIPLE Contacts" in result.stderr

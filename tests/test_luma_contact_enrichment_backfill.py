@@ -637,3 +637,133 @@ def test_backfill_driver_exclusion_parameter_is_not_referenced_by_the_live_webho
     source = inspect.getsource(module)
     assert "excluded_contact_ids" not in source
     assert "excluded" not in source.lower()
+
+
+# --- backfill-only allowlist (freezing a reviewed cohort) -------------------
+
+
+async def test_allowlist_restricts_writes_to_only_the_included_contacts(stores):
+    contact_store, registration_store, event_store = stores
+    allowed = make_contact(company="OldAllowed")
+    not_allowed = make_contact(company="OldNotAllowed")
+    await contact_store.create(allowed)
+    await contact_store.create(not_allowed)
+    await registration_store.save(
+        make_registration(crm_contact_id=allowed.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewAllowed")])
+    )
+    await registration_store.save(
+        make_registration(crm_contact_id=not_allowed.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewNotAllowed")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store, registration_store, event_store, dry_run=False, included_contact_ids={allowed.crm_contact_id}
+    )
+
+    assert report.counts.contacts_allowlist_size == 1
+    assert report.counts.contacts_eligible == 1
+    assert report.counts.contacts_outside_allowlist_skipped == 1
+    assert report.counts.contacts_saved == 1
+
+    persisted_allowed = await contact_store.get(allowed.crm_contact_id)
+    assert persisted_allowed.company == "NewAllowed"
+    persisted_not_allowed = await contact_store.get(not_allowed.crm_contact_id)
+    assert persisted_not_allowed.company == "OldNotAllowed"  # completely untouched
+    assert "field_provenance" not in persisted_not_allowed.custom_fields
+
+
+async def test_no_allowlist_provided_means_unrestricted_exactly_as_before(stores):
+    contact_store, registration_store, event_store = stores
+    contact = make_contact(company="OldCo")
+    await contact_store.create(contact)
+    await registration_store.save(
+        make_registration(crm_contact_id=contact.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=True)
+
+    assert report.counts.contacts_allowlist_size == 0
+    assert report.counts.contacts_outside_allowlist_skipped == 0
+    assert report.counts.contacts_would_update_company == 1
+
+
+async def test_exclusion_takes_precedence_over_the_allowlist(stores):
+    """A Contact in BOTH the allowlist and the exclusion set must be
+    treated as excluded, never processed."""
+    contact_store, registration_store, event_store = stores
+    contact = make_contact(company="OldCo")
+    await contact_store.create(contact)
+    await registration_store.save(
+        make_registration(crm_contact_id=contact.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store,
+        registration_store,
+        event_store,
+        dry_run=False,
+        included_contact_ids={contact.crm_contact_id},
+        excluded_contact_ids={contact.crm_contact_id},
+    )
+
+    assert report.counts.contacts_excluded == 1
+    assert report.counts.contacts_eligible == 0
+    assert report.counts.contacts_saved == 0
+    persisted = await contact_store.get(contact.crm_contact_id)
+    assert persisted.company == "OldCo"
+
+
+async def test_allowlist_freezes_a_cohort_against_a_new_registration_arriving_later(stores):
+    """The exact scenario this capability exists for: a previously
+    reviewed cohort must not silently expand when a new registration
+    (for a Contact never reviewed) shows up before the write."""
+    contact_store, registration_store, event_store = stores
+    reviewed = make_contact(company="OldReviewed")
+    await contact_store.create(reviewed)
+    await registration_store.save(
+        make_registration(crm_contact_id=reviewed.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewReviewed")])
+    )
+    frozen_cohort = {reviewed.crm_contact_id}
+
+    # A brand-new registration for a brand-new Contact arrives AFTER the cohort was frozen.
+    newcomer = make_contact(company="OldNewcomer")
+    await contact_store.create(newcomer)
+    await registration_store.save(
+        make_registration(crm_contact_id=newcomer.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewNewcomer")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store, registration_store, event_store, dry_run=False, included_contact_ids=frozen_cohort
+    )
+
+    assert report.counts.contacts_saved == 1
+    persisted_reviewed = await contact_store.get(reviewed.crm_contact_id)
+    assert persisted_reviewed.company == "NewReviewed"
+    persisted_newcomer = await contact_store.get(newcomer.crm_contact_id)
+    assert persisted_newcomer.company == "OldNewcomer"  # untouched -- outside the frozen cohort
+
+
+async def test_allowlist_id_with_no_registrations_is_reported_as_not_found(stores):
+    contact_store, registration_store, event_store = stores
+    lonely = make_contact(company="NoRegistrations")
+    await contact_store.create(lonely)
+
+    report = await run_luma_contact_enrichment_backfill(
+        contact_store, registration_store, event_store, dry_run=True, included_contact_ids={lonely.crm_contact_id}
+    )
+
+    assert report.counts.contacts_eligible == 0
+    assert report.included_contact_ids_not_found == [lonely.crm_contact_id]
+
+
+def test_backfill_driver_allowlist_parameter_is_not_referenced_by_the_live_webhook_path():
+    """Structural guard: included_contact_ids must remain a
+    backfill-only, one-run, in-memory parameter -- never threaded into
+    the live webhook path. (Not checking for the word "allowlist" itself
+    -- luma_sync_service.py already uses it legitimately elsewhere, for
+    the unrelated CRM custom-field option-allowlist filter.)"""
+    import inspect
+
+    from app.services import luma_sync_service as module
+
+    source = inspect.getsource(module)
+    assert "included_contact_ids" not in source

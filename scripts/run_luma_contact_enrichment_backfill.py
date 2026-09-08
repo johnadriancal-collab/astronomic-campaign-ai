@@ -30,12 +30,21 @@ included) before anything is read or written, rather than silently
 proceeding with a partial/ambiguous exclusion list. Only the resolved
 FULL Contact IDs are ever passed to the driver.
 
+--include (backfill-only allowlist, repeatable, comma-separable): the
+OPPOSITE precaution -- restricts this run to ONLY the given Contacts,
+freezing a previously-reviewed cohort against new Luma registrations
+arriving after review (a new registration for someone NOT in the
+allowlist is simply skipped, never silently included). Same prefix
+resolution and fail-closed behavior as --exclude. --exclude still takes
+precedence if a Contact somehow appears in both.
+
 Usage (run as a module from the repo root, so `app.*` imports resolve):
     python3 -m scripts.run_luma_contact_enrichment_backfill
     python3 -m scripts.run_luma_contact_enrichment_backfill --dry-run
     python3 -m scripts.run_luma_contact_enrichment_backfill --write --confirm-production-writes
     python3 -m scripts.run_luma_contact_enrichment_backfill --database-path /app/data/campaigns.db --example-cap 25
     python3 -m scripts.run_luma_contact_enrichment_backfill --exclude 1176e159 --exclude 9dfe0207,f39ef8c6
+    python3 -m scripts.run_luma_contact_enrichment_backfill --include e0aeae6e,12b1b050,f7be1174
 """
 
 from __future__ import annotations
@@ -52,11 +61,11 @@ from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrati
 from app.services.luma_contact_enrichment_backfill import BackfillReport, run_luma_contact_enrichment_backfill
 
 
-async def _resolve_exclusion_prefixes(contact_store: CrmContactStore, prefixes: list[str]) -> tuple[list[str], list[str]]:
-    """Each prefix must match EXACTLY ONE CrmContact.crm_contact_id
-    (startswith) -- fails closed (returns an error, never a guess) on
-    zero or multiple matches. Never assumes/reconstructs a full UUID from
-    a shortened display ID."""
+async def _resolve_contact_prefixes(contact_store: CrmContactStore, prefixes: list[str]) -> tuple[list[str], list[str]]:
+    """Shared by --exclude and --include. Each prefix must match EXACTLY
+    ONE CrmContact.crm_contact_id (startswith) -- fails closed (returns
+    an error, never a guess) on zero or multiple matches. Never assumes/
+    reconstructs a full UUID from a shortened display ID."""
     if not prefixes:
         return [], []
     all_contacts = await contact_store.list()
@@ -87,6 +96,18 @@ def _print_report(report: BackfillReport) -> None:
         print(f"  NOTE: {len(report.excluded_contact_ids_not_found)} requested exclusion ID(s) had no registrations at all -- nothing to skip:")
         for contact_id in report.excluded_contact_ids_not_found:
             print(f"    {contact_id}")
+
+    if report.included_contact_ids_requested:
+        print(
+            f"\n=== Allowlist (backfill-only, this run only) -- {len(report.included_contact_ids_requested)} requested, "
+            f"{report.counts.contacts_eligible} eligible ==="
+        )
+        for contact_id in report.included_contact_ids_requested:
+            print(f"  {contact_id}")
+        if report.included_contact_ids_not_found:
+            print(f"  NOTE: {len(report.included_contact_ids_not_found)} allowlist ID(s) had no registrations at all:")
+            for contact_id in report.included_contact_ids_not_found:
+                print(f"    {contact_id}")
 
     print(f"\n=== Ambiguous Contacts (unknown-recency conflict, capped) -- {len(report.ambiguous_contact_ids)} ===")
     for contact_id in report.ambiguous_contact_ids:
@@ -133,14 +154,18 @@ async def _run(args: argparse.Namespace) -> BackfillReport:
     await registration_store.connect()
     await event_store.connect()
     try:
-        resolved_exclusions, errors = await _resolve_exclusion_prefixes(contact_store, args.exclude)
+        resolved_exclusions, exclusion_errors = await _resolve_contact_prefixes(contact_store, args.exclude)
+        resolved_inclusions, inclusion_errors = await _resolve_contact_prefixes(contact_store, args.include)
+        errors = exclusion_errors + inclusion_errors
         if errors:
-            print("Refusing to run: exclusion prefix resolution failed closed. Nothing was read or written beyond this lookup.", file=sys.stderr)
+            print("Refusing to run: prefix resolution failed closed. Nothing was read or written beyond this lookup.", file=sys.stderr)
             for error in errors:
                 print(f"  {error}", file=sys.stderr)
             sys.exit(2)
         if args.exclude:
             print(f"Resolved {len(args.exclude)} exclusion prefix(es) to {len(resolved_exclusions)} full Contact ID(s).", file=sys.stderr)
+        if args.include:
+            print(f"Resolved {len(args.include)} allowlist prefix(es) to {len(resolved_inclusions)} full Contact ID(s).", file=sys.stderr)
 
         return await run_luma_contact_enrichment_backfill(
             contact_store,
@@ -149,6 +174,7 @@ async def _run(args: argparse.Namespace) -> BackfillReport:
             dry_run=args.dry_run,
             example_cap=args.example_cap,
             excluded_contact_ids=set(resolved_exclusions),
+            included_contact_ids=set(resolved_inclusions),
         )
     finally:
         await contact_store.close()
@@ -180,9 +206,19 @@ def main() -> None:
         "comma-separated. Short ID PREFIX, resolved against the real Contact store -- fails closed if a prefix "
         "matches zero or multiple Contacts.",
     )
+    parser.add_argument(
+        "--include",
+        action="append",
+        default=[],
+        metavar="PREFIX",
+        help="Backfill-only allowlist: restrict this run to ONLY these Contacts (freezes a reviewed cohort against "
+        "new registrations arriving later). Repeatable/comma-separated, same fail-closed prefix resolution as "
+        "--exclude. --exclude still takes precedence.",
+    )
     args = parser.parse_args()
     # Flatten repeatable + comma-separated values into one list of raw prefixes.
     args.exclude = [p.strip() for raw in args.exclude for p in raw.split(",") if p.strip()]
+    args.include = [p.strip() for raw in args.include for p in raw.split(",") if p.strip()]
 
     if args.write and not args.confirm_production_writes:
         print(

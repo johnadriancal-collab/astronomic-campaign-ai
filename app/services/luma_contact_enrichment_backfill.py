@@ -73,6 +73,24 @@ Resolving a short ID prefix to a full CrmContact ID is the CALLER's
 job (see scripts/run_luma_contact_enrichment_backfill.py's own
 prefix-resolution, which fails closed on zero or multiple matches) --
 this function only ever accepts and compares full IDs.
+
+`included_contact_ids` (backfill-only allowlist, the OPPOSITE precaution
+from exclusion): when non-empty, ONLY these Contacts are eligible to be
+processed at all for THIS run -- every other Contact in the dataset,
+even one that would otherwise be a perfectly good update candidate, is
+skipped exactly like an exclusion (no resolution, no merge call, no
+Contact/provenance/Activity Log change, not counted in any
+would-update/unchanged/ambiguous/website bucket). This exists to FREEZE
+a previously-reviewed cohort against new Luma registrations arriving
+between review and write -- without it, a new registration for someone
+outside the reviewed set could silently expand what a "just run the
+approved exclusions again" backfill actually touches. Leaving this
+unset/empty (the default) means no allowlist restriction -- every
+non-excluded Contact remains eligible, exactly as before this capability
+existed. `excluded_contact_ids` takes precedence: a Contact in BOTH sets
+is treated as excluded, never processed under any circumstance.
+`contacts_outside_allowlist_skipped` counts Contacts skipped for this
+reason specifically (distinct from `contacts_excluded`).
 """
 
 from __future__ import annotations
@@ -149,6 +167,16 @@ class BackfillCounts:
     # BackfillReport.excluded_contact_ids_not_found for transparency on
     # that case instead).
     contacts_excluded: int = 0
+    # Backfill-only allowlist -- see module docstring. Nonzero only when
+    # `included_contact_ids` was actually provided; 0 means "no allowlist,
+    # every non-excluded Contact was eligible" (the default).
+    contacts_allowlist_size: int = 0
+    contacts_outside_allowlist_skipped: int = 0
+    # Contacts that passed BOTH filters (not excluded, and either no
+    # allowlist or present in it) and were therefore actually resolved/
+    # considered for a save this run -- whether or not they ended up
+    # needing one.
+    contacts_eligible: int = 0
 
 
 @dataclass
@@ -193,6 +221,11 @@ class BackfillReport:
     # run's dataset -- nothing to skip, but surfaced so a caller never
     # silently assumes an exclusion "took" when it was actually a no-op.
     excluded_contact_ids_not_found: list[str] = field(default_factory=list)
+    # Backfill-only allowlist -- see module docstring.
+    included_contact_ids_requested: list[str] = field(default_factory=list)
+    # Requested allowlist IDs that had no registrations at all in this
+    # run's dataset -- nothing for them to be eligible for.
+    included_contact_ids_not_found: list[str] = field(default_factory=list)
     dry_run: bool = True
 
 
@@ -238,8 +271,10 @@ async def run_luma_contact_enrichment_backfill(
     dry_run: bool = True,
     example_cap: int = 20,
     excluded_contact_ids: frozenset[str] | set[str] | None = None,
+    included_contact_ids: frozenset[str] | set[str] | None = None,
 ) -> BackfillReport:
     excluded = frozenset(excluded_contact_ids or ())
+    included = frozenset(included_contact_ids or ())
     all_contacts = await crm_contact_store.list()
     all_registrations = await registration_store.list()
     all_events = await event_store.list()
@@ -272,17 +307,30 @@ async def run_luma_contact_enrichment_backfill(
 
     counts.unique_contacts_represented = len(regs_by_contact)
 
+    counts.contacts_allowlist_size = len(included)
+
     report = BackfillReport(counts=counts, dry_run=dry_run)
     report.excluded_contact_ids_not_found = sorted(excluded - set(regs_by_contact.keys()))
+    report.included_contact_ids_requested = sorted(included)
+    report.included_contact_ids_not_found = sorted(included - set(regs_by_contact.keys()))
 
     for crm_contact_id, regs in regs_by_contact.items():
         if crm_contact_id in excluded:
             # Skip ENTIRELY -- no resolution, no merge call, no
             # Contact/provenance/Activity Log change, not counted toward
-            # any other bucket. See module docstring.
+            # any other bucket. See module docstring. Exclusion takes
+            # precedence over the allowlist below.
             counts.contacts_excluded += 1
             report.excluded_contact_ids.append(crm_contact_id)
             continue
+
+        if included and crm_contact_id not in included:
+            # An allowlist was provided and this Contact isn't on it --
+            # skip ENTIRELY, same as an exclusion. See module docstring.
+            counts.contacts_outside_allowlist_skipped += 1
+            continue
+
+        counts.contacts_eligible += 1
 
         contact = contacts_by_id.get(crm_contact_id)
         if contact is None:
