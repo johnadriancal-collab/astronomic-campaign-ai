@@ -52,11 +52,17 @@ from app.models.client_crm import (
     ClientStatus,
     Engagement,
     EngagementCloseout,
+    EngagementParticipant,
+    ParticipantSource,
 )
 from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
 from app.repositories.crm_contact_store import CrmContactStore
 from app.repositories.engagement_closeout_store import EngagementCloseoutStore
+from app.repositories.engagement_participant_store import (
+    EngagementParticipantDuplicateError,
+    EngagementParticipantStore,
+)
 from app.repositories.engagement_store import EngagementStore
 from app.services.activity_log_service import ActivityLogService
 
@@ -130,6 +136,28 @@ class EngagementCloseoutAlreadyExists(Exception):
         super().__init__(f"Engagement {engagement_id} already has a Closeout.")
 
 
+class EngagementParticipantNotFound(Exception):
+    """Raised for a participant_id that doesn't exist, OR that exists but
+    belongs to a different engagement_id than the one in the URL -- same
+    deliberately-indistinguishable-404 rule as EngagementNotFound."""
+
+    def __init__(self, participant_id: str):
+        self.participant_id = participant_id
+        super().__init__(f"EngagementParticipant not found: {participant_id}")
+
+
+class EngagementParticipantDuplicate(Exception):
+    """Raised when a create or link/relink would leave two ACTIVE
+    EngagementParticipant rows for the same (engagement_id,
+    crm_contact_id) -- mapped to a clean 409 at the API layer rather than
+    a raw SQLite integrity error ever reaching a caller."""
+
+    def __init__(self, engagement_id: str, crm_contact_id: str):
+        self.engagement_id = engagement_id
+        self.crm_contact_id = crm_contact_id
+        super().__init__(f"crm_contact_id {crm_contact_id} is already an active participant of Engagement {engagement_id}.")
+
+
 class ClientCrmService:
     def __init__(
         self,
@@ -140,6 +168,7 @@ class ClientCrmService:
         crm_contact_store: CrmContactStore,
         engagement_store: EngagementStore,
         engagement_closeout_store: EngagementCloseoutStore,
+        engagement_participant_store: EngagementParticipantStore,
     ):
         self.client_store = client_store
         self.activity_log = activity_log
@@ -147,6 +176,7 @@ class ClientCrmService:
         self.crm_contact_store = crm_contact_store
         self.engagement_store = engagement_store
         self.engagement_closeout_store = engagement_closeout_store
+        self.engagement_participant_store = engagement_participant_store
 
     async def _require_client(self, client_id: str) -> Client:
         client = await self.client_store.get(client_id)
@@ -165,6 +195,12 @@ class ClientCrmService:
         if engagement is None or engagement.client_id != client_id:
             raise EngagementNotFound(engagement_id)
         return engagement
+
+    async def _require_engagement_participant(self, engagement_id: str, participant_id: str) -> EngagementParticipant:
+        participant = await self.engagement_participant_store.get(participant_id)
+        if participant is None or participant.engagement_id != engagement_id:
+            raise EngagementParticipantNotFound(participant_id)
+        return participant
 
     async def create_client(self, fields: dict[str, Any]) -> Client:
         """`fields` is assumed already validated/shaped by the API layer's
@@ -662,5 +698,198 @@ class ClientCrmService:
             entity_type="engagement_closeout",
             entity_id=after.closeout_id,
             entity_name=None,
+            metadata={"client_id": after.client_id, "engagement_id": after.engagement_id},
+        )
+
+    # =====================================================================
+    # EngagementParticipant -- Client CRM Stage 1G (2026-09-08). The
+    # person-level relationship between a canonical CrmContact and one
+    # Engagement -- see EngagementParticipant's own model docstring for
+    # the full architecture (optional crm_contact_id, snapshot fields,
+    # two-axis RSVP/attendance status, is_walk_in as provenance not
+    # attendance, at-most-one-active-per-Contact-per-Engagement enforced
+    # by a real SQLite partial unique index). `source` is entirely
+    # server-owned here -- Stage 1G creates and updates ONLY MANUAL
+    # participant records; LUMA is a reserved enum value this service
+    # never reads, writes, or exposes as a caller-settable option.
+    # =====================================================================
+
+    @staticmethod
+    def _participant_identity_is_meaningful(first_name: str | None, last_name: str | None, email: str | None) -> bool:
+        """The Stage 1G validation rule for an UNRESOLVED participant
+        (no crm_contact_id): at least one of first_name/last_name/email
+        must be non-blank. Deliberately NOT "first_name specifically" --
+        an email-only sign-in-sheet entry, or a surname-only historical
+        record, are both legitimate incomplete-but-meaningful identities;
+        a resolved participant (crm_contact_id set) never needs this
+        check at all, since its snapshot always comes from a real Contact."""
+        return bool(first_name or last_name or email)
+
+    @staticmethod
+    def _participant_display_name(participant: EngagementParticipant) -> str:
+        """Never falls back to email -- see this stage's own Activity Log
+        privacy rule (no contact information in Activity Log metadata,
+        extended here to entity_name too, out of the same caution)."""
+        name = " ".join(part for part in (participant.first_name, participant.last_name) if part)
+        return name or "Unnamed participant"
+
+    async def list_engagement_participants(self, client_id: str, engagement_id: str) -> list[EngagementParticipant]:
+        await self._require_engagement(client_id, engagement_id)
+        return await self.engagement_participant_store.list_for_engagement(engagement_id)
+
+    async def create_engagement_participant(self, client_id: str, engagement_id: str, fields: dict[str, Any]) -> EngagementParticipant:
+        """If `crm_contact_id` is provided, snapshot fields are populated
+        FROM the canonical CrmContact (any name/email/etc. also present in
+        `fields` is ignored -- the canonical record always wins, exactly
+        like create_client_contact()) and never written back to it. If
+        omitted, this creates an UNRESOLVED participant -- allowed, but
+        only when _participant_identity_is_meaningful() holds; historical
+        guest lists, walk-ins, and unmatched people are legitimate real
+        cases Stage 1G must not force into a fake CrmContact."""
+        await self._require_engagement(client_id, engagement_id)
+
+        crm_contact_id = (fields.get("crm_contact_id") or "").strip() or None
+        now = datetime.now(timezone.utc)
+
+        if crm_contact_id:
+            crm_contact = await self.crm_contact_store.get(crm_contact_id)
+            if crm_contact is None:
+                raise ValueError("crm_contact_id does not refer to an existing Contact.")
+            if crm_contact.archived:
+                raise ValueError("Cannot link an archived Contact.")
+            first_name, last_name, email = crm_contact.first_name, crm_contact.last_name, crm_contact.email
+            title, company = crm_contact.title, crm_contact.company
+        else:
+            first_name = (fields.get("first_name") or "").strip() or None
+            last_name = (fields.get("last_name") or "").strip() or None
+            email = (fields.get("email") or "").strip() or None
+            title = (fields.get("title") or "").strip() or None
+            company = (fields.get("company") or "").strip() or None
+            if not self._participant_identity_is_meaningful(first_name, last_name, email):
+                raise ValueError(
+                    "An unresolved participant needs at least a name or email -- link an existing Contact "
+                    "instead, or provide identifying information."
+                )
+
+        participant = EngagementParticipant(
+            participant_id=str(uuid.uuid4()),
+            engagement_id=engagement_id,
+            client_id=client_id,
+            crm_contact_id=crm_contact_id,
+            first_name=first_name,
+            last_name=last_name,
+            email=email,
+            title=title,
+            company=company,
+            role=fields.get("role") or "guest",
+            rsvp_status=fields.get("rsvp_status"),
+            attendance_status=fields.get("attendance_status"),
+            is_walk_in=bool(fields.get("is_walk_in", False)),
+            source=ParticipantSource.MANUAL,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            await self.engagement_participant_store.create(participant)
+        except EngagementParticipantDuplicateError as exc:
+            raise EngagementParticipantDuplicate(exc.engagement_id, exc.crm_contact_id) from exc
+
+        display_name = self._participant_display_name(participant)
+        await self.activity_log.record(
+            event_type="engagement_participant.created",
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f'"{display_name}" was added as a Participant.',
+            entity_type="engagement_participant",
+            entity_id=participant.participant_id,
+            entity_name=display_name,
+            metadata={"client_id": client_id, "engagement_id": engagement_id},
+        )
+        return participant
+
+    async def update_engagement_participant(
+        self, client_id: str, engagement_id: str, participant_id: str, patch: dict[str, Any]
+    ) -> EngagementParticipant:
+        """Genuine partial update. Explicitly SUPPORTS linking/relinking
+        `crm_contact_id` (unlike ClientContact's own no-relink rule) --
+        the "unresolved participant later matched to a real Contact"
+        transition this stage's own approved design requires. Linking
+        refreshes the snapshot FROM the newly-linked Contact (superseding
+        any manually-entered values) and goes through the SAME duplicate
+        protection as create() -- the store's own partial unique index
+        rejects it if that crm_contact_id is already active on this
+        Engagement, surfaced here as a clean EngagementParticipantDuplicate.
+
+        Allowed identity transitions only: unresolved -> unresolved (edit
+        the free-text snapshot fields), unresolved -> resolved (link),
+        and resolved -> resolved (relink to a different Contact -- a
+        correction operation for V1; no dedicated frontend workflow
+        exists for it yet). resolved -> unresolved (clearing
+        crm_contact_id back to null on an already-linked participant) is
+        explicitly REJECTED with a ValueError -- once linked to a
+        canonical Contact, a participant cannot be turned back into an
+        unresolved one via this PATCH."""
+        await self._require_engagement(client_id, engagement_id)
+        participant = await self._require_engagement_participant(engagement_id, participant_id)
+
+        merged_fields = dict(patch)
+        if "crm_contact_id" in merged_fields:
+            new_crm_contact_id = (merged_fields.get("crm_contact_id") or "").strip() or None
+            if new_crm_contact_id is None and participant.crm_contact_id is not None:
+                raise ValueError(
+                    "This participant is already linked to a Contact -- it cannot be unlinked back to an "
+                    "unresolved participant. Link it to a different Contact instead if this was a mistake."
+                )
+            if new_crm_contact_id and new_crm_contact_id != participant.crm_contact_id:
+                crm_contact = await self.crm_contact_store.get(new_crm_contact_id)
+                if crm_contact is None:
+                    raise ValueError("crm_contact_id does not refer to an existing Contact.")
+                if crm_contact.archived:
+                    raise ValueError("Cannot link an archived Contact.")
+                merged_fields["crm_contact_id"] = new_crm_contact_id
+                merged_fields["first_name"] = crm_contact.first_name
+                merged_fields["last_name"] = crm_contact.last_name
+                merged_fields["email"] = crm_contact.email
+                merged_fields["title"] = crm_contact.title
+                merged_fields["company"] = crm_contact.company
+            else:
+                merged_fields["crm_contact_id"] = new_crm_contact_id
+
+        updated = participant.model_copy(update={**merged_fields, "updated_at": datetime.now(timezone.utc)})
+
+        if updated.crm_contact_id is None and not self._participant_identity_is_meaningful(
+            updated.first_name, updated.last_name, updated.email
+        ):
+            raise ValueError(
+                "An unresolved participant needs at least a name or email -- link an existing Contact instead, "
+                "or provide identifying information."
+            )
+
+        try:
+            await self.engagement_participant_store.save(updated)
+        except EngagementParticipantDuplicateError as exc:
+            raise EngagementParticipantDuplicate(exc.engagement_id, exc.crm_contact_id) from exc
+
+        await self._record_engagement_participant_update_activity(participant, updated)
+        return updated
+
+    async def _record_engagement_participant_update_activity(
+        self, before: EngagementParticipant, after: EngagementParticipant
+    ) -> None:
+        if before.archived == after.archived:
+            event_type, verb = "engagement_participant.updated", "updated"
+        elif after.archived:
+            event_type, verb = "engagement_participant.archived", "archived"
+        else:
+            event_type, verb = "engagement_participant.restored", "restored"
+        display_name = self._participant_display_name(after)
+        await self.activity_log.record(
+            event_type=event_type,
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f'"{display_name}" was {verb}.',
+            entity_type="engagement_participant",
+            entity_id=after.participant_id,
+            entity_name=display_name,
             metadata={"client_id": after.client_id, "engagement_id": after.engagement_id},
         )

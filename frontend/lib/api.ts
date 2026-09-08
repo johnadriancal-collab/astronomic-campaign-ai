@@ -2008,3 +2008,97 @@ export function updateEngagementCloseout(
     body: JSON.stringify(patch),
   });
 }
+
+// --- EngagementParticipant (Client CRM Stage 1G, 2026-09-08) ----------------
+// CrmContact <-> Engagement, when the canonical Contact is known. An
+// unresolved participant (crm_contact_id === null) is a legitimate case --
+// historical lists, walk-ins, incomplete records -- never a second people
+// database. RSVP and attendance are independent nullable axes; is_walk_in is
+// provenance, not a status. `source` is always "manual" in Stage 1G -- no
+// Luma ingestion/linking exists yet. At most one ACTIVE participant per
+// (engagement_id, crm_contact_id) -- enforced by a real backend unique
+// index; archiving does not free the slot, only restoring does.
+
+export type ParticipantRole = "guest" | "client" | "host" | "speaker_panelist" | "astronomic_team" | "other";
+export type ParticipantRsvpStatus = "invited" | "confirmed" | "declined";
+export type ParticipantAttendanceStatus = "attended" | "no_show" | "cancelled";
+export type ParticipantSource = "manual" | "luma";
+
+export interface EngagementParticipant {
+  participant_id: string;
+  engagement_id: string;
+  client_id: string;
+  crm_contact_id: string | null;
+
+  first_name: string | null;
+  last_name: string | null;
+  email: string | null;
+  title: string | null;
+  company: string | null;
+
+  role: ParticipantRole;
+  rsvp_status: ParticipantRsvpStatus | null;
+  attendance_status: ParticipantAttendanceStatus | null;
+  is_walk_in: boolean;
+  source: ParticipantSource;
+
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+}
+
+/** `crm_contact_id` omitted (or null) creates an unresolved participant --
+ * at least one of first_name/last_name/email must be non-blank in that
+ * case (enforced server-side). When crm_contact_id IS provided, any
+ * identity fields sent here are ignored -- the canonical Contact's data
+ * always wins. No `source` field -- Stage 1G always creates MANUAL. */
+export interface EngagementParticipantCreateInput {
+  crm_contact_id?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  email?: string | null;
+  title?: string | null;
+  company?: string | null;
+  role?: ParticipantRole;
+  rsvp_status?: ParticipantRsvpStatus | null;
+  attendance_status?: ParticipantAttendanceStatus | null;
+  is_walk_in?: boolean;
+}
+
+/** `crm_contact_id` IS settable here, unlike ClientContact's update input --
+ * this is the unresolved-to-resolved linking transition; the backend
+ * refreshes the identity snapshot from the Contact and re-runs the same
+ * duplicate-protection check as create. */
+export type EngagementParticipantUpdateInput = Partial<EngagementParticipantCreateInput> & { archived?: boolean };
+
+function participantsUrl(clientId: string, engagementId: string): string {
+  return `/client-crm/clients/${clientId}/engagements/${engagementId}/participants`;
+}
+
+export function listEngagementParticipants(clientId: string, engagementId: string): Promise<EngagementParticipant[]> {
+  return request<EngagementParticipant[]>(participantsUrl(clientId, engagementId));
+}
+
+/** 409 (surfaced as an ApiError) means crm_contact_id is already an active
+ * participant of this Engagement. 400 means an unresolved participant was
+ * submitted with no non-blank first_name/last_name/email. */
+export function createEngagementParticipant(
+  clientId: string,
+  engagementId: string,
+  input: EngagementParticipantCreateInput
+): Promise<EngagementParticipant> {
+  return post<EngagementParticipant>(participantsUrl(clientId, engagementId), input);
+}
+
+export function updateEngagementParticipant(
+  clientId: string,
+  engagementId: string,
+  participantId: string,
+  patch: EngagementParticipantUpdateInput
+): Promise<EngagementParticipant> {
+  return request<EngagementParticipant>(`${participantsUrl(clientId, engagementId)}/${participantId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}

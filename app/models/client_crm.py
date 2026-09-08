@@ -425,3 +425,125 @@ class EngagementCloseout(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived: bool = False
+
+
+class ParticipantRole(str, Enum):
+    """Client CRM Stage 1G. Client and Host are deliberately SEPARATE
+    values (revisited after this stage's own investigation proposed
+    combining them) -- Astronomic's own review preferred keeping them
+    distinct. Moderator is NOT a separate value yet -- folds into
+    SPEAKER_PANELIST until a concrete need for the distinction exists."""
+
+    GUEST = "guest"
+    CLIENT = "client"
+    HOST = "host"
+    SPEAKER_PANELIST = "speaker_panelist"
+    ASTRONOMIC_TEAM = "astronomic_team"
+    OTHER = "other"
+
+
+class ParticipantRsvpStatus(str, Enum):
+    """Independent from ParticipantAttendanceStatus -- see
+    EngagementParticipant's own docstring for why these are two separate
+    nullable fields, not one overloaded status."""
+
+    INVITED = "invited"
+    CONFIRMED = "confirmed"
+    DECLINED = "declined"
+
+
+class ParticipantAttendanceStatus(str, Enum):
+    """CANCELLED here mirrors EngagementCloseout.cancelled_count's own
+    concept: told us in advance they wouldn't attend. A pure walk-in is
+    NOT represented here -- see `is_walk_in` on EngagementParticipant."""
+
+    ATTENDED = "attended"
+    NO_SHOW = "no_show"
+    CANCELLED = "cancelled"
+
+
+class ParticipantSource(str, Enum):
+    """WHERE this participant record came from. Stage 1G creates ONLY
+    MANUAL records -- `source` is server-owned (never accepted from a
+    request body) and always set to MANUAL by ClientCrmService; LUMA is
+    a reserved value for a future, dedicated Luma-linkage stage, not
+    something Stage 1G reads, writes, or exposes as a create/update
+    option. Keeping it in the enum now (rather than adding it later) is
+    harmless and avoids a values migration once that stage exists."""
+
+    MANUAL = "manual"
+    LUMA = "luma"
+
+
+class EngagementParticipant(BaseModel):
+    """Client CRM Stage 1G -- the person-level relationship between a
+    canonical CrmContact (AstroHub's one people database) and a specific
+    Engagement, e.g. "Ethan Wong attended the SF Investor Dinner as a
+    Guest." Deliberately its own entity (not a field on Engagement, not a
+    new people table) -- see this stage's own investigation report.
+
+    `crm_contact_id` is OPTIONAL, unlike ClientContact's own effectively-
+    mandatory linking rule -- Luma's own `LumaRegistration.match_status ==
+    NEEDS_REVIEW` already proves "a real person with no confirmed
+    canonical match yet" is a normal, expected, non-error state elsewhere
+    in this codebase; historical guest lists, walk-ins, and unmatched
+    people are legitimate cases this stage must not force into a fake
+    CrmContact merely to satisfy a foreign key. An unresolved participant
+    (crm_contact_id is None) must still carry enough identity information
+    to be meaningful -- see ClientCrmService's own Stage 1G docstring for
+    the exact validation rule.
+
+    first_name/last_name/email/title/company are SNAPSHOTS -- populated
+    FROM the canonical CrmContact at link time (create, or later linking
+    an unresolved participant to one), exactly the same "snapshot, not
+    live reference, never mutates the canonical record" principle
+    ClientContact already established. When crm_contact_id is None, these
+    fields are the ONLY record of who this person is, not a snapshot of
+    anything else.
+
+    `rsvp_status` and `attendance_status` are deliberately TWO separate
+    nullable fields, not one overloaded status enum -- they answer
+    different questions ("did they say they were coming" vs "did they
+    actually show up") and conflating them would make ordinary states
+    (e.g. confirmed-but-later-cancelled, or invited-with-no-attendance-
+    outcome-yet) impossible to represent cleanly.
+
+    `is_walk_in` is provenance/context, not attendance -- a walk-in can
+    (usually does) also have attendance_status=ATTENDED; collapsing this
+    into one status enum would make that ordinary case a contradiction.
+
+    At most one ACTIVE (non-archived) EngagementParticipant may exist per
+    (engagement_id, crm_contact_id) -- enforced by a real SQLite partial
+    unique index (see sqlite_engagement_participant_store.py), not just a
+    service-layer check, so this is safe even under concurrent requests.
+    Re-adding someone after archiving their old relationship is done by
+    restoring the existing (archived) row, never by creating a new one --
+    same "restore, don't recreate" idiom as every other Client CRM entity.
+
+    Stage 1G never automatically updates EngagementCloseout's own
+    manually-entered turnout counts based on participant records --
+    participant-derived counts and the Closeout snapshot remain two
+    separate facts (see this stage's own investigation report)."""
+
+    participant_id: str
+    engagement_id: str
+    client_id: str  # denormalized, matching Engagement/EngagementCloseout's own convention
+
+    crm_contact_id: str | None = None
+
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    title: str | None = None
+    company: str | None = None
+
+    role: ParticipantRole = ParticipantRole.GUEST
+    rsvp_status: ParticipantRsvpStatus | None = None
+    attendance_status: ParticipantAttendanceStatus | None = None
+    is_walk_in: bool = False
+
+    source: ParticipantSource = ParticipantSource.MANUAL
+
+    created_at: datetime
+    updated_at: datetime
+    archived: bool = False

@@ -10,16 +10,20 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EngagementFormModal } from "@/components/engagement-form-modal";
 import { EngagementCloseoutFormModal } from "@/components/engagement-closeout-form-modal";
+import { EngagementParticipantFormModal } from "@/components/engagement-participant-form-modal";
 import {
   ApiError,
   getClient,
   getClientEngagement,
   getEngagementCloseout,
+  listEngagementParticipants,
   updateClientEngagement,
   updateEngagementCloseout,
+  updateEngagementParticipant,
   type Client,
   type Engagement,
   type EngagementCloseout,
+  type EngagementParticipant,
 } from "@/lib/api";
 import {
   dinnerTypeLabel,
@@ -30,17 +34,24 @@ import {
   engagementStatusLabel,
   engagementTypeLabel,
   formatEngagementDate,
+  participantAttendanceStatusLabel,
+  participantDisplayName,
+  participantRoleLabel,
+  participantRsvpStatusLabel,
 } from "@/lib/client-crm";
 import { cn } from "@/lib/utils";
 
 // Stage 1E: Overview + Commercial; Stage 1F adds a real Closeout section
-// now that EngagementCloseout actually exists (see this stage's own STOP
-// report). Still deliberately NOT a tabbed page with other empty/fake
-// sections (per-person guest list, staged relationship follow-ups,
-// notes/activity) -- only Overview, Commercial, and Closeout have any
-// real, backend-supported data behind them today. Nothing about turnout,
-// guest quality, or outcomes is fabricated anywhere on this page -- a
-// Closeout only ever renders once one has actually been recorded.
+// now that EngagementCloseout actually exists; Stage 1G adds a real
+// Participants section now that EngagementParticipant actually exists
+// (see each stage's own STOP report). Still deliberately NOT a tabbed
+// page with other empty/fake sections (staged relationship follow-ups,
+// notes/activity) -- only Overview, Commercial, Closeout, and
+// Participants have any real, backend-supported data behind them today.
+// Nothing about turnout, guest quality, or outcomes is fabricated
+// anywhere on this page -- a Closeout only ever renders once one has
+// actually been recorded, and Participant-derived counts are never used
+// to auto-fill Closeout's own separate aggregate fields.
 export default function EngagementDetailPage() {
   const params = useParams<{ id: string; engagementId: string }>();
   const clientId = params.id;
@@ -62,6 +73,13 @@ export default function EngagementDetailPage() {
   const [closeoutModalOpen, setCloseoutModalOpen] = useState(false);
   const [archivingCloseout, setArchivingCloseout] = useState(false);
   const [closeoutActionError, setCloseoutActionError] = useState<string | null>(null);
+
+  const [participants, setParticipants] = useState<EngagementParticipant[] | null>(null);
+  const [participantsError, setParticipantsError] = useState<string | null>(null);
+  const [participantModalOpen, setParticipantModalOpen] = useState(false);
+  const [editingParticipant, setEditingParticipant] = useState<EngagementParticipant | null>(null);
+  const [busyParticipantId, setBusyParticipantId] = useState<string | null>(null);
+  const [participantActionError, setParticipantActionError] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -98,9 +116,21 @@ export default function EngagementDetailPage() {
     }
   }
 
+  async function loadParticipants() {
+    try {
+      setParticipants(await listEngagementParticipants(clientId, engagementId));
+      setParticipantsError(null);
+    } catch (err) {
+      setParticipantsError(
+        err instanceof ApiError ? `Couldn't load Participants (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    }
+  }
+
   useEffect(() => {
     load();
     loadCloseout();
+    loadParticipants();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId, engagementId]);
 
@@ -122,6 +152,34 @@ export default function EngagementDetailPage() {
     } finally {
       setArchivingCloseout(false);
     }
+  }
+
+  async function handleArchiveParticipantToggle(participant: EngagementParticipant) {
+    const nextArchived = !participant.archived;
+    if (nextArchived) {
+      const confirmed = window.confirm(`Archive ${participantDisplayName(participant)}? They can be restored anytime.`);
+      if (!confirmed) return;
+    }
+    setBusyParticipantId(participant.participant_id);
+    setParticipantActionError(null);
+    try {
+      const saved = await updateEngagementParticipant(clientId, engagementId, participant.participant_id, { archived: nextArchived });
+      setParticipants((prev) => (prev ? prev.map((p) => (p.participant_id === saved.participant_id ? saved : p)) : prev));
+    } catch (err) {
+      setParticipantActionError(
+        err instanceof ApiError ? `Couldn't update this Participant (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    } finally {
+      setBusyParticipantId(null);
+    }
+  }
+
+  function handleParticipantSaved(saved: EngagementParticipant) {
+    setParticipants((prev) => {
+      if (!prev) return [saved];
+      const exists = prev.some((p) => p.participant_id === saved.participant_id);
+      return exists ? prev.map((p) => (p.participant_id === saved.participant_id ? saved : p)) : [...prev, saved];
+    });
   }
 
   async function handleArchiveToggle() {
@@ -388,6 +446,113 @@ export default function EngagementDetailPage() {
             )}
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-sm">Participants</CardTitle>
+            <Button
+              size="sm"
+              onClick={() => {
+                setEditingParticipant(null);
+                setParticipantModalOpen(true);
+              }}
+            >
+              Add Participant
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {participantsError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{participantsError}</AlertDescription>
+              </Alert>
+            )}
+            {participantActionError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{participantActionError}</AlertDescription>
+              </Alert>
+            )}
+
+            {participants === null && !participantsError && <p className="text-sm text-muted-foreground">Loading…</p>}
+
+            {participants !== null && participants.length === 0 && (
+              <p className="text-sm text-muted-foreground">No Participants recorded yet.</p>
+            )}
+
+            {participants !== null && participants.length > 0 && (
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="bg-secondary/40 text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-3 py-2 text-left font-medium">Name</th>
+                      <th className="px-3 py-2 text-left font-medium">Company</th>
+                      <th className="px-3 py-2 text-left font-medium">Role</th>
+                      <th className="px-3 py-2 text-left font-medium">RSVP</th>
+                      <th className="px-3 py-2 text-left font-medium">Attendance</th>
+                      <th className="px-3 py-2 text-left font-medium">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-border/60">
+                    {participants.map((participant) => (
+                      <tr key={participant.participant_id} className="hover:bg-secondary/30">
+                        <td className="px-3 py-2.5 font-medium">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {participant.crm_contact_id ? (
+                              <Link href={`/crm/${participant.crm_contact_id}`} className="hover:underline">
+                                {participantDisplayName(participant)}
+                              </Link>
+                            ) : (
+                              <span>{participantDisplayName(participant)}</span>
+                            )}
+                            {participant.is_walk_in && (
+                              <Badge variant="secondary" className="bg-amber-100 text-amber-800">
+                                Walk-in
+                              </Badge>
+                            )}
+                            {participant.archived && (
+                              <Badge variant="secondary" className="bg-secondary text-muted-foreground">
+                                Archived
+                              </Badge>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-3 py-2.5 text-muted-foreground">{participant.company || "—"}</td>
+                        <td className="px-3 py-2.5 text-muted-foreground">{participantRoleLabel(participant.role)}</td>
+                        <td className="px-3 py-2.5 text-muted-foreground">{participantRsvpStatusLabel(participant.rsvp_status)}</td>
+                        <td className="px-3 py-2.5 text-muted-foreground">
+                          {participantAttendanceStatusLabel(participant.attendance_status)}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={busyParticipantId === participant.participant_id}
+                              onClick={() => {
+                                setEditingParticipant(participant);
+                                setParticipantModalOpen(true);
+                              }}
+                            >
+                              Edit
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={busyParticipantId === participant.participant_id}
+                              className={participant.archived ? undefined : "text-muted-foreground hover:text-destructive"}
+                              onClick={() => handleArchiveParticipantToggle(participant)}
+                            >
+                              {participant.archived ? "Restore" : "Archive"}
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </CardContent>
+        </Card>
       </div>
 
       <EngagementFormModal
@@ -404,6 +569,14 @@ export default function EngagementDetailPage() {
         engagement={engagement}
         existingCloseout={closeout ?? null}
         onSaved={setCloseout}
+      />
+      <EngagementParticipantFormModal
+        open={participantModalOpen}
+        onOpenChange={setParticipantModalOpen}
+        client={client}
+        engagement={engagement}
+        existingParticipant={editingParticipant}
+        onSaved={handleParticipantSaved}
       />
     </div>
   );

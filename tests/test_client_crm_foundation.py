@@ -35,19 +35,30 @@ from app.models.client_crm import (
     Engagement,
     EngagementCloseout,
     EngagementContractStatus,
+    EngagementParticipant,
     EngagementPaymentStatus,
     EngagementStatus,
     EngagementType,
+    ParticipantAttendanceStatus,
+    ParticipantRole,
+    ParticipantRsvpStatus,
+    ParticipantSource,
 )
 from app.repositories.client_contact_store import ClientContactNotFoundError, MemoryClientContactStore
 from app.repositories.client_note_store import ClientNoteNotFoundError, MemoryClientNoteStore
 from app.repositories.client_store import ClientNotFoundError, MemoryClientStore
 from app.repositories.engagement_closeout_store import EngagementCloseoutNotFoundError, MemoryEngagementCloseoutStore
+from app.repositories.engagement_participant_store import (
+    EngagementParticipantDuplicateError,
+    EngagementParticipantNotFoundError,
+    MemoryEngagementParticipantStore,
+)
 from app.repositories.engagement_store import EngagementNotFoundError, MemoryEngagementStore
 from app.repositories.sqlite_client_contact_store import SQLiteClientContactStore
 from app.repositories.sqlite_client_note_store import SQLiteClientNoteStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.repositories.sqlite_engagement_closeout_store import SQLiteEngagementCloseoutStore
+from app.repositories.sqlite_engagement_participant_store import SQLiteEngagementParticipantStore
 from app.repositories.sqlite_engagement_store import SQLiteEngagementStore
 
 pytestmark = pytest.mark.asyncio
@@ -82,6 +93,24 @@ def _engagement(engagement_id="e1", client_id="c1", created_at=NOW, updated_at=N
 def _closeout(closeout_id="co1", engagement_id="e1", client_id="c1", created_at=NOW, updated_at=NOW, **overrides) -> EngagementCloseout:
     return EngagementCloseout(
         closeout_id=closeout_id,
+        engagement_id=engagement_id,
+        client_id=client_id,
+        created_at=created_at,
+        updated_at=updated_at,
+        **overrides,
+    )
+
+
+def _participant(
+    participant_id="p1", engagement_id="e1", client_id="c1", created_at=NOW, updated_at=NOW, **overrides
+) -> EngagementParticipant:
+    # The model itself has no identity-completeness constraint (that's a
+    # service-layer business rule, not a schema constraint -- same
+    # convention as Client.name's own blank-check) -- first_name="Jane"
+    # here is purely a readable default for tests, not a requirement.
+    overrides.setdefault("first_name", "Jane")
+    return EngagementParticipant(
+        participant_id=participant_id,
         engagement_id=engagement_id,
         client_id=client_id,
         created_at=created_at,
@@ -129,6 +158,14 @@ async def sqlite_engagement_store(tmp_path):
 @pytest_asyncio.fixture
 async def sqlite_engagement_closeout_store(tmp_path):
     s = SQLiteEngagementCloseoutStore(str(tmp_path / "engagement_closeouts.db"))
+    await s.connect()
+    yield s
+    await s.close()
+
+
+@pytest_asyncio.fixture
+async def sqlite_engagement_participant_store(tmp_path):
+    s = SQLiteEngagementParticipantStore(str(tmp_path / "engagement_participants.db"))
     await s.connect()
     yield s
     await s.close()
@@ -317,6 +354,88 @@ def test_engagement_closeout_has_no_status_enum_field():
     completed_at (nullable timestamp) already answers "recorded or not"
     without a redundant enum."""
     assert "status" not in EngagementCloseout.model_fields
+
+
+# =====================================================================
+# EngagementParticipant -- Client CRM Stage 1G (2026-09-08)
+# =====================================================================
+
+
+def test_engagement_participant_json_round_trip_preserves_every_field():
+    participant = _participant(
+        crm_contact_id="ethan-1",
+        first_name="Ethan",
+        last_name="Wong",
+        email="ethan@hiveasmbld.example.com",
+        title="Co-CEO",
+        company="Hive ASMBLD",
+        role=ParticipantRole.HOST,
+        rsvp_status=ParticipantRsvpStatus.CONFIRMED,
+        attendance_status=ParticipantAttendanceStatus.ATTENDED,
+        is_walk_in=True,
+    )
+    restored = EngagementParticipant.model_validate_json(participant.model_dump_json())
+    assert restored == participant
+
+
+def test_engagement_participant_defaults():
+    participant = _participant()
+    assert participant.crm_contact_id is None
+    assert participant.role == ParticipantRole.GUEST
+    assert participant.rsvp_status is None
+    assert participant.attendance_status is None
+    assert participant.is_walk_in is False
+    assert participant.source == ParticipantSource.MANUAL
+    assert participant.archived is False
+
+
+def test_engagement_participant_walk_in_and_attended_is_a_valid_combination():
+    """The exact case this stage's own model must not treat as a
+    contradiction -- is_walk_in is provenance, not attendance."""
+    participant = _participant(is_walk_in=True, attendance_status=ParticipantAttendanceStatus.ATTENDED)
+    assert participant.is_walk_in is True
+    assert participant.attendance_status == ParticipantAttendanceStatus.ATTENDED
+
+
+def test_engagement_participant_rsvp_and_attendance_are_independent_fields():
+    participant = _participant(rsvp_status=ParticipantRsvpStatus.CONFIRMED, attendance_status=ParticipantAttendanceStatus.CANCELLED)
+    assert participant.rsvp_status == ParticipantRsvpStatus.CONFIRMED
+    assert participant.attendance_status == ParticipantAttendanceStatus.CANCELLED
+
+
+@pytest.mark.parametrize(
+    "role", [ParticipantRole.GUEST, ParticipantRole.CLIENT, ParticipantRole.HOST,
+             ParticipantRole.SPEAKER_PANELIST, ParticipantRole.ASTRONOMIC_TEAM, ParticipantRole.OTHER]
+)
+def test_engagement_participant_every_role_value_round_trips(role):
+    participant = _participant(role=role)
+    assert EngagementParticipant.model_validate_json(participant.model_dump_json()).role == role
+
+
+def test_participant_role_client_and_host_are_distinct_values():
+    """Stage 1G's own approved refinement: Client and Host are NOT
+    combined into one value."""
+    assert ParticipantRole.CLIENT != ParticipantRole.HOST
+    assert {ParticipantRole.CLIENT.value, ParticipantRole.HOST.value} == {"client", "host"}
+
+
+def test_participant_role_has_no_dedicated_moderator_value():
+    """Moderator stays folded into SPEAKER_PANELIST for V1 -- no concrete
+    need for the distinction was found."""
+    assert {member.value for member in ParticipantRole} == {
+        "guest", "client", "host", "speaker_panelist", "astronomic_team", "other",
+    }
+
+
+def test_participant_source_enum_has_manual_and_luma_but_model_defaults_to_manual():
+    assert {member.value for member in ParticipantSource} == {"manual", "luma"}
+    assert _participant().source == ParticipantSource.MANUAL
+
+
+def test_engagement_participant_has_no_luma_guest_id_field():
+    """Stage 1G's own approved refinement: no reserved Luma identifier is
+    added until the Luma relationship is explicitly designed."""
+    assert "luma_guest_id" not in EngagementParticipant.model_fields
 
 
 def test_client_note_json_round_trip_preserves_every_field():
@@ -687,6 +806,118 @@ async def test_sqlite_engagement_closeout_preserves_null_vs_zero_across_a_real_r
     fresh = await store.get("co1")
     assert fresh.no_show_count == 0
     assert fresh.cancelled_count is None
+
+
+# =====================================================================
+# EngagementParticipant store -- Memory + SQLite parity
+# =====================================================================
+
+
+async def test_memory_engagement_participant_create_and_list_for_engagement():
+    store = MemoryEngagementParticipantStore()
+    await store.create(_participant("p1", "e1", "c1"))
+    await store.create(_participant("p2", "e1", "c1", first_name="Jane", crm_contact_id=None))
+    await store.create(_participant("p3", "e2", "c1"))
+
+    for_e1 = await store.list_for_engagement("e1")
+    assert [p.participant_id for p in for_e1] == ["p1", "p2"]
+    assert await store.list_for_engagement("e-missing") == []
+
+
+async def test_sqlite_engagement_participant_create_and_list_for_engagement(sqlite_engagement_participant_store):
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1"))
+    await store.create(_participant("p2", "e1", "c1", first_name="Jane"))
+    await store.create(_participant("p3", "e2", "c1"))
+
+    for_e1 = await store.list_for_engagement("e1")
+    assert [p.participant_id for p in for_e1] == ["p1", "p2"]
+    assert await store.list_for_engagement("e-missing") == []
+
+
+async def test_memory_engagement_participant_save_and_archive():
+    store = MemoryEngagementParticipantStore()
+    await store.create(_participant())
+    updated = (await store.get("p1")).model_copy(update={"archived": True, "attendance_status": ParticipantAttendanceStatus.ATTENDED})
+    await store.save(updated)
+    fresh = await store.get("p1")
+    assert fresh.archived is True
+    assert fresh.attendance_status == ParticipantAttendanceStatus.ATTENDED
+    with pytest.raises(EngagementParticipantNotFoundError):
+        await store.save(_participant("p-missing"))
+
+
+async def test_sqlite_engagement_participant_save_and_archive(sqlite_engagement_participant_store):
+    store = sqlite_engagement_participant_store
+    await store.create(_participant())
+    updated = (await store.get("p1")).model_copy(update={"archived": True, "attendance_status": ParticipantAttendanceStatus.ATTENDED})
+    await store.save(updated)
+    fresh = await store.get("p1")
+    assert fresh.archived is True
+    assert fresh.attendance_status == ParticipantAttendanceStatus.ATTENDED
+    with pytest.raises(EngagementParticipantNotFoundError):
+        await store.save(_participant("p-missing"))
+
+
+# --- Duplicate prevention: the real SQLite partial unique index --------
+
+
+async def test_memory_store_rejects_duplicate_active_crm_contact_on_same_engagement():
+    store = MemoryEngagementParticipantStore()
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+    with pytest.raises(EngagementParticipantDuplicateError):
+        await store.create(_participant("p2", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+
+
+async def test_sqlite_store_rejects_duplicate_active_crm_contact_on_same_engagement(sqlite_engagement_participant_store):
+    """The real SQLite partial unique index, not just an application-level
+    check -- confirms this stage's own empirical investigation holds
+    through the actual store implementation, not only a standalone script."""
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+    with pytest.raises(EngagementParticipantDuplicateError):
+        await store.create(_participant("p2", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+
+
+async def test_sqlite_store_allows_multiple_unresolved_participants_on_the_same_engagement(sqlite_engagement_participant_store):
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1", first_name="Jane", crm_contact_id=None))
+    await store.create(_participant("p2", "e1", "c1", first_name="Jane", crm_contact_id=None))
+    for_e1 = await store.list_for_engagement("e1")
+    assert len(for_e1) == 2
+
+
+async def test_sqlite_store_allows_same_crm_contact_on_a_different_engagement(sqlite_engagement_participant_store):
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+    await store.create(_participant("p2", "e2", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+    assert (await store.get("p2")).crm_contact_id == "ethan-1"
+
+
+async def test_sqlite_store_rejects_an_update_that_would_create_a_duplicate(sqlite_engagement_participant_store):
+    """The exact "unresolved participant later linked to an already-active
+    Contact" case -- caught on save(), not just create()."""
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+    await store.create(_participant("p2", "e1", "c1", first_name="Ethan", crm_contact_id=None))
+
+    unresolved = await store.get("p2")
+    relinked = unresolved.model_copy(update={"crm_contact_id": "ethan-1"})
+    with pytest.raises(EngagementParticipantDuplicateError):
+        await store.save(relinked)
+
+
+async def test_sqlite_store_archiving_a_participant_does_not_free_the_unique_slot(sqlite_engagement_participant_store):
+    """Approved design: restore an archived participant, never create a
+    new one for the same person -- the unique index does not distinguish
+    archived from active rows, so a fresh duplicate is still rejected."""
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
+    archived = (await store.get("p1")).model_copy(update={"archived": True})
+    await store.save(archived)
+
+    with pytest.raises(EngagementParticipantDuplicateError):
+        await store.create(_participant("p2", "e1", "c1", crm_contact_id="ethan-1", first_name="Ethan"))
 
 
 # =====================================================================

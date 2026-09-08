@@ -19,6 +19,7 @@ from app.repositories.client_note_store import MemoryClientNoteStore
 from app.repositories.client_store import ClientStore, MemoryClientStore
 from app.repositories.crm_contact_store import CrmContactStore, MemoryCrmContactStore
 from app.repositories.engagement_closeout_store import EngagementCloseoutStore, MemoryEngagementCloseoutStore
+from app.repositories.engagement_participant_store import EngagementParticipantStore, MemoryEngagementParticipantStore
 from app.repositories.engagement_store import EngagementStore, MemoryEngagementStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.services.activity_log_service import ActivityLogService
@@ -30,6 +31,8 @@ from app.services.client_crm_service import (
     EngagementCloseoutAlreadyExists,
     EngagementCloseoutNotFound,
     EngagementNotFound,
+    EngagementParticipantDuplicate,
+    EngagementParticipantNotFound,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -42,6 +45,7 @@ def _make_service(
     crm_contact_store: CrmContactStore | None = None,
     engagement_store: EngagementStore | None = None,
     engagement_closeout_store: EngagementCloseoutStore | None = None,
+    engagement_participant_store: EngagementParticipantStore | None = None,
 ) -> tuple[ClientCrmService, ActivityLogService]:
     activity_log = ActivityLogService(MemoryActivityEventStore())
     service = ClientCrmService(
@@ -51,6 +55,7 @@ def _make_service(
         crm_contact_store=crm_contact_store or MemoryCrmContactStore(),
         engagement_store=engagement_store or MemoryEngagementStore(),
         engagement_closeout_store=engagement_closeout_store or MemoryEngagementCloseoutStore(),
+        engagement_participant_store=engagement_participant_store or MemoryEngagementParticipantStore(),
     )
     return service, activity_log
 
@@ -136,6 +141,25 @@ def engagement_closeout_service():
         client_store, engagement_store=engagement_store, engagement_closeout_store=engagement_closeout_store
     )
     return service, activity_log, engagement_closeout_store
+
+
+@pytest.fixture
+def participant_service():
+    """Same as engagement_service, but ALSO exposes the
+    EngagementParticipantStore and CrmContactStore directly (needed to
+    seed a canonical CrmContact before linking it, mirroring
+    contact_service's own precedent for ClientContact)."""
+    client_store = MemoryClientStore()
+    engagement_store = MemoryEngagementStore()
+    engagement_participant_store = MemoryEngagementParticipantStore()
+    crm_contact_store = MemoryCrmContactStore()
+    service, activity_log = _make_service(
+        client_store,
+        engagement_store=engagement_store,
+        engagement_participant_store=engagement_participant_store,
+        crm_contact_store=crm_contact_store,
+    )
+    return service, activity_log, engagement_participant_store, crm_contact_store
 
 
 # =====================================================================
@@ -1235,3 +1259,542 @@ async def test_engagement_closeout_never_mutates_engagement_or_client(engagement
     refreshed_client = await service.get_client(client.client_id)
     assert refreshed_client.relationship_classification is None
     assert refreshed_client.next_action is None
+
+
+# =====================================================================
+# EngagementParticipant -- Client CRM Stage 1G (2026-09-08)
+# =====================================================================
+
+
+async def test_create_resolved_participant_snapshots_from_canonical_contact(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"}
+    )
+
+    assert participant.crm_contact_id == "ethan-1"
+    assert participant.first_name == "Ethan"
+    assert participant.last_name == "Wong"
+    assert participant.email == "ethan@hiveasmbld.example.com"
+    assert participant.title == "Co-CEO"
+    assert participant.company == "Hive ASMBLD"
+    assert participant.role == "guest"
+    assert participant.source == "manual"
+    assert participant.archived is False
+
+
+async def test_create_resolved_participant_ignores_manually_sent_identity_fields(participant_service):
+    """The canonical Contact's own data always wins -- any name/email
+    also present in the request is ignored when crm_contact_id is set."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id,
+        engagement.engagement_id,
+        {"crm_contact_id": "ethan-1", "first_name": "Someone Else", "email": "fake@example.com"},
+    )
+
+    assert participant.first_name == "Ethan"
+    assert participant.email == "ethan@hiveasmbld.example.com"
+
+
+async def test_create_resolved_participant_never_mutates_the_canonical_contact(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+
+    await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    contact = await crm_contact_store.get("ethan-1")
+    assert contact.first_name == "Ethan"
+    assert contact.company == "Hive ASMBLD"
+
+
+async def test_create_resolved_participant_rejects_missing_crm_contact(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(ValueError):
+        await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "does-not-exist"})
+
+
+async def test_create_resolved_participant_rejects_archived_contact(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, archived=True)
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(ValueError):
+        await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+
+# --- Unresolved participant creation/validation ---------------------------
+
+
+async def test_create_unresolved_participant_with_full_name(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "last_name": "Doe"}
+    )
+
+    assert participant.crm_contact_id is None
+    assert participant.first_name == "Jane"
+    assert participant.last_name == "Doe"
+
+
+async def test_create_unresolved_participant_with_last_name_only(participant_service):
+    """A surname-only historical record is a legitimate, meaningful
+    identity -- not specifically first_name that's required."""
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"last_name": "Doe"}
+    )
+    assert participant.last_name == "Doe"
+
+
+async def test_create_unresolved_participant_with_email_only(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"email": "guest@example.com"}
+    )
+    assert participant.email == "guest@example.com"
+
+
+async def test_create_unresolved_participant_with_no_identity_at_all_is_rejected(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(ValueError):
+        await service.create_engagement_participant(client.client_id, engagement.engagement_id, {})
+
+
+async def test_create_unresolved_participant_with_only_whitespace_is_rejected(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(ValueError):
+        await service.create_engagement_participant(
+            client.client_id, engagement.engagement_id, {"first_name": "   ", "email": "   "}
+        )
+
+
+async def test_create_unresolved_participant_with_only_company_and_title_is_rejected(participant_service):
+    """Company/title alone -- with no name or email -- is not a
+    meaningful identity."""
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    with pytest.raises(ValueError):
+        await service.create_engagement_participant(
+            client.client_id, engagement.engagement_id, {"company": "Acme Co", "title": "VP"}
+        )
+
+
+# --- RSVP vs attendance independence, walk-in combination -----------------
+
+
+async def test_rsvp_and_attendance_status_are_independent(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id,
+        engagement.engagement_id,
+        {"first_name": "Jane", "rsvp_status": "confirmed", "attendance_status": "cancelled"},
+    )
+    assert participant.rsvp_status == "confirmed"
+    assert participant.attendance_status == "cancelled"
+
+
+async def test_walk_in_and_attended_is_a_valid_combination(participant_service):
+    """The exact case the model must NOT treat as a contradiction --
+    is_walk_in is provenance, not attendance."""
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id,
+        engagement.engagement_id,
+        {"first_name": "Jane", "is_walk_in": True, "attendance_status": "attended"},
+    )
+    assert participant.is_walk_in is True
+    assert participant.attendance_status == "attended"
+
+
+async def test_rsvp_status_and_attendance_status_default_to_null_not_guessed(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"first_name": "Jane"})
+    assert participant.rsvp_status is None
+    assert participant.attendance_status is None
+    assert participant.is_walk_in is False
+
+
+# --- All six role values ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "role", ["guest", "client", "host", "speaker_panelist", "astronomic_team", "other"]
+)
+async def test_create_participant_accepts_every_role_value(participant_service, role):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "role": role}
+    )
+    assert participant.role == role
+
+
+async def test_create_participant_defaults_to_guest_role(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"first_name": "Jane"})
+    assert participant.role == "guest"
+
+
+# --- Duplicate prevention (resolved) ---------------------------------------
+
+
+async def test_create_resolved_participant_duplicate_is_rejected(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    with pytest.raises(EngagementParticipantDuplicate):
+        await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+
+async def test_same_crm_contact_id_allowed_on_a_different_engagement(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement_a = await _make_client_and_engagement(service)
+    engagement_b = await service.create_client_engagement(client.client_id, {"title": "Second Dinner", "engagement_type": "dinner"})
+
+    await service.create_engagement_participant(client.client_id, engagement_a.engagement_id, {"crm_contact_id": "ethan-1"})
+    participant_b = await service.create_engagement_participant(
+        client.client_id, engagement_b.engagement_id, {"crm_contact_id": "ethan-1"}
+    )
+    assert participant_b.crm_contact_id == "ethan-1"
+
+
+# --- Duplicate prevention when unresolved -> resolved ----------------------
+
+
+async def test_linking_an_unresolved_participant_to_an_already_active_contact_is_rejected(participant_service):
+    """The exact case this stage's own approved design calls out: Ethan
+    already exists as a resolved participant; linking a SEPARATE
+    unresolved row to Ethan must be a clean conflict, never two Ethan
+    relationships."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+    unresolved = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Ethan", "last_name": "W."}
+    )
+
+    with pytest.raises(EngagementParticipantDuplicate):
+        await service.update_engagement_participant(
+            client.client_id, engagement.engagement_id, unresolved.participant_id, {"crm_contact_id": "ethan-1"}
+        )
+
+
+async def test_linking_an_unresolved_participant_to_a_new_contact_succeeds_and_refreshes_snapshot(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    unresolved = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Ethan", "email": "guessed@example.com"}
+    )
+
+    linked = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, unresolved.participant_id, {"crm_contact_id": "ethan-1"}
+    )
+
+    assert linked.crm_contact_id == "ethan-1"
+    assert linked.email == "ethan@hiveasmbld.example.com"  # refreshed from canonical, not the guessed one
+    assert linked.company == "Hive ASMBLD"
+
+
+async def test_linking_to_a_missing_or_archived_contact_is_rejected(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="archived-1", archived=True)
+    client, engagement = await _make_client_and_engagement(service)
+    unresolved = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"first_name": "Jane"})
+
+    with pytest.raises(ValueError):
+        await service.update_engagement_participant(
+            client.client_id, engagement.engagement_id, unresolved.participant_id, {"crm_contact_id": "does-not-exist"}
+        )
+    with pytest.raises(ValueError):
+        await service.update_engagement_participant(
+            client.client_id, engagement.engagement_id, unresolved.participant_id, {"crm_contact_id": "archived-1"}
+        )
+
+
+# --- Resolved -> unresolved is explicitly rejected --------------------------
+
+
+async def test_clearing_crm_contact_id_on_a_resolved_participant_is_rejected(participant_service):
+    """The one correction the user asked for after the original STOP
+    report: a resolved participant must never be turned back into an
+    unresolved one by PATCHing crm_contact_id back to null."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    resolved = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    with pytest.raises(ValueError):
+        await service.update_engagement_participant(
+            client.client_id, engagement.engagement_id, resolved.participant_id, {"crm_contact_id": None}
+        )
+
+    # Rejected before any mutation -- the participant is still resolved.
+    participants = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    unchanged = next(p for p in participants if p.participant_id == resolved.participant_id)
+    assert unchanged.crm_contact_id == "ethan-1"
+
+
+async def test_clearing_crm_contact_id_is_rejected_even_alongside_other_field_changes(participant_service):
+    """The rejection must hold even when crm_contact_id=null is bundled
+    with otherwise-legitimate field changes in the same PATCH -- no
+    partial application of the unlink."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    resolved = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    with pytest.raises(ValueError):
+        await service.update_engagement_participant(
+            client.client_id,
+            engagement.engagement_id,
+            resolved.participant_id,
+            {"crm_contact_id": None, "role": "host", "is_walk_in": True},
+        )
+
+    participants = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    unchanged = next(p for p in participants if p.participant_id == resolved.participant_id)
+    assert unchanged.role == "guest"
+    assert unchanged.is_walk_in is False
+
+
+async def test_resolved_participant_can_still_be_relinked_to_a_different_contact(participant_service):
+    """resolved -> resolved (a correction/relink) stays allowed for V1 --
+    only resolved -> unresolved is closed off. The snapshot refreshes
+    from the NEW Contact and the same duplicate check applies."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="ethan-1", first_name="Ethan", email="ethan@hiveasmbld.example.com")
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="priya-1", first_name="Priya", email="priya@hiveasmbld.example.com")
+    client, engagement = await _make_client_and_engagement(service)
+    resolved = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    relinked = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, resolved.participant_id, {"crm_contact_id": "priya-1"}
+    )
+
+    assert relinked.crm_contact_id == "priya-1"
+    assert relinked.first_name == "Priya"
+    assert relinked.email == "priya@hiveasmbld.example.com"
+
+
+async def test_relinking_a_resolved_participant_to_an_already_active_contact_is_rejected(participant_service):
+    """The relink path goes through the SAME duplicate protection as
+    everything else -- relinking Participant A to a Contact already
+    actively linked as Participant B on this Engagement must conflict."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="ethan-1", first_name="Ethan")
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="priya-1", first_name="Priya")
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "priya-1"})
+    resolved = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    with pytest.raises(EngagementParticipantDuplicate):
+        await service.update_engagement_participant(
+            client.client_id, engagement.engagement_id, resolved.participant_id, {"crm_contact_id": "priya-1"}
+        )
+
+
+async def test_patch_with_no_crm_contact_id_key_at_all_leaves_a_resolved_participant_untouched(participant_service):
+    """Omitting crm_contact_id from the patch entirely (the normal case
+    for every non-identity edit) must never be confused with explicitly
+    clearing it -- exclude_unset semantics, not "absent means null"."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    resolved = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    updated = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, resolved.participant_id, {"role": "host"}
+    )
+
+    assert updated.crm_contact_id == "ethan-1"
+    assert updated.role == "host"
+
+
+# --- Unresolved records are never fuzzy-deduped -----------------------------
+
+
+async def test_two_unresolved_participants_with_the_same_name_are_both_allowed(participant_service):
+    """No fuzzy matching -- two "Jane Doe" entries might be the same
+    person or two different people; Stage 1G never guesses."""
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    first = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"first_name": "Jane", "last_name": "Doe"})
+    second = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"first_name": "Jane", "last_name": "Doe"})
+
+    assert first.participant_id != second.participant_id
+
+
+# --- Cross-client / cross-engagement isolation ------------------------------
+
+
+async def test_participant_requested_through_wrong_client_is_not_found(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client_a, engagement_a = await _make_client_and_engagement(service)
+    client_b = await service.create_client({"name": "Other Co"})
+    participant = await service.create_engagement_participant(client_a.client_id, engagement_a.engagement_id, {"crm_contact_id": "ethan-1"})
+
+    with pytest.raises(EngagementNotFound):
+        await service.list_engagement_participants(client_b.client_id, engagement_a.engagement_id)
+    with pytest.raises(EngagementNotFound):
+        await service.update_engagement_participant(client_b.client_id, engagement_a.engagement_id, participant.participant_id, {"role": "host"})
+
+
+async def test_participant_does_not_leak_across_two_engagements_on_the_same_client(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement_a = await _make_client_and_engagement(service)
+    engagement_b = await service.create_client_engagement(client.client_id, {"title": "Second Dinner", "engagement_type": "dinner"})
+    participant = await service.create_engagement_participant(client.client_id, engagement_a.engagement_id, {"first_name": "Jane"})
+
+    with pytest.raises(EngagementParticipantNotFound):
+        await service.update_engagement_participant(client.client_id, engagement_b.engagement_id, participant.participant_id, {"role": "host"})
+
+    participants_a = await service.list_engagement_participants(client.client_id, engagement_a.engagement_id)
+    participants_b = await service.list_engagement_participants(client.client_id, engagement_b.engagement_id)
+    assert len(participants_a) == 1
+    assert len(participants_b) == 0
+
+
+# --- Archive / restore -------------------------------------------------
+
+
+async def test_archive_and_restore_participant_via_patch(participant_service):
+    service, activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"first_name": "Jane"})
+
+    archived = await service.update_engagement_participant(client.client_id, engagement.engagement_id, participant.participant_id, {"archived": True})
+    assert archived.archived is True
+    restored = await service.update_engagement_participant(client.client_id, engagement.engagement_id, participant.participant_id, {"archived": False})
+    assert restored.archived is False
+
+    events = [e.event_type for e in (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items]
+    assert "engagement_participant.archived" in events
+    assert "engagement_participant.restored" in events
+
+
+async def test_archiving_a_resolved_participant_still_blocks_a_new_duplicate(participant_service):
+    """Approved design: re-adding someone after archiving means
+    restoring the existing row, never creating a new one."""
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+    await service.update_engagement_participant(client.client_id, engagement.engagement_id, participant.participant_id, {"archived": True})
+
+    with pytest.raises(EngagementParticipantDuplicate):
+        await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1"})
+
+
+async def test_no_hard_delete_of_participant(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"first_name": "Jane"})
+    await service.update_engagement_participant(client.client_id, engagement.engagement_id, participant.participant_id, {"archived": True})
+
+    assert not hasattr(store, "delete")
+    assert await store.get(participant.participant_id) is not None
+
+
+# --- Activity Log privacy ---------------------------------------------------
+
+
+async def test_participant_activity_log_never_includes_email_or_contact_details(participant_service):
+    service, activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "last_name": "Doe", "email": "jane@example.com"}
+    )
+
+    page = await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)
+    created_event = next(e for e in page.items if e.event_type == "engagement_participant.created")
+    assert created_event.metadata == {"client_id": client.client_id, "engagement_id": engagement.engagement_id}
+    assert "jane@example.com" not in created_event.summary
+    assert "jane@example.com" not in (created_event.entity_name or "")
+    assert "jane@example.com" not in str(created_event.metadata)
+
+
+async def test_participant_activity_log_entity_name_never_falls_back_to_email(participant_service):
+    """An email-only unresolved participant must not have their email
+    address end up as entity_name either."""
+    service, activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    await service.create_engagement_participant(client.client_id, engagement.engagement_id, {"email": "jane@example.com"})
+
+    page = await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)
+    created_event = next(e for e in page.items if e.event_type == "engagement_participant.created")
+    assert created_event.entity_name == "Unnamed participant"
+
+
+# --- No Luma behavior ---------------------------------------------------
+
+
+async def test_source_is_always_manual_regardless_of_what_the_caller_sends(participant_service):
+    """`source` is entirely server-owned -- Stage 1G creates ONLY MANUAL
+    records; a caller cannot smuggle in LUMA via the fields dict."""
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "source": "luma"}
+    )
+    assert participant.source == "manual"
+
+
+# --- No automatic Closeout mutation -----------------------------------------
+
+
+async def test_creating_participants_never_mutates_the_engagement_closeout(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    closeout = await service.create_engagement_closeout(
+        client.client_id, engagement.engagement_id, {"confirmed_guest_count": 24, "attended_count": 24}
+    )
+
+    await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "attendance_status": "attended"}
+    )
+
+    refreshed_closeout = await service.get_engagement_closeout(client.client_id, engagement.engagement_id)
+    assert refreshed_closeout.confirmed_guest_count == 24
+    assert refreshed_closeout.attended_count == 24
+    assert refreshed_closeout.updated_at == closeout.updated_at

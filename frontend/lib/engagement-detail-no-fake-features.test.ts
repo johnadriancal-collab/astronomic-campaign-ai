@@ -8,8 +8,10 @@ import { test } from "node:test";
 // features.test.ts. Stage 1F adds a REAL Closeout section (the
 // EngagementCloseout feature actually exists now), so "no fake Closeout"
 // is no longer part of this guard -- see the Closeout-specific tests
-// below instead. Per-person attendance (Stage 1G), Day 3/30/90
-// follow-ups, and Notes/Activity remain unbuilt and stay forbidden.
+// below instead. Stage 1G adds a REAL Participants section (the
+// EngagementParticipant feature actually exists now) -- see the
+// Participants-specific tests below instead. Day 3/30/90 follow-ups and
+// Notes/Activity remain unbuilt and stay forbidden.
 
 const ENGAGEMENT_DETAIL_PAGE = readFileSync(
   new URL("../app/clients/[id]/engagements/[engagementId]/page.tsx", import.meta.url),
@@ -22,8 +24,8 @@ test("no hardcoded/fake tab navigation or sections for unbuilt features exists y
   }
 });
 
-test("no fabricated per-person attendance (Stage 1G, not built yet) or client-satisfaction language", () => {
-  for (const forbidden of [/EngagementParticipant/, /client satisfaction/i, /walk-in guest list/i]) {
+test("no client-satisfaction language or fabricated bulk guest-list import UI", () => {
+  for (const forbidden of [/client satisfaction/i, /import.{0,20}guest/i, /csv/i]) {
     assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, forbidden);
   }
 });
@@ -74,6 +76,7 @@ test("retired Supernova/Galaxy/Aurora program terminology does not appear anywhe
     "../lib/client-crm.ts",
     "../lib/api.ts",
     "../components/engagement-form-modal.tsx",
+    "../components/engagement-participant-form-modal.tsx",
     "../app/clients/[id]/page.tsx",
     "../app/clients/[id]/engagements/[engagementId]/page.tsx",
   ];
@@ -83,4 +86,44 @@ test("retired Supernova/Galaxy/Aurora program terminology does not appear anywhe
       assert.doesNotMatch(source, forbidden, `${relativePath} must not reference retired dinner-program terminology`);
     }
   }
+});
+
+// --- Stage 1G: real Participants section -----------------------------------
+
+test("a real Participants section is present, using the shared EngagementParticipant fields, not a fake placeholder", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Participants/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /No Participants recorded yet/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Add Participant/);
+});
+
+test("Participants table uses the exact columns this stage specified", () => {
+  for (const label of [/>Name</, />Company</, />Role</, />RSVP</, />Attendance</]) {
+    assert.match(ENGAGEMENT_DETAIL_PAGE, label);
+  }
+});
+
+test("a Walk-in indicator is present, distinct from attendance status", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Walk-in/);
+});
+
+test("Participant Archive/Restore is present, distinct from any delete action", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /handleArchiveParticipantToggle/);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /Delete Participant/);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /deleteEngagementParticipant/);
+});
+
+test("a linked participant's name navigates to its canonical Contact", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /\/crm\/\$\{participant\.crm_contact_id\}/);
+});
+
+test("no Luma picker/sync UI exists on the Participant form -- Stage 1G creates only MANUAL records", () => {
+  const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.doesNotMatch(modal, /Luma/);
+  assert.doesNotMatch(modal, /luma_guest_id/);
+});
+
+test("the Participant form strongly favors selecting an existing Contact -- free-text entry is a secondary link, not a button", () => {
+  const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.match(modal, /Add an unresolved participant instead/);
+  assert.match(modal, /CrmContactPicker/);
 });

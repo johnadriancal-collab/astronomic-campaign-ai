@@ -19,12 +19,16 @@ import {
   emptyClientFormState,
   emptyEngagementCloseoutFormState,
   emptyEngagementFormState,
+  emptyEngagementParticipantFormState,
   engagementCloseoutAttendanceRate,
   engagementCloseoutCreatePayload,
   engagementCloseoutFormStateFromCloseout,
   engagementCloseoutUpdatePatch,
   engagementCreatePayload,
   engagementFormStateFromEngagement,
+  engagementParticipantCreatePayload,
+  engagementParticipantFormStateFromParticipant,
+  engagementParticipantUpdatePatch,
   engagementStatusLabel,
   engagementTypeLabel,
   engagementUpdatePatch,
@@ -33,8 +37,14 @@ import {
   isClientFormValid,
   isDinnerShapedEngagementType,
   isEngagementFormValid,
+  participantAttendanceStatusLabel,
+  participantDisplayName,
+  participantIdentityIsMeaningful,
+  participantRoleLabel,
+  participantRsvpStatusLabel,
+  PARTICIPANT_ROLE_OPTIONS,
 } from "./client-crm.ts";
-import type { Client, ClientContact, Engagement, EngagementCloseout } from "./api.ts";
+import type { Client, ClientContact, Engagement, EngagementCloseout, EngagementParticipant } from "./api.ts";
 
 function makeClient(overrides: Partial<Client> = {}): Client {
   return {
@@ -676,4 +686,200 @@ test("engagementCloseoutUpdatePatch reflects multiple simultaneous changes", () 
   form.attendedCount = "9";
   form.guestQuality = "Strong";
   assert.deepEqual(engagementCloseoutUpdatePatch(form, closeout), { attended_count: 9, guest_quality: "Strong" });
+});
+
+// --- EngagementParticipant (Stage 1G) ---------------------------------------
+
+function makeEngagementParticipant(overrides: Partial<EngagementParticipant> = {}): EngagementParticipant {
+  return {
+    participant_id: "p1",
+    engagement_id: "e1",
+    client_id: "c1",
+    crm_contact_id: null,
+    first_name: "Jane",
+    last_name: "Doe",
+    email: "jane@example.com",
+    title: null,
+    company: null,
+    role: "guest",
+    rsvp_status: null,
+    attendance_status: null,
+    is_walk_in: false,
+    source: "manual",
+    created_at: "2026-09-08T00:00:00Z",
+    updated_at: "2026-09-08T00:00:00Z",
+    archived: false,
+    ...overrides,
+  };
+}
+
+// --- labels/options --------------------------------------------------------
+
+test("PARTICIPANT_ROLE_OPTIONS has exactly the six approved values -- Client and Host stay distinct, no Moderator", () => {
+  assert.deepEqual(
+    PARTICIPANT_ROLE_OPTIONS.map((o) => o.value),
+    ["guest", "client", "host", "speaker_panelist", "astronomic_team", "other"]
+  );
+});
+
+test("participantRoleLabel falls back to the raw value for an unrecognized role", () => {
+  assert.equal(participantRoleLabel("guest"), "Guest");
+  assert.equal(participantRoleLabel("client"), "Client");
+  assert.equal(participantRoleLabel("host"), "Host");
+});
+
+test("participantRsvpStatusLabel and participantAttendanceStatusLabel render null as an em dash, not a fabricated default", () => {
+  assert.equal(participantRsvpStatusLabel(null), "—");
+  assert.equal(participantAttendanceStatusLabel(null), "—");
+  assert.equal(participantRsvpStatusLabel("confirmed"), "Confirmed");
+  assert.equal(participantAttendanceStatusLabel("attended"), "Attended");
+});
+
+test("participantDisplayName never falls back to email -- only name, else a placeholder", () => {
+  assert.equal(participantDisplayName({ first_name: "Jane", last_name: "Doe" }), "Jane Doe");
+  assert.equal(participantDisplayName({ first_name: "Jane", last_name: null }), "Jane");
+  assert.equal(participantDisplayName({ first_name: null, last_name: null }), "Unnamed participant");
+});
+
+// --- identity validation (client-side mirror of the backend rule) ----------
+
+test("participantIdentityIsMeaningful accepts any single non-blank identity field", () => {
+  assert.equal(participantIdentityIsMeaningful("Jane", "", ""), true);
+  assert.equal(participantIdentityIsMeaningful("", "Doe", ""), true);
+  assert.equal(participantIdentityIsMeaningful("", "", "jane@example.com"), true);
+});
+
+test("participantIdentityIsMeaningful rejects blank/whitespace-only identity fields", () => {
+  assert.equal(participantIdentityIsMeaningful("", "", ""), false);
+  assert.equal(participantIdentityIsMeaningful("   ", "  ", "  "), false);
+});
+
+// --- form state round-trip --------------------------------------------------
+
+test("emptyEngagementParticipantFormState starts unresolved with no crm_contact_id and role defaulted to guest", () => {
+  const form = emptyEngagementParticipantFormState();
+  assert.equal(form.crmContactId, null);
+  assert.equal(form.role, "guest");
+  assert.equal(form.rsvpStatus, "");
+  assert.equal(form.attendanceStatus, "");
+  assert.equal(form.isWalkIn, false);
+});
+
+test("engagementParticipantFormStateFromParticipant round-trips every field", () => {
+  const participant = makeEngagementParticipant({
+    crm_contact_id: "cc1",
+    title: "VP",
+    company: "Acme",
+    role: "host",
+    rsvp_status: "confirmed",
+    attendance_status: "attended",
+    is_walk_in: true,
+  });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  assert.equal(form.crmContactId, "cc1");
+  assert.equal(form.firstName, "Jane");
+  assert.equal(form.lastName, "Doe");
+  assert.equal(form.email, "jane@example.com");
+  assert.equal(form.title, "VP");
+  assert.equal(form.company, "Acme");
+  assert.equal(form.role, "host");
+  assert.equal(form.rsvpStatus, "confirmed");
+  assert.equal(form.attendanceStatus, "attended");
+  assert.equal(form.isWalkIn, true);
+});
+
+// --- create payload ----------------------------------------------------------
+
+test("engagementParticipantCreatePayload sends only crm_contact_id (no stale identity fields) for a resolved participant", () => {
+  const form = { ...emptyEngagementParticipantFormState(), crmContactId: "cc1", firstName: "Stale", role: "guest" as const };
+  const payload = engagementParticipantCreatePayload(form);
+  assert.equal(payload.crm_contact_id, "cc1");
+  assert.ok(!("first_name" in payload));
+  assert.ok(!("last_name" in payload));
+  assert.ok(!("email" in payload));
+});
+
+test("engagementParticipantCreatePayload sends trimmed identity fields for an unresolved participant", () => {
+  const form = { ...emptyEngagementParticipantFormState(), firstName: "  Jane  ", lastName: "", email: "" };
+  const payload = engagementParticipantCreatePayload(form);
+  assert.equal(payload.crm_contact_id, null);
+  assert.equal(payload.first_name, "Jane");
+  assert.equal(payload.last_name, null);
+  assert.equal(payload.email, null);
+});
+
+test("engagementParticipantCreatePayload never includes a source field -- always server-owned", () => {
+  const payload = engagementParticipantCreatePayload(emptyEngagementParticipantFormState());
+  assert.ok(!("source" in payload));
+});
+
+test("engagementParticipantCreatePayload carries role/rsvp/attendance/walk-in through", () => {
+  const form = {
+    ...emptyEngagementParticipantFormState(),
+    firstName: "Jane",
+    role: "speaker_panelist" as const,
+    rsvpStatus: "confirmed" as const,
+    attendanceStatus: "attended" as const,
+    isWalkIn: true,
+  };
+  const payload = engagementParticipantCreatePayload(form);
+  assert.equal(payload.role, "speaker_panelist");
+  assert.equal(payload.rsvp_status, "confirmed");
+  assert.equal(payload.attendance_status, "attended");
+  assert.equal(payload.is_walk_in, true);
+});
+
+// --- update patch ------------------------------------------------------------
+
+test("engagementParticipantUpdatePatch is empty when nothing changed", () => {
+  const participant = makeEngagementParticipant();
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  assert.deepEqual(engagementParticipantUpdatePatch(form, participant), {});
+});
+
+test("engagementParticipantUpdatePatch includes only the field that actually changed", () => {
+  const participant = makeEngagementParticipant();
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  form.attendanceStatus = "attended";
+  assert.deepEqual(engagementParticipantUpdatePatch(form, participant), { attendance_status: "attended" });
+});
+
+test("engagementParticipantUpdatePatch supports the walk-in + attended combination independently of RSVP", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: null });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  form.attendanceStatus = "attended";
+  form.isWalkIn = true;
+  assert.deepEqual(engagementParticipantUpdatePatch(form, participant), { attendance_status: "attended", is_walk_in: true });
+  // RSVP stays untouched -- attendance and walk-in are independent of it.
+  assert.ok(!("rsvp_status" in engagementParticipantUpdatePatch(form, participant)));
+});
+
+test("engagementParticipantUpdatePatch diffs crm_contact_id when linking an unresolved participant to a Contact", () => {
+  const participant = makeEngagementParticipant({ crm_contact_id: null });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  form.crmContactId = "cc1";
+  assert.deepEqual(engagementParticipantUpdatePatch(form, participant), { crm_contact_id: "cc1" });
+});
+
+test("engagementParticipantUpdatePatch does not send identity fields once crm_contact_id is set -- the backend snapshots from the Contact", () => {
+  const participant = makeEngagementParticipant({ crm_contact_id: null });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  form.crmContactId = "cc1";
+  form.firstName = "Ignored";
+  const patch = engagementParticipantUpdatePatch(form, participant);
+  assert.equal(patch.crm_contact_id, "cc1");
+  assert.ok(!("first_name" in patch));
+});
+
+test("engagementParticipantUpdatePatch never includes participant_id/engagement_id/client_id/source/created_at/updated_at", () => {
+  const participant = makeEngagementParticipant();
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  form.role = "host";
+  const patch = engagementParticipantUpdatePatch(form, participant);
+  assert.ok(!("participant_id" in patch));
+  assert.ok(!("engagement_id" in patch));
+  assert.ok(!("client_id" in patch));
+  assert.ok(!("source" in patch));
+  assert.ok(!("created_at" in patch));
+  assert.ok(!("updated_at" in patch));
 });

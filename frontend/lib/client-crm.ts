@@ -22,10 +22,16 @@ import type {
   EngagementCloseoutUpdateInput,
   EngagementContractStatus,
   EngagementCreateInput,
+  EngagementParticipant,
+  EngagementParticipantCreateInput,
+  EngagementParticipantUpdateInput,
   EngagementPaymentStatus,
   EngagementStatus,
   EngagementType,
   EngagementUpdateInput,
+  ParticipantAttendanceStatus,
+  ParticipantRole,
+  ParticipantRsvpStatus,
 } from "@/lib/api";
 
 export const CLIENT_STATUS_OPTIONS: { value: ClientStatus; label: string }[] = [
@@ -686,6 +692,169 @@ export function engagementCloseoutUpdatePatch(
 
   const completedBy = form.completedBy.trim() || null;
   if (completedBy !== original.completed_by) patch.completed_by = completedBy;
+
+  return patch;
+}
+
+// --- EngagementParticipant (Stage 1G) ---------------------------------------
+// CrmContact <-> Engagement, when the canonical Contact is known -- see
+// EngagementParticipant's own model docstring on the backend for the full
+// architecture (unresolved participants, snapshot-not-live-reference,
+// two-axis RSVP/attendance status, walk-in as provenance).
+
+export const PARTICIPANT_ROLE_OPTIONS: { value: ParticipantRole; label: string }[] = [
+  { value: "guest", label: "Guest" },
+  { value: "client", label: "Client" },
+  { value: "host", label: "Host" },
+  { value: "speaker_panelist", label: "Speaker / Panelist" },
+  { value: "astronomic_team", label: "Astronomic Team" },
+  { value: "other", label: "Other" },
+];
+
+export function participantRoleLabel(value: ParticipantRole): string {
+  return PARTICIPANT_ROLE_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export const PARTICIPANT_RSVP_STATUS_OPTIONS: { value: ParticipantRsvpStatus; label: string }[] = [
+  { value: "invited", label: "Invited" },
+  { value: "confirmed", label: "Confirmed" },
+  { value: "declined", label: "Declined" },
+];
+
+export function participantRsvpStatusLabel(value: ParticipantRsvpStatus | null): string {
+  if (value === null) return "—";
+  return PARTICIPANT_RSVP_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export const PARTICIPANT_ATTENDANCE_STATUS_OPTIONS: { value: ParticipantAttendanceStatus; label: string }[] = [
+  { value: "attended", label: "Attended" },
+  { value: "no_show", label: "No-Show" },
+  { value: "cancelled", label: "Cancelled" },
+];
+
+export function participantAttendanceStatusLabel(value: ParticipantAttendanceStatus | null): string {
+  if (value === null) return "—";
+  return PARTICIPANT_ATTENDANCE_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+export function participantDisplayName(participant: Pick<EngagementParticipant, "first_name" | "last_name">): string {
+  return [participant.first_name, participant.last_name].filter(Boolean).join(" ") || "Unnamed participant";
+}
+
+/** Mirrors the backend's own _participant_identity_is_meaningful rule
+ * (service layer, not a Pydantic constraint) -- at least one of
+ * first/last/email must be non-blank for an unresolved participant. This
+ * copy exists purely for instant client-side feedback (disabling Save
+ * before a round trip); the backend remains the authoritative check. */
+export function participantIdentityIsMeaningful(firstName: string, lastName: string, email: string): boolean {
+  return Boolean(firstName.trim() || lastName.trim() || email.trim());
+}
+
+export interface EngagementParticipantFormState {
+  crmContactId: string | null;
+  firstName: string;
+  lastName: string;
+  email: string;
+  title: string;
+  company: string;
+  role: ParticipantRole;
+  rsvpStatus: ParticipantRsvpStatus | "";
+  attendanceStatus: ParticipantAttendanceStatus | "";
+  isWalkIn: boolean;
+}
+
+export function emptyEngagementParticipantFormState(): EngagementParticipantFormState {
+  return {
+    crmContactId: null,
+    firstName: "",
+    lastName: "",
+    email: "",
+    title: "",
+    company: "",
+    role: "guest",
+    rsvpStatus: "",
+    attendanceStatus: "",
+    isWalkIn: false,
+  };
+}
+
+export function engagementParticipantFormStateFromParticipant(participant: EngagementParticipant): EngagementParticipantFormState {
+  return {
+    crmContactId: participant.crm_contact_id,
+    firstName: participant.first_name ?? "",
+    lastName: participant.last_name ?? "",
+    email: participant.email ?? "",
+    title: participant.title ?? "",
+    company: participant.company ?? "",
+    role: participant.role,
+    rsvpStatus: participant.rsvp_status ?? "",
+    attendanceStatus: participant.attendance_status ?? "",
+    isWalkIn: participant.is_walk_in,
+  };
+}
+
+/** CREATE only. When `crmContactId` is set (the resolved/primary path),
+ * identity fields are omitted entirely -- the backend always snapshots
+ * from the canonical Contact and ignores anything sent here in that case,
+ * so there is no reason to send stale copies. When unresolved, the raw
+ * form fields are sent as-is; the backend enforces the at-least-one-of
+ * first/last/email rule (see participantIdentityIsMeaningful). */
+export function engagementParticipantCreatePayload(form: EngagementParticipantFormState): EngagementParticipantCreateInput {
+  const base: EngagementParticipantCreateInput = {
+    role: form.role,
+    rsvp_status: form.rsvpStatus || null,
+    attendance_status: form.attendanceStatus || null,
+    is_walk_in: form.isWalkIn,
+  };
+  if (form.crmContactId) {
+    return { ...base, crm_contact_id: form.crmContactId };
+  }
+  return {
+    ...base,
+    crm_contact_id: null,
+    first_name: form.firstName.trim() || null,
+    last_name: form.lastName.trim() || null,
+    email: form.email.trim() || null,
+    title: form.title.trim() || null,
+    company: form.company.trim() || null,
+  };
+}
+
+/** A genuine partial PATCH, same diff-only convention as the other
+ * Client CRM update-patch helpers. Unlike ClientContact, `crm_contact_id`
+ * IS diffed and sent here -- linking an unresolved participant to a
+ * canonical Contact is the explicit unresolved-to-resolved transition
+ * this stage's approved design requires; the backend then refreshes the
+ * identity snapshot from that Contact itself, so identity fields are only
+ * ever diffed/sent here while the participant remains unresolved. */
+export function engagementParticipantUpdatePatch(
+  form: EngagementParticipantFormState,
+  original: EngagementParticipant
+): EngagementParticipantUpdateInput {
+  const patch: EngagementParticipantUpdateInput = {};
+
+  if (form.crmContactId !== original.crm_contact_id) patch.crm_contact_id = form.crmContactId;
+
+  const stillUnresolved = form.crmContactId === null;
+  if (stillUnresolved) {
+    const firstName = form.firstName.trim() || null;
+    if (firstName !== original.first_name) patch.first_name = firstName;
+    const lastName = form.lastName.trim() || null;
+    if (lastName !== original.last_name) patch.last_name = lastName;
+    const email = form.email.trim() || null;
+    if (email !== original.email) patch.email = email;
+    const title = form.title.trim() || null;
+    if (title !== original.title) patch.title = title;
+    const company = form.company.trim() || null;
+    if (company !== original.company) patch.company = company;
+  }
+
+  if (form.role !== original.role) patch.role = form.role;
+  const rsvpStatus = form.rsvpStatus || null;
+  if (rsvpStatus !== original.rsvp_status) patch.rsvp_status = rsvpStatus;
+  const attendanceStatus = form.attendanceStatus || null;
+  if (attendanceStatus !== original.attendance_status) patch.attendance_status = attendanceStatus;
+  if (form.isWalkIn !== original.is_walk_in) patch.is_walk_in = form.isWalkIn;
 
   return patch;
 }

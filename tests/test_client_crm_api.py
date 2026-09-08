@@ -22,6 +22,7 @@ from app.repositories.client_contact_store import MemoryClientContactStore
 from app.repositories.client_store import MemoryClientStore
 from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.engagement_closeout_store import MemoryEngagementCloseoutStore
+from app.repositories.engagement_participant_store import MemoryEngagementParticipantStore
 from app.repositories.engagement_store import MemoryEngagementStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.client_crm_service import ClientCrmService
@@ -36,6 +37,7 @@ def test_client():
         crm_contact_store=MemoryCrmContactStore(),
         engagement_store=MemoryEngagementStore(),
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
+        engagement_participant_store=MemoryEngagementParticipantStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -56,6 +58,7 @@ def contact_test_client():
         crm_contact_store=crm_contact_store,
         engagement_store=MemoryEngagementStore(),
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
+        engagement_participant_store=MemoryEngagementParticipantStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -785,3 +788,264 @@ def test_engagement_closeout_isolation_across_clients(test_client):
 
     resp = client.patch(_closeout_url(created_client_b["client_id"], engagement_a["engagement_id"]), json={"attended_count": 1})
     assert resp.status_code == 404
+
+
+# =====================================================================
+# EngagementParticipant -- Client CRM Stage 1G (2026-09-08)
+# =====================================================================
+
+
+def _participants_url(client_id: str, engagement_id: str) -> str:
+    return f"/client-crm/clients/{client_id}/engagements/{engagement_id}/participants"
+
+
+def _participant_url(client_id: str, engagement_id: str, participant_id: str) -> str:
+    return f"{_participants_url(client_id, engagement_id)}/{participant_id}"
+
+
+def test_list_participants_empty_state(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"]))
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_list_participants_missing_engagement_is_404(test_client):
+    client, _service = test_client
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.get(_participants_url(created_client["client_id"], "does-not-exist"))
+    assert resp.status_code == 404
+
+
+def test_create_resolved_participant(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client, engagement = _create_client_and_engagement(client)
+
+    resp = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]), json={"crm_contact_id": "ethan-1"}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["crm_contact_id"] == "ethan-1"
+    assert body["first_name"] == "Ethan"
+    assert body["email"] == "ethan@hiveasmbld.example.com"
+    assert body["role"] == "guest"
+    assert body["source"] == "manual"
+
+
+def test_create_resolved_participant_missing_contact_is_400(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]), json={"crm_contact_id": "does-not-exist"}
+    )
+    assert resp.status_code == 400
+
+
+def test_create_unresolved_participant_with_name(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "last_name": "Doe", "role": "host"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["crm_contact_id"] is None
+    assert body["first_name"] == "Jane"
+    assert body["role"] == "host"
+
+
+def test_create_unresolved_participant_with_no_identity_is_400(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.post(_participants_url(created_client["client_id"], engagement["engagement_id"]), json={})
+    assert resp.status_code == 400
+
+
+def test_create_participant_invalid_role_is_422(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "role": "not_a_real_role"},
+    )
+    assert resp.status_code == 422
+
+
+def test_create_participant_missing_engagement_is_404(test_client):
+    client, _service = test_client
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(_participants_url(created_client["client_id"], "does-not-exist"), json={"first_name": "Jane"})
+    assert resp.status_code == 404
+
+
+def test_create_resolved_participant_duplicate_is_409(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _participants_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={"crm_contact_id": "ethan-1"})
+
+    resp = client.post(url, json={"crm_contact_id": "ethan-1"})
+    assert resp.status_code == 409
+
+
+def test_update_participant_partial_patch(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "role": "guest"},
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"attendance_status": "attended", "is_walk_in": True},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["attendance_status"] == "attended"
+    assert body["is_walk_in"] is True
+    assert body["first_name"] == "Jane"  # untouched
+
+
+def test_update_participant_missing_is_404(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], "does-not-exist"),
+        json={"role": "host"},
+    )
+    assert resp.status_code == 404
+
+
+def test_link_unresolved_participant_to_contact(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client, engagement = _create_client_and_engagement(client)
+    unresolved = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Ethan", "email": "guessed@example.com"},
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], unresolved["participant_id"]),
+        json={"crm_contact_id": "ethan-1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["crm_contact_id"] == "ethan-1"
+    assert body["email"] == "ethan@hiveasmbld.example.com"  # refreshed from canonical
+
+
+def test_linking_unresolved_participant_to_an_already_active_contact_is_409(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client, engagement = _create_client_and_engagement(client)
+    url = _participants_url(created_client["client_id"], engagement["engagement_id"])
+    client.post(url, json={"crm_contact_id": "ethan-1"})
+    unresolved = client.post(url, json={"first_name": "Ethan", "last_name": "W."}).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], unresolved["participant_id"]),
+        json={"crm_contact_id": "ethan-1"},
+    )
+    assert resp.status_code == 409
+
+
+def test_clearing_crm_contact_id_on_a_resolved_participant_is_400(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client, engagement = _create_client_and_engagement(client)
+    resolved = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]), json={"crm_contact_id": "ethan-1"}
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], resolved["participant_id"]),
+        json={"crm_contact_id": None},
+    )
+    assert resp.status_code == 400
+
+    unchanged = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"])).json()
+    assert unchanged[0]["crm_contact_id"] == "ethan-1"
+
+
+def test_resolved_participant_can_be_relinked_to_a_different_contact(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store, crm_contact_id="ethan-1", first_name="Ethan")
+    _seed_crm_contact(crm_contact_store, crm_contact_id="priya-1", first_name="Priya", email="priya@hiveasmbld.example.com")
+    created_client, engagement = _create_client_and_engagement(client)
+    resolved = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]), json={"crm_contact_id": "ethan-1"}
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], resolved["participant_id"]),
+        json={"crm_contact_id": "priya-1"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["crm_contact_id"] == "priya-1"
+    assert body["first_name"] == "Priya"
+
+
+def test_archive_and_restore_participant_via_patch(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]), json={"first_name": "Jane"}
+    ).json()
+    url = _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"])
+
+    archived = client.patch(url, json={"archived": True})
+    assert archived.status_code == 200
+    assert archived.json()["archived"] is True
+
+    restored = client.patch(url, json={"archived": False})
+    assert restored.status_code == 200
+    assert restored.json()["archived"] is False
+
+
+def test_no_delete_route_exists_for_participants(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]), json={"first_name": "Jane"}
+    ).json()
+    resp = client.delete(_participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]))
+    assert resp.status_code in (404, 405)
+
+
+def test_participant_isolation_across_clients(test_client):
+    client, _service = test_client
+    created_client_a, engagement_a = _create_client_and_engagement(client)
+    created_client_b = client.post("/client-crm/clients", json={"name": "Other Co"}).json()
+    created = client.post(
+        _participants_url(created_client_a["client_id"], engagement_a["engagement_id"]), json={"first_name": "Jane"}
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client_b["client_id"], engagement_a["engagement_id"], created["participant_id"]),
+        json={"role": "host"},
+    )
+    assert resp.status_code == 404
+
+
+def test_participant_creation_never_mutates_closeout(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    closeout_url = f"/client-crm/clients/{created_client['client_id']}/engagements/{engagement['engagement_id']}/closeout"
+    client.post(closeout_url, json={"confirmed_guest_count": 24, "attended_count": 24})
+
+    client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "attendance_status": "attended"},
+    )
+
+    resp = client.get(closeout_url)
+    assert resp.json()["confirmed_guest_count"] == 24
+    assert resp.json()["attended_count"] == 24

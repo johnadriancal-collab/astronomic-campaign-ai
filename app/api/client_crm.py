@@ -1,8 +1,8 @@
 """
 Client CRM API -- Stage 1B (2026-09-07) Client CRUD, extended for
-ClientContact (Stage 1D), Engagement (Stage 1E, 2026-09-07), and
-EngagementCloseout (Stage 1F, 2026-09-08). ClientNote has no routes yet
-(a later stage).
+ClientContact (Stage 1D), Engagement (Stage 1E, 2026-09-07),
+EngagementCloseout (Stage 1F, 2026-09-08), and EngagementParticipant
+(Stage 1G, 2026-09-08). ClientNote has no routes yet (a later stage).
 
 Deliberately its own prefix ("/client-crm", NOT "/crm") -- the existing
 read-only service token's scope is hardcoded to any path starting with
@@ -43,9 +43,13 @@ from app.models.client_crm import (
     Engagement,
     EngagementCloseout,
     EngagementContractStatus,
+    EngagementParticipant,
     EngagementPaymentStatus,
     EngagementStatus,
     EngagementType,
+    ParticipantAttendanceStatus,
+    ParticipantRole,
+    ParticipantRsvpStatus,
 )
 from app.services.client_crm_service import (
     ClientContactNotFound,
@@ -54,6 +58,8 @@ from app.services.client_crm_service import (
     EngagementCloseoutAlreadyExists,
     EngagementCloseoutNotFound,
     EngagementNotFound,
+    EngagementParticipantDuplicate,
+    EngagementParticipantNotFound,
 )
 
 router = APIRouter(prefix="/client-crm", tags=["client-crm"])
@@ -212,6 +218,56 @@ class EngagementCloseoutUpdateRequest(BaseModel):
 
     completed_at: datetime | None = None
     completed_by: str | None = None
+    archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
+
+
+class EngagementParticipantCreateRequest(BaseModel):
+    """Client CRM Stage 1G. `crm_contact_id` is OPTIONAL, unlike
+    ClientContactCreateRequest's own effectively-mandatory rule -- an
+    unresolved participant (no crm_contact_id) is a legitimate case here;
+    see EngagementParticipant's own model docstring. When omitted,
+    `first_name`/`last_name`/`email`/`title`/`company` are the request's
+    own identity fields (at least one of first_name/last_name/email must
+    be non-blank -- enforced by the service layer, not this schema, since
+    it's a cross-field rule). When `crm_contact_id` IS provided, any of
+    those fields sent here are ignored -- the canonical Contact's own
+    data always wins. `source` has no field here at all -- Stage 1G
+    creates ONLY MANUAL records, server-owned, never caller-settable."""
+
+    crm_contact_id: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    title: str | None = None
+    company: str | None = None
+    role: ParticipantRole = ParticipantRole.GUEST
+    rsvp_status: ParticipantRsvpStatus | None = None
+    attendance_status: ParticipantAttendanceStatus | None = None
+    is_walk_in: bool = False
+
+
+class EngagementParticipantUpdateRequest(BaseModel):
+    """Every field optional -- a genuine partial PATCH. Unlike
+    ClientContactUpdateRequest, `crm_contact_id` IS settable here -- this
+    is the explicit "unresolved participant later linked to a canonical
+    Contact" transition Stage 1G's own approved design requires (see
+    ClientCrmService.update_engagement_participant()'s own docstring for
+    the snapshot-refresh and duplicate-protection behavior this triggers).
+    Clearing `crm_contact_id` back to null on an already-linked
+    participant is explicitly rejected (400) -- resolved -> unresolved is
+    not an allowed transition. No `source` field here either -- still
+    entirely server-owned."""
+
+    crm_contact_id: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    title: str | None = None
+    company: str | None = None
+    role: ParticipantRole | None = None
+    rsvp_status: ParticipantRsvpStatus | None = None
+    attendance_status: ParticipantAttendanceStatus | None = None
+    is_walk_in: bool | None = None
     archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
 
 
@@ -408,5 +464,65 @@ async def update_engagement_closeout(
         return await service.update_engagement_closeout(client_id, engagement_id, payload.model_dump(exclude_unset=True))
     except (ClientNotFound, EngagementNotFound, EngagementCloseoutNotFound) as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/clients/{client_id}/engagements/{engagement_id}/participants", response_model=list[EngagementParticipant])
+async def list_engagement_participants(
+    client_id: str, engagement_id: str, service: ClientCrmService = Depends(get_client_crm_service)
+):
+    try:
+        return await service.list_engagement_participants(client_id, engagement_id)
+    except (ClientNotFound, EngagementNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/clients/{client_id}/engagements/{engagement_id}/participants", response_model=EngagementParticipant)
+async def create_engagement_participant(
+    client_id: str,
+    engagement_id: str,
+    payload: EngagementParticipantCreateRequest,
+    service: ClientCrmService = Depends(get_client_crm_service),
+):
+    """409 if `crm_contact_id` is already an active participant of this
+    Engagement. 400 if an unresolved participant (no crm_contact_id) has
+    no name or email at all."""
+    try:
+        return await service.create_engagement_participant(client_id, engagement_id, payload.model_dump())
+    except (ClientNotFound, EngagementNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except EngagementParticipantDuplicate as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch(
+    "/clients/{client_id}/engagements/{engagement_id}/participants/{participant_id}",
+    response_model=EngagementParticipant,
+)
+async def update_engagement_participant(
+    client_id: str,
+    engagement_id: str,
+    participant_id: str,
+    payload: EngagementParticipantUpdateRequest,
+    service: ClientCrmService = Depends(get_client_crm_service),
+):
+    """`exclude_unset=True` is what makes this a genuine partial PATCH --
+    same convention as every other Client CRM update route. Sending
+    `crm_contact_id` links/relinks an unresolved participant to a
+    canonical Contact -- 409 if that Contact is already an active
+    participant of this Engagement. 400 if this would clear an
+    already-linked participant's `crm_contact_id` back to null --
+    resolved -> unresolved is not an allowed transition."""
+    try:
+        return await service.update_engagement_participant(
+            client_id, engagement_id, participant_id, payload.model_dump(exclude_unset=True)
+        )
+    except (ClientNotFound, EngagementNotFound, EngagementParticipantNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except EngagementParticipantDuplicate as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
