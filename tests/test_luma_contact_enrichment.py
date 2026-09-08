@@ -299,14 +299,15 @@ def test_normalize_company_name(raw, expected):
 
 def test_company_normalization_never_rewrites_the_stored_self_reported_value():
     """The comparison normalizer is used ONLY to decide "same company" for
-    invalidation/Tier-1 grouping -- .company itself always keeps the
-    self-reported text verbatim, casing/punctuation included."""
+    the website-review-needed signal/Tier-1 grouping -- .company itself
+    always keeps the self-reported text verbatim, casing/punctuation
+    included."""
     contact = make_contact(company="Acme Inc.", company_website=None)
     reg = make_registration(registered_at=_now(), registration_answers=[company_answer("ACME INC")])  # cosmetically different, same normalized company
     resolutions = resolve_contact_luma_fields([reg], {})
     outcome = apply_luma_self_report(contact, resolutions)
     assert outcome.contact.company == "ACME INC"  # stored verbatim, not normalized
-    assert outcome.website_invalidated is False  # cosmetic difference only -- not a material change
+    assert outcome.website_review_needed is False  # cosmetic difference only -- not a material change
 
 
 # --- website domain normalization --------------------------------------------
@@ -442,21 +443,32 @@ def test_ambiguous_unknown_field_is_left_untouched_and_flagged():
     assert outcome.ambiguous_fields == ["company"]
 
 
-def test_no_change_produces_no_updates_and_no_new_provenance_write():
+def test_no_change_produces_zero_updates_and_zero_provenance_write():
+    """We have no way to know the historical source of an already-
+    identical value -- provenance must mean "this enrichment actually
+    set/changed this field from this registration", never "Luma
+    currently contains the same value the CRM already had"."""
     contact = make_contact(company="SameCo")
     reg = make_registration(registered_at=_now(), luma_guest_id="g1", registration_answers=[company_answer("SameCo")])
     resolutions = resolve_contact_luma_fields([reg], {})
     outcome = apply_luma_self_report(contact, resolutions)
-    # value identical -> no "company" in changed_field_keys, but provenance
-    # itself is new information (first time this field's provenance is
-    # recorded) so it IS written once.
-    assert "company" not in outcome.changed_field_keys
-    assert "custom:field_provenance" in outcome.changed_field_keys
+    assert outcome.changed_field_keys == []
+    assert outcome.contact is contact  # truly untouched, not even a fresh model_copy
+    assert FIELD_PROVENANCE_KEY not in outcome.contact.custom_fields
 
-    # Re-applying the SAME resolution against the now-provenance-carrying
-    # contact produces truly zero changes -- idempotent.
-    outcome2 = apply_luma_self_report(outcome.contact, resolutions)
-    assert outcome2.changed_field_keys == []
+
+def test_company_change_does_not_newly_acquire_title_provenance_when_title_is_already_identical():
+    """Independent per field: Company changing must never cause Title to
+    acquire provenance it wouldn't otherwise have earned on its own."""
+    contact = make_contact(company="OldCo", title="SameTitle")
+    reg = make_registration(registered_at=_now(), registration_answers=[company_answer("NewCo", "SameTitle")])
+    resolutions = resolve_contact_luma_fields([reg], {})
+    outcome = apply_luma_self_report(contact, resolutions)
+    assert "company" in outcome.changed_field_keys
+    assert "title" not in outcome.changed_field_keys
+    provenance = outcome.contact.custom_fields[FIELD_PROVENANCE_KEY]
+    assert "company" in provenance
+    assert "title" not in provenance
 
 
 def test_provenance_records_source_guest_id_and_recency():
@@ -482,31 +494,77 @@ def test_provenance_never_carries_raw_payload_or_email():
     assert "registration_answers" not in provenance_json
 
 
-# --- stale website invalidation on real company change ----------------------
+# --- V1: existing nonblank website is NEVER auto-cleared/overwritten -------
 
 
-def test_material_company_change_invalidates_the_stale_website():
+def test_material_company_change_preserves_the_existing_website_and_flags_for_review():
+    """The corrected V1 behavior -- no destructive clearing. An existing
+    website is left EXACTLY as it was; the outcome is flagged instead of
+    acted on."""
     contact = make_contact(company="OldCo", company_website="oldco.com")
     reg = make_registration(registered_at=_now(), registration_answers=[company_answer("NewCo")])
     resolutions = resolve_contact_luma_fields([reg], {})
-    outcome = apply_luma_self_report(contact, resolutions, tier1_result=None)  # no Tier 1 candidate available
+    outcome = apply_luma_self_report(contact, resolutions, tier1_result=Tier1Result(candidate="https://should-not-apply.com", ambiguous=False, matching_contact_count=1))
     assert outcome.contact.company == "NewCo"
-    assert outcome.contact.company_website is None  # cleared, never left pointing at OldCo's site
-    assert outcome.website_invalidated is True
+    assert outcome.contact.company_website == "oldco.com"  # untouched, not cleared, not overwritten by Tier 1 either
+    assert outcome.website_review_needed is True
+    assert "company_website" not in outcome.changed_field_keys
 
 
-def test_material_company_change_repopulates_website_from_tier1():
+def test_material_company_change_is_ignored_by_apply_when_tier1_result_is_not_even_provided():
+    """A caller correctly following the "only fetch Tier 1 when website is
+    blank" guidance never passes a tier1_result at all when the website
+    is already set -- confirms nothing breaks/attempts to use it either
+    way."""
     contact = make_contact(company="OldCo", company_website="oldco.com")
+    reg = make_registration(registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    resolutions = resolve_contact_luma_fields([reg], {})
+    outcome = apply_luma_self_report(contact, resolutions, tier1_result=None)
+    assert outcome.contact.company_website == "oldco.com"
+    assert outcome.website_review_needed is True
+
+
+def test_no_website_review_flag_on_a_merely_cosmetic_company_difference():
+    contact = make_contact(company="Acme Inc.", company_website="acme.com")
+    reg = make_registration(registered_at=_now(), registration_answers=[company_answer("ACME, LLC")])  # same normalized company
+    resolutions = resolve_contact_luma_fields([reg], {})
+    outcome = apply_luma_self_report(contact, resolutions, tier1_result=Tier1Result(candidate="https://should-not-be-used.com", ambiguous=False, matching_contact_count=1))
+    assert outcome.contact.company == "ACME, LLC"  # self-report still applied verbatim
+    assert outcome.contact.company_website == "acme.com"  # untouched -- no material change detected
+    assert outcome.website_review_needed is False
+
+
+# --- Tier 1 may ONLY populate a CURRENTLY BLANK website ---------------------
+
+
+def test_tier1_populates_a_blank_website_regardless_of_whether_company_changed():
+    contact = make_contact(company="OldCo", company_website=None)
     reg = make_registration(registered_at=_now(), registration_answers=[company_answer("NewCo")])
     resolutions = resolve_contact_luma_fields([reg], {})
     tier1 = Tier1Result(candidate="https://newco.com", ambiguous=False, matching_contact_count=2)
     outcome = apply_luma_self_report(contact, resolutions, tier1_result=tier1)
     assert outcome.contact.company_website == "https://newco.com"
     assert outcome.contact.custom_fields[FIELD_PROVENANCE_KEY]["company_website"]["source"] == "internal_company_match"
+    assert outcome.website_review_needed is False  # nothing to flag -- was blank, not overwritten
 
 
-def test_material_company_change_with_ambiguous_tier1_leaves_website_honestly_blank():
-    contact = make_contact(company="OldCo", company_website="oldco.com")
+def test_tier1_can_populate_a_blank_website_on_a_first_time_company_fill_too():
+    """Blank company -> filled is not a "change" that flags anything for
+    review (nothing stale existed), but it's still a valid moment for
+    Tier 1 to fill an ALSO-blank website -- this is a new, safe capability
+    the corrected design enables (previously excluded entirely)."""
+    contact = make_contact(company=None, company_website=None)
+    reg = make_registration(registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    resolutions = resolve_contact_luma_fields([reg], {})
+    tier1 = Tier1Result(candidate="https://newco.com", ambiguous=False, matching_contact_count=1)
+    outcome = apply_luma_self_report(contact, resolutions, tier1_result=tier1)
+    assert outcome.contact.company == "NewCo"
+    assert outcome.contact.company_website == "https://newco.com"
+    assert outcome.website_review_needed is False
+
+
+def test_tier1_ambiguous_leaves_a_blank_website_honestly_blank():
+    contact = make_contact(company="OldCo", company_website=None)
     reg = make_registration(registered_at=_now(), registration_answers=[company_answer("NewCo")])
     resolutions = resolve_contact_luma_fields([reg], {})
     tier1 = Tier1Result(candidate=None, ambiguous=True, matching_contact_count=2)
@@ -515,26 +573,16 @@ def test_material_company_change_with_ambiguous_tier1_leaves_website_honestly_bl
     assert outcome.website_tier1_ambiguous is True
 
 
-def test_no_website_invalidation_on_a_merely_cosmetic_company_difference():
-    contact = make_contact(company="Acme Inc.", company_website="acme.com")
-    reg = make_registration(registered_at=_now(), registration_answers=[company_answer("ACME, LLC")])  # same normalized company
+def test_tier1_does_not_populate_an_already_blank_website_when_company_did_not_change_at_all():
+    """Website stays blank when the resolver found nothing, even though
+    Luma reconfirmed the same company (not a bug -- Tier 1 legitimately
+    found no unambiguous match)."""
+    contact = make_contact(company="SameCo", company_website=None)
+    reg = make_registration(registered_at=_now(), registration_answers=[company_answer("SameCo")])
     resolutions = resolve_contact_luma_fields([reg], {})
-    outcome = apply_luma_self_report(contact, resolutions, tier1_result=Tier1Result(candidate="https://should-not-be-used.com", ambiguous=False, matching_contact_count=1))
-    assert outcome.contact.company == "ACME, LLC"  # self-report still applied verbatim
-    assert outcome.contact.company_website == "acme.com"  # untouched -- no material change detected
-    assert outcome.website_invalidated is False
-
-
-def test_no_website_invalidation_when_company_is_set_for_the_first_time_from_blank():
-    """Blank -> filled is not a "change" this feature invalidates a
-    website over -- there's no stale association to begin with."""
-    contact = make_contact(company=None, company_website=None)
-    reg = make_registration(registered_at=_now(), registration_answers=[company_answer("NewCo")])
-    resolutions = resolve_contact_luma_fields([reg], {})
-    outcome = apply_luma_self_report(contact, resolutions, tier1_result=Tier1Result(candidate="https://should-not-be-used.com", ambiguous=False, matching_contact_count=1))
-    assert outcome.contact.company == "NewCo"
-    assert outcome.contact.company_website is None  # not auto-populated on a first-time fill
-    assert outcome.website_invalidated is False
+    outcome = apply_luma_self_report(contact, resolutions, tier1_result=Tier1Result(candidate=None, ambiguous=False, matching_contact_count=0))
+    assert outcome.contact.company_website is None
+    assert outcome.changed_field_keys == []  # company unchanged (identical value) and website found nothing -- truly nothing to do
 
 
 def test_resolved_company_if_material_change_helper():
@@ -553,11 +601,26 @@ def test_resolved_company_if_material_change_helper():
 # --- title never triggers website logic -------------------------------------
 
 
-def test_title_only_change_never_touches_company_website():
+def test_title_only_change_never_touches_an_existing_company_website():
     contact = make_contact(company="SameCo", company_website="sameco.com", title="Old Title")
     reg = make_registration(registered_at=_now(), luma_guest_id="g1", registration_answers=[company_answer("SameCo", "New Title")])
     resolutions = resolve_contact_luma_fields([reg], {})
     outcome = apply_luma_self_report(contact, resolutions, tier1_result=Tier1Result(candidate="https://should-not-apply.com", ambiguous=False, matching_contact_count=1))
     assert outcome.contact.title == "New Title"
     assert outcome.contact.company_website == "sameco.com"  # untouched
-    assert outcome.website_invalidated is False
+    assert outcome.website_review_needed is False
+
+
+def test_title_only_change_can_still_populate_a_blank_website_via_tier1():
+    """Website handling is gated on "Luma resolved SOME company", not on
+    "company's own value changed" -- Title-only changes still let a
+    currently-blank website get filled if Tier 1 finds an unambiguous
+    match for the (unchanged) company."""
+    contact = make_contact(company="SameCo", company_website=None, title="Old Title")
+    reg = make_registration(registered_at=_now(), luma_guest_id="g1", registration_answers=[company_answer("SameCo", "New Title")])
+    resolutions = resolve_contact_luma_fields([reg], {})
+    tier1 = Tier1Result(candidate="https://sameco.com", ambiguous=False, matching_contact_count=1)
+    outcome = apply_luma_self_report(contact, resolutions, tier1_result=tier1)
+    assert outcome.contact.title == "New Title"
+    assert outcome.contact.company_website == "https://sameco.com"
+    assert "company" not in outcome.changed_field_keys  # company itself never changed

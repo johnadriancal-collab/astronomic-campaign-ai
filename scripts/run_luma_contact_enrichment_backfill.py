@@ -50,6 +50,10 @@ def _print_report(report: BackfillReport) -> None:
     for contact_id in report.ambiguous_contact_ids:
         print(f"  {contact_id}")
 
+    print(f"\n=== Existing Website Flagged For Review (Company changed, website PRESERVED not cleared, capped) -- {len(report.website_review_needed_contact_ids)} ===")
+    for contact_id in report.website_review_needed_contact_ids:
+        print(f"  {contact_id}")
+
     print(f"\n=== Tier 1 Website Ambiguous Examples (capped) -- {len(report.tier1_ambiguous_examples)} ===")
     for example in report.tier1_ambiguous_examples:
         print(f"  {example}")
@@ -57,17 +61,24 @@ def _print_report(report: BackfillReport) -> None:
     print(f"\n=== Representative Proposed Changes (capped) -- {len(report.examples)} ===")
     header = (
         "crm_contact_id | old_company -> new_company (recency) | old_title -> new_title (recency) | "
-        "old_website -> new/candidate | flags"
+        "old_website -> new (Tier 1 only, blank->filled) | tier2_candidate_fyi (never written) | flags"
     )
     print(header)
     for e in report.examples:
         company_recency = f"{e.company_recency_tier}/{e.company_recency_at}" if e.company_recency_tier else "-"
         title_recency = f"{e.title_recency_tier}/{e.title_recency_at}" if e.title_recency_tier else "-"
         flags = ", ".join(e.flags) if e.flags else "-"
+        # "(unchanged)" is used instead of a bare None whenever this
+        # field was NOT part of the round's changed_field_keys -- a None
+        # here never means "cleared", since blank Luma values never erase
+        # and an existing website is never auto-cleared either (V1).
+        company_display = repr(e.new_company) if e.new_company is not None else "(unchanged)"
+        title_display = repr(e.new_title) if e.new_title is not None else "(unchanged)"
+        website_display = repr(e.new_website) if e.new_website is not None else "(unchanged)"
         print(
-            f"  {e.crm_contact_id} | {e.old_company!r} -> {e.new_company!r} ({company_recency}) | "
-            f"{e.old_title!r} -> {e.new_title!r} ({title_recency}) | "
-            f"{e.old_website!r} -> {e.new_website_or_tier2_candidate!r} | {flags}"
+            f"  {e.crm_contact_id} | {e.old_company!r} -> {company_display} ({company_recency}) | "
+            f"{e.old_title!r} -> {title_display} ({title_recency}) | "
+            f"{e.old_website!r} -> {website_display} | fyi:{e.tier2_candidate_fyi!r} | {flags}"
         )
 
 

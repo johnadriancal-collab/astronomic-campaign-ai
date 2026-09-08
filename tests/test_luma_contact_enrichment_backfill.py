@@ -191,12 +191,10 @@ async def test_contacts_would_update_both_company_and_title(stores):
     assert report.counts.contacts_would_update_both == 1
 
 
-async def test_website_tier1_resolved_and_invalidated_counts(stores):
+async def test_existing_website_is_flagged_for_review_never_invalidated(stores):
+    """V1 corrected behavior: a material Company change never clears an
+    existing website -- it's preserved and flagged instead."""
     contact_store, registration_store, event_store = stores
-    # A different, already-correct contact establishes Tier 1 knowledge for "NewCo".
-    reference = make_contact(company="NewCo", company_website="newco.com")
-    await contact_store.create(reference)
-
     target = make_contact(company="OldCo", company_website="oldco.com")
     await contact_store.create(target)
     await registration_store.save(
@@ -205,8 +203,29 @@ async def test_website_tier1_resolved_and_invalidated_counts(stores):
 
     report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=True)
 
-    assert report.counts.websites_would_be_invalidated == 1
-    assert report.counts.websites_resolved_tier1 == 1
+    assert report.counts.existing_websites_flagged_for_review == 1
+    assert target.crm_contact_id in report.website_review_needed_contact_ids
+    assert report.counts.websites_populated_from_blank_tier1 == 0
+    persisted = await contact_store.get(target.crm_contact_id)
+    assert persisted.company_website == "oldco.com"  # untouched -- dry run, and V1 never clears anyway
+
+
+async def test_blank_website_populated_from_tier1(stores):
+    contact_store, registration_store, event_store = stores
+    # A different, already-correct contact establishes Tier 1 knowledge for "NewCo".
+    reference = make_contact(company="NewCo", company_website="newco.com")
+    await contact_store.create(reference)
+
+    target = make_contact(company="OldCo", company_website=None)
+    await contact_store.create(target)
+    await registration_store.save(
+        make_registration(crm_contact_id=target.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=True)
+
+    assert report.counts.websites_populated_from_blank_tier1 == 1
+    assert report.counts.existing_websites_flagged_for_review == 0
 
 
 async def test_tier2_candidates_and_free_domain_exclusions_are_reported_never_applied(stores):
@@ -433,3 +452,45 @@ async def test_tier2_domain_mismatch_with_company_is_flagged():
 
     report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=True)
     assert "tier2_domain_does_not_match_company" in report.examples[0].flags
+
+
+# --- unchanged Contacts: zero save, zero provenance mutation (V1 correction) -
+
+
+async def test_a_contact_whose_luma_answer_already_matches_is_truly_unchanged():
+    contact_store, registration_store, event_store = MemoryCrmContactStore(), MemoryLumaRegistrationStore(), MemoryLumaEventStore()
+    contact = make_contact(company="SameCo", title="SameTitle")
+    await contact_store.create(contact)
+    await registration_store.save(
+        make_registration(crm_contact_id=contact.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("SameCo", "SameTitle")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=False)
+
+    assert report.counts.contacts_unchanged == 1
+    assert report.counts.contacts_saved == 0
+    persisted = await contact_store.get(contact.crm_contact_id)
+    assert "field_provenance" not in persisted.custom_fields
+    assert report.examples == []  # never added to examples either -- nothing actually changed
+
+
+async def test_unchanged_counter_reflects_actual_field_equality_not_just_presence_of_a_luma_answer():
+    """A contact whose Luma answer is present but identical must be
+    counted as unchanged -- this is the exact 34-of-66 category the
+    correction was about."""
+    contact_store, registration_store, event_store = MemoryCrmContactStore(), MemoryLumaRegistrationStore(), MemoryLumaEventStore()
+    unchanged = make_contact(company="Acme", title="CEO")
+    changed = make_contact(company="OldCo", title="Old Title")
+    await contact_store.create(unchanged)
+    await contact_store.create(changed)
+    await registration_store.save(
+        make_registration(crm_contact_id=unchanged.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("Acme", "CEO")])
+    )
+    await registration_store.save(
+        make_registration(crm_contact_id=changed.crm_contact_id, registered_at=_now(), registration_answers=[company_answer("NewCo", "New Title")])
+    )
+
+    report = await run_luma_contact_enrichment_backfill(contact_store, registration_store, event_store, dry_run=True)
+
+    assert report.counts.contacts_unchanged == 1
+    assert report.counts.contacts_would_update_both == 1

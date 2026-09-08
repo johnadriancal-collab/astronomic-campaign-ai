@@ -74,7 +74,6 @@ from app.services.luma_contact_enrichment import (
     normalize_company_name,
     resolve_contact_luma_fields,
     resolve_tier1_website,
-    resolved_company_if_material_change,
 )
 
 # The only webhook event types Phase 1 processes -- event.*/calendar.*
@@ -113,6 +112,11 @@ class LumaProcessResult:
     # historical answers with no known-recency one to arbitrate, and
     # deliberately left that field untouched rather than guess.
     luma_self_report_ambiguous_fields: list[str] = field(default_factory=list)
+    # True when Company changed materially against a previously non-blank
+    # one AND an existing company_website was left completely untouched
+    # (V1 never clears/overwrites it) -- a review-queue signal, not an
+    # action taken.
+    luma_self_report_website_review_needed: bool = False
 
 
 # The exact three confident dedup-tier fields CrmService.classify_match()
@@ -439,7 +443,7 @@ class LumaSyncService:
                 changed_field_keys = []
         return updated, changed_field_keys, identity_conflicts, outcome
 
-    async def _apply_luma_contact_self_report(self, contact: CrmContact) -> tuple[CrmContact, list[str], list[str]]:
+    async def _apply_luma_contact_self_report(self, contact: CrmContact) -> tuple[CrmContact, list[str], list[str], bool]:
         """Runs the shared Luma self-report Company/Job Title enrichment
         (app/services/luma_contact_enrichment.py) against this contact's
         COMPLETE current set of stored LumaRegistration rows -- always
@@ -451,13 +455,20 @@ class LumaSyncService:
         called AFTER the current registration has already been saved
         (see _process_guest_event_locked), so list_for_contact() includes
         it. Returns (possibly-updated contact, changed field keys,
-        ambiguous field names) -- performs its own contact_store.save()
-        when there's an actual change, separate from and in addition to
-        any save _enrich_existing_contact()/create_contact_from_import()
-        already performed for the generic mapped fields."""
+        ambiguous field names, website_review_needed) -- performs its own
+        contact_store.save() when there's an actual change, separate from
+        and in addition to any save _enrich_existing_contact()/
+        create_contact_from_import() already performed for the generic
+        mapped fields.
+
+        Tier 1 is only ever worth fetching the full contact pool for when
+        company_website is CURRENTLY BLANK and Luma resolved some company
+        this round (see apply_luma_self_report's own docstring -- V1 never
+        clears/overwrites an existing nonblank website, so Tier 1 would be
+        ignored entirely in that case regardless of what it found)."""
         registrations = await self.registration_store.list_for_contact(contact.crm_contact_id)
         if not registrations:
-            return contact, [], []
+            return contact, [], [], False
 
         events_by_id: dict[str, LumaEvent] = {}
         for event_id in {r.luma_event_id for r in registrations}:
@@ -468,17 +479,16 @@ class LumaSyncService:
         resolutions = resolve_contact_luma_fields(registrations, events_by_id)
 
         tier1_result = None
-        material_new_company = resolved_company_if_material_change(contact, resolutions)
-        if material_new_company is not None:
+        if not contact.company_website and resolutions.company.resolved is not None:
             all_contacts = await self.crm_service.contact_store.list()
             tier1_result = resolve_tier1_website(
-                normalize_company_name(material_new_company), all_contacts, exclude_crm_contact_id=contact.crm_contact_id
+                normalize_company_name(resolutions.company.resolved.value), all_contacts, exclude_crm_contact_id=contact.crm_contact_id
             )
 
         outcome = apply_luma_self_report(contact, resolutions, tier1_result=tier1_result)
         if outcome.changed_field_keys:
             await self.crm_service.contact_store.save(outcome.contact)
-        return outcome.contact, outcome.changed_field_keys, outcome.ambiguous_fields
+        return outcome.contact, outcome.changed_field_keys, outcome.ambiguous_fields, outcome.website_review_needed
 
     async def process_guest_event(
         self, event_payload: dict, guest_payload: dict, webhook_delivery_id: str | None = None
@@ -596,10 +606,14 @@ class LumaSyncService:
         await self.registration_store.save(registration)
 
         luma_self_report_ambiguous_fields: list[str] = []
+        luma_self_report_website_review_needed = False
         if contact is not None and settings.luma_contact_enrichment_enabled:
-            contact, self_report_changed_keys, luma_self_report_ambiguous_fields = await self._apply_luma_contact_self_report(
-                contact
-            )
+            (
+                contact,
+                self_report_changed_keys,
+                luma_self_report_ambiguous_fields,
+                luma_self_report_website_review_needed,
+            ) = await self._apply_luma_contact_self_report(contact)
             if self_report_changed_keys:
                 changed_field_keys = sorted(set(changed_field_keys) | set(self_report_changed_keys))
                 if contact_outcome == "unchanged":
@@ -616,6 +630,7 @@ class LumaSyncService:
             changed_field_keys=changed_field_keys,
             identity_conflicts=identity_conflicts,
             luma_self_report_ambiguous_fields=luma_self_report_ambiguous_fields,
+            luma_self_report_website_review_needed=luma_self_report_website_review_needed,
         )
         await self._record_activity(luma_event, existing, result)
         return result
@@ -816,6 +831,25 @@ class LumaSyncService:
                 entity_id=contact.crm_contact_id,
                 entity_name=name,
                 metadata={"fields": sorted(result.luma_self_report_ambiguous_fields)},
+            )
+
+        # Independent of the above -- fires whenever Company changed
+        # materially against a previously non-blank one and an EXISTING
+        # company_website was left completely untouched as a result (V1
+        # never clears/overwrites it -- see apply_luma_self_report's own
+        # docstring). No values in metadata, same convention as every
+        # other event here; this is a review-queue signal, not a report
+        # of any action taken on the website itself.
+        if contact is not None and result.luma_self_report_website_review_needed:
+            name = _contact_display_name(contact)
+            await self.activity_log.record(
+                event_type="luma.contact.website_review_needed",
+                category=ActivityCategory.LUMA,
+                source=ActivitySource.LUMA_SYNC,
+                summary=f"{name}'s Company changed via Luma self-report -- their existing Company Website was left untouched and may need review.",
+                entity_type="contact",
+                entity_id=contact.crm_contact_id,
+                entity_name=name,
             )
 
     # --- webhook entry point ----------------------------------------------

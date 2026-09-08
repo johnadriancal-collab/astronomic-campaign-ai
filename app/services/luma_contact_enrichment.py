@@ -44,18 +44,34 @@ separate, subtly different "backfill algorithm".
 Provenance is intentionally minimal -- no new CrmContact model field, no
 general-purpose framework. A small `custom_fields["field_provenance"]`
 dict (see FIELD_PROVENANCE_KEY) records, per field this module actually
-touches (company/title/company_website), the source, the winning
+CHANGES (company/title/company_website), the source, the winning
 registration's own luma_guest_id (already a persisted, non-secret
 identifier -- never raw payload, never email), and the recency tier/
 timestamp used. This is audit/display information; correctness of the
-"no regression" guarantee does NOT depend on it (see above).
+"no regression" guarantee does NOT depend on it (see above). Provenance
+for a field is written ONLY when that field's VALUE actually changes as
+a result of THIS call -- never merely because Luma's current answer
+happens to already match what's stored. A Contact whose Luma-resolved
+Company/Title/Website all already match its current values produces ZERO
+updates and ZERO provenance mutation: we have no way to know the
+historical source of an already-identical value, so this module makes no
+claim about it.
 
-Company Website: Tier 1 (internal same-company knowledge) is the ONLY
-tier this module is authorized to WRITE automatically -- an unambiguous
-single normalized-domain match among other non-archived contacts sharing
-the same normalized company. Tier 2 (corporate email-domain candidate) is
+Company Website (V1, corrected): an EXISTING nonblank company_website is
+NEVER automatically cleared or overwritten by this module, even when
+Company changes -- without reliable provenance on that existing website
+(manually verified? imported? inferred? tied to the old company?
+still valid after a rename/rebrand?), silently clearing it on a Company
+change is a destructive guess this module refuses to make. When Company
+changes materially against a PREVIOUSLY non-blank company AND an existing
+website is present, the website is left completely untouched and the
+outcome is marked `website_review_needed=True` instead -- a review queue,
+not a cleanup. Tier 1 (internal same-company knowledge) may ONLY populate
+a company_website that is CURRENTLY BLANK -- an unambiguous single
+normalized-domain match among other non-archived contacts sharing the
+same normalized company. Tier 2 (corporate email-domain candidate) is
 fully implemented and evaluable but is NEVER applied to
-CrmContact.company_website by apply_luma_self_report() -- callers (the
+CrmContact.company_website anywhere in this module -- callers (the
 backfill report, in particular) may compute and SURFACE a Tier 2
 candidate for human review, but must not write it. This mirrors the
 explicit, not-yet-approved status of Tier 2 automatic writes.
@@ -169,7 +185,10 @@ class LumaEnrichmentOutcome:
     contact: CrmContact
     changed_field_keys: list[str] = field(default_factory=list)
     ambiguous_fields: list[str] = field(default_factory=list)  # "company" and/or "title"
-    website_invalidated: bool = False
+    # An existing, nonblank company_website was left untouched (never
+    # cleared/overwritten -- see module docstring) despite a material
+    # Company change -- a signal for human review, not an action taken.
+    website_review_needed: bool = False
     website_tier1_ambiguous: bool = False
 
 
@@ -414,13 +433,11 @@ def _provenance_entry_website_tier1(matched_normalized_company: str) -> dict[str
 def resolved_company_if_material_change(contact: CrmContact, resolutions: ContactFieldResolutions) -> str | None:
     """Returns the NEW company value only if this resolution represents a
     genuine, material change to a PREVIOUSLY NON-BLANK company (the
-    OldCo -> NewCo scenario this feature's stale-website invalidation
-    exists for) -- None if there's no resolution, an ambiguous
+    OldCo -> NewCo scenario that makes an existing company_website worth
+    flagging for review) -- None if there's no resolution, an ambiguous
     unresolved case, no actual change, a purely cosmetic difference under
     normalize_company_name, or the company was simply blank before (a
-    first-time fill is not a "change" -- nothing stale to invalidate).
-    Cheap and side-effect-free: callers use this to decide WHETHER it's
-    worth fetching the contact pool for Tier 1 resolution at all."""
+    first-time fill is not a "change" -- nothing to flag)."""
     if resolutions.company.ambiguous_unknown or resolutions.company.resolved is None:
         return None
     new_value = resolutions.company.resolved.value
@@ -436,18 +453,32 @@ def apply_luma_self_report(
     contact: CrmContact, resolutions: ContactFieldResolutions, *, tier1_result: Tier1Result | None = None
 ) -> LumaEnrichmentOutcome:
     """Pure, synchronous, no I/O -- the one merge function used by both
-    the live webhook path and the historical backfill. Rules: blank/
-    missing Luma values never erase; a resolved nonblank value ALWAYS
-    replaces the current one (unlike apply_import_mapping's fill-only
-    rule, untouched by this module); company and title are independent.
-    `tier1_result`, if provided, is applied ONLY when
-    resolved_company_if_material_change() confirms a real company change
-    -- callers should compute it lazily (only fetch the contact pool when
-    that function returns non-None) rather than always paying for it."""
+    the live webhook path and the historical backfill.
+
+    Rules: blank/missing Luma values never erase; a resolved nonblank
+    value that DIFFERS from what's currently stored ALWAYS replaces it
+    (unlike apply_import_mapping's fill-only rule, untouched by this
+    module); company and title are independent. Provenance for a field is
+    written ONLY alongside an actual value change for that field -- never
+    merely because Luma's answer already matches what's stored. A Contact
+    with no actual field changes returns changed_field_keys=[] (zero
+    Contact save, per this function's own "if not updates" early-out).
+
+    Company Website (V1): an existing NONBLANK company_website is never
+    touched, regardless of whether Company changes -- if Company changes
+    materially against a previously non-blank one, `website_review_needed`
+    is set instead of writing anything. Tier 1 may only populate a
+    CURRENTLY BLANK company_website (whether Company just changed or
+    merely reconfirmed its existing value) -- `tier1_result`, if provided,
+    is consulted only in that blank-website case. Tier 2 is never applied
+    here at all. Callers should compute `tier1_result` lazily -- only when
+    `contact.company_website` is already blank AND
+    `resolutions.company.resolved` is not None -- rather than always
+    paying for the contact-pool fetch."""
     updates: dict[str, Any] = {}
     ambiguous_fields: list[str] = []
     provenance = dict(contact.custom_fields.get(FIELD_PROVENANCE_KEY) or {})
-    website_invalidated = False
+    website_review_needed = False
     website_tier1_ambiguous = False
 
     if resolutions.company.ambiguous_unknown:
@@ -456,22 +487,23 @@ def apply_luma_self_report(
         resolved = resolutions.company.resolved
         if resolved.value != (contact.company or ""):
             updates["company"] = resolved.value
-        entry = _provenance_entry_luma(resolved)
-        if provenance.get("company") != entry:
-            provenance["company"] = entry
+            entry = _provenance_entry_luma(resolved)
+            if provenance.get("company") != entry:
+                provenance["company"] = entry
 
-        material_new_company = resolved_company_if_material_change(contact, resolutions)
-        if material_new_company is not None:
-            if contact.company_website:
-                updates["company_website"] = None
-                website_invalidated = True
-                provenance.pop("company_website", None)
-            if tier1_result is not None:
-                if tier1_result.candidate:
-                    updates["company_website"] = tier1_result.candidate
-                    provenance["company_website"] = _provenance_entry_website_tier1(normalize_company_name(material_new_company))
-                elif tier1_result.ambiguous:
-                    website_tier1_ambiguous = True
+        # Website handling runs whenever Luma resolved SOME company this
+        # round -- independent of whether that value differs from what's
+        # already stored (reconfirming an existing company should still
+        # let a currently-blank website get filled).
+        if contact.company_website:
+            if resolved_company_if_material_change(contact, resolutions) is not None:
+                website_review_needed = True
+        elif tier1_result is not None:
+            if tier1_result.candidate:
+                updates["company_website"] = tier1_result.candidate
+                provenance["company_website"] = _provenance_entry_website_tier1(normalize_company_name(resolved.value))
+            elif tier1_result.ambiguous:
+                website_tier1_ambiguous = True
 
     if resolutions.title.ambiguous_unknown:
         ambiguous_fields.append("title")
@@ -479,9 +511,9 @@ def apply_luma_self_report(
         resolved = resolutions.title.resolved
         if resolved.value != (contact.title or ""):
             updates["title"] = resolved.value
-        entry = _provenance_entry_luma(resolved)
-        if provenance.get("title") != entry:
-            provenance["title"] = entry
+            entry = _provenance_entry_luma(resolved)
+            if provenance.get("title") != entry:
+                provenance["title"] = entry
 
     if provenance != (contact.custom_fields.get(FIELD_PROVENANCE_KEY) or {}):
         updates["custom_fields"] = {**contact.custom_fields, FIELD_PROVENANCE_KEY: provenance}
@@ -489,7 +521,7 @@ def apply_luma_self_report(
     if not updates:
         return LumaEnrichmentOutcome(
             contact=contact, changed_field_keys=[], ambiguous_fields=ambiguous_fields,
-            website_invalidated=False, website_tier1_ambiguous=website_tier1_ambiguous,
+            website_review_needed=website_review_needed, website_tier1_ambiguous=website_tier1_ambiguous,
         )
 
     changed_field_keys = sorted({"custom:field_provenance" if k == "custom_fields" else k for k in updates})
@@ -499,6 +531,6 @@ def apply_luma_self_report(
         contact=updated_contact,
         changed_field_keys=changed_field_keys,
         ambiguous_fields=ambiguous_fields,
-        website_invalidated=website_invalidated,
+        website_review_needed=website_review_needed,
         website_tier1_ambiguous=website_tier1_ambiguous,
     )

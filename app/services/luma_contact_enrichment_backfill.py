@@ -25,12 +25,20 @@ history is reported ONLY in this module's own in-memory BackfillReport
 Idempotent by construction: re-running with unchanged Luma data
 recomputes the identical resolution from the identical stored data and
 produces zero additional changes (the merge function's own
-`if not updates: return unchanged` early-out).
+`if not updates: return unchanged` early-out) -- and, per the V1
+correction below, a Contact whose Luma-resolved Company/Title/Website all
+already match its current values now produces that exact same "zero
+updates" outcome, never a provenance-only write.
 
-Tier 1 Company Website resolution is computed once, up front, from the
-FULL contact list -- far cheaper here than the live webhook path's
-lazy-per-event approach, since the backfill already needs the whole
-contact list in memory regardless. Tier 2 (email-domain) is computed for
+Company Website (V1, corrected): an existing NONBLANK company_website is
+NEVER cleared/overwritten by this driver, even when Company changes --
+see apply_luma_self_report's own docstring for why (no reliable
+provenance on an existing website means we cannot safely guess whether it
+survived a Company change). `existing_websites_flagged_for_review` counts
+exactly the contacts that would previously have had their website
+DESTRUCTIVELY CLEARED -- they are now left completely untouched instead,
+flagged for a human review queue. Tier 1 may only populate a company_
+website that is CURRENTLY BLANK. Tier 2 (email-domain) is computed for
 EVERY examined contact purely for reporting/evaluation -- never written,
 regardless of dry_run.
 
@@ -91,7 +99,7 @@ class BackfillCounts:
     contacts_would_update_company: int = 0
     contacts_would_update_title: int = 0
     contacts_would_update_both: int = 0
-    contacts_unchanged: int = 0
+    contacts_unchanged: int = 0  # zero Contact save would occur for these
     # How many of the above updates rest on a single, uncontested
     # UNKNOWN-recency answer rather than a known-recency one -- see module
     # docstring. contacts_would_update_from_unknown_recency is the UNION
@@ -100,8 +108,13 @@ class BackfillCounts:
     contacts_would_update_company_from_unknown_recency: int = 0
     contacts_would_update_title_from_unknown_recency: int = 0
     contacts_would_update_from_unknown_recency: int = 0
-    websites_would_be_invalidated: int = 0
-    websites_resolved_tier1: int = 0
+    # Company Website, V1 corrected semantics -- see module docstring.
+    # existing_websites_flagged_for_review is EXACTLY the set that would
+    # previously have been destructively cleared; every one of them is
+    # left completely untouched instead (preserved), not overwritten by
+    # either Tier 1 or Tier 2.
+    existing_websites_flagged_for_review: int = 0
+    websites_populated_from_blank_tier1: int = 0
     websites_tier1_ambiguous: int = 0
     websites_tier2_candidates: int = 0
     websites_tier2_free_excluded: int = 0
@@ -115,7 +128,12 @@ class BackfillExample:
     after field values (which are the whole point of a review sample),
     nothing more. Company and Title recency are reported SEPARATELY
     (never collapsed into one "dominant" tier) since they're resolved
-    completely independently and can legitimately differ."""
+    completely independently and can legitimately differ. `new_website`
+    is populated ONLY when company_website itself actually changed this
+    round (always a blank -> Tier 1 fill, per V1's corrected semantics --
+    never a clear/overwrite of an existing value); `tier2_candidate_fyi`
+    is ALWAYS computed for evaluation and NEVER applied, regardless of
+    whether the existing website is blank or already set."""
 
     crm_contact_id: str
     old_company: str | None
@@ -127,7 +145,9 @@ class BackfillExample:
     title_recency_tier: str | None
     title_recency_at: str | None
     old_website: str | None
-    new_website_or_tier2_candidate: str | None
+    new_website: str | None
+    tier2_candidate_fyi: str | None
+    website_flagged_for_review: bool = False
     flags: list[str] = field(default_factory=list)
 
 
@@ -137,6 +157,7 @@ class BackfillReport:
     examples: list[BackfillExample] = field(default_factory=list)
     ambiguous_contact_ids: list[str] = field(default_factory=list)
     tier1_ambiguous_examples: list[dict] = field(default_factory=list)
+    website_review_needed_contact_ids: list[str] = field(default_factory=list)
     dry_run: bool = True
 
 
@@ -228,11 +249,12 @@ async def run_luma_contact_enrichment_backfill(
             counts.contacts_multiple_valid_title_answers += 1
 
         # Report-only Tier 1/Tier 2 evaluation against the RESOLVED (post-
-        # Luma) company for every examined contact, independent of whether
-        # apply_luma_self_report() itself would touch company_website this
-        # round -- this is what lets the report show "Tier 2 candidates"
-        # broadly for later human evaluation, not just the narrow set of
-        # contacts undergoing an actual OldCo->NewCo transition.
+        # Luma) company for every examined contact, independent of
+        # whether apply_luma_self_report() itself would ever consult
+        # tier1 (it only does when company_website is currently blank) --
+        # this is what lets the report show "Tier 2 candidates" broadly
+        # for later human evaluation on every contact, not just those
+        # eligible for an actual Tier 1 write.
         resolved_company_value = resolutions.company.resolved.value if resolutions.company.resolved else contact.company
         normalized_company = normalize_company_name(resolved_company_value)
         tier1 = (
@@ -268,10 +290,12 @@ async def run_luma_contact_enrichment_backfill(
         if company_from_unknown or title_from_unknown:
             counts.contacts_would_update_from_unknown_recency += 1
 
-        if outcome.website_invalidated:
-            counts.websites_would_be_invalidated += 1
-        if "company_website" in outcome.changed_field_keys and outcome.contact.company_website:
-            counts.websites_resolved_tier1 += 1
+        website_populated = "company_website" in outcome.changed_field_keys and outcome.contact.company_website
+        if outcome.website_review_needed:
+            counts.existing_websites_flagged_for_review += 1
+            report.website_review_needed_contact_ids.append(crm_contact_id)
+        if website_populated:
+            counts.websites_populated_from_blank_tier1 += 1
         if outcome.website_tier1_ambiguous:
             counts.websites_tier1_ambiguous += 1
             if len(report.tier1_ambiguous_examples) < example_cap:
@@ -288,7 +312,7 @@ async def run_luma_contact_enrichment_backfill(
         if outcome.changed_field_keys and len(report.examples) < example_cap:
             new_company = outcome.contact.company if company_updated else None
             new_title = outcome.contact.title if title_updated else None
-            new_website = outcome.contact.company_website if "company_website" in outcome.changed_field_keys else tier2.candidate
+            new_website = outcome.contact.company_website if website_populated else None
 
             flags: list[str] = []
             if company_updated:
@@ -303,13 +327,14 @@ async def run_luma_contact_enrichment_backfill(
                     flags.append("malformed_title_value")
                 if contact.title and _shares_no_token(contact.title.strip().lower(), new_title.strip().lower()):
                     flags.append("dramatically_different_title")
-            if "company_website" in outcome.changed_field_keys and outcome.contact.company_website:
-                if normalized_company and _shares_no_token(normalized_company, _domain_stem(outcome.contact.company_website)):
-                    flags.append("tier1_website_looks_questionable")
+            if website_populated and normalized_company and _shares_no_token(normalized_company, _domain_stem(new_website)):
+                flags.append("tier1_website_looks_questionable")
             if tier2.candidate and normalized_company and _shares_no_token(normalized_company, _domain_stem(tier2.candidate)):
                 flags.append("tier2_domain_does_not_match_company")
             if company_from_unknown or title_from_unknown:
                 flags.append("update_based_solely_on_unknown_recency")
+            if outcome.website_review_needed:
+                flags.append("website_review_needed")
 
             report.examples.append(
                 BackfillExample(
@@ -331,7 +356,9 @@ async def run_luma_contact_enrichment_backfill(
                         else None
                     ),
                     old_website=contact.company_website,
-                    new_website_or_tier2_candidate=new_website,
+                    new_website=new_website,
+                    tier2_candidate_fyi=tier2.candidate,
+                    website_flagged_for_review=outcome.website_review_needed,
                     flags=flags,
                 )
             )
