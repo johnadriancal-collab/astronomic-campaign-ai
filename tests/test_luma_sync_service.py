@@ -464,8 +464,10 @@ async def test_fixed_multi_select_field_with_populated_options_still_filters_unk
 # above). Canonical-vs-arbitrary filtering for THIS question happens
 # entirely in normalize_industry_focus_labels() (LumaAnswerNormalizer.
 # INDUSTRY_FOCUS_LABEL): only exact INDUSTRY_OPTIONS members survive,
-# "Other" and any unrecognized Luma string are dropped before the value
-# ever reaches the (now-unrestricted) CRM field.
+# unrecognized Luma strings are dropped before the value ever reaches the
+# (now-unrestricted) CRM field. "Other" is itself a canonical
+# INDUSTRY_OPTIONS member (added 2026-09-08), so it survives like any
+# other recognized value.
 
 LUMA_INDUSTRY_QUESTION_LABEL = "What are your primary investment or industry areas of focus?"
 
@@ -559,7 +561,9 @@ async def test_industry_focus_does_not_duplicate_an_already_present_value(luma_s
     assert "custom:investment_industry" not in result.changed_field_keys  # no-op, value already present
 
 
-async def test_industry_focus_other_is_dropped_from_the_crm_field(luma_service, mapping_store):
+async def test_industry_focus_other_is_now_kept_alongside_other_canonical_values(luma_service, mapping_store):
+    """"Other" was added to INDUSTRY_OPTIONS 2026-09-08 -- it's a
+    recognized canonical value now, not dropped."""
     await _seed_industry_mapping(mapping_store)
     guest = make_guest(
         registration_answers=[
@@ -573,13 +577,15 @@ async def test_industry_focus_other_is_dropped_from_the_crm_field(luma_service, 
     )
     result = await luma_service.process_guest_event(make_event(), guest)
 
-    assert result.contact.custom_fields["investment_industry"] == ["Cybersecurity"]
+    assert result.contact.custom_fields["investment_industry"] == ["Cybersecurity", "Other"]
 
 
-async def test_industry_focus_arbitrary_unrecognized_value_is_also_dropped_not_just_other(luma_service, mapping_store):
-    """Not just a literal "Other" special case -- ANY string that isn't an
-    exact INDUSTRY_OPTIONS member is dropped, since investment_industry's
-    live field has no options list of its own to fall back on for this."""
+async def test_industry_focus_arbitrary_unrecognized_value_is_still_dropped(luma_service, mapping_store):
+    """A genuinely uncontrolled string (never added to INDUSTRY_OPTIONS)
+    is still dropped, since investment_industry's live field has no
+    options list of its own to fall back on for this -- only "Other"
+    itself changed status, not the general "unrecognized is dropped"
+    rule."""
     await _seed_industry_mapping(mapping_store)
     guest = make_guest(
         registration_answers=[
@@ -596,10 +602,11 @@ async def test_industry_focus_arbitrary_unrecognized_value_is_also_dropped_not_j
     assert result.contact.custom_fields["investment_industry"] == ["Cybersecurity"]
 
 
-async def test_industry_focus_only_other_selected_writes_nothing(luma_service, mapping_store):
-    """Confirms normalize_industry_focus_labels's "nothing valid survives
-    -> None -> write nothing" contract -- the normalizer's job now, since
-    the CRM field itself has no options list to filter against."""
+async def test_industry_focus_only_other_selected_now_writes_other(luma_service, mapping_store):
+    """"Other" alone now survives normalize_industry_focus_labels and gets
+    written -- contrast test_industry_focus_only_unrecognized_writes_nothing
+    below, where the "nothing valid survives -> write nothing" contract
+    still holds for a genuinely unrecognized value."""
     await _seed_industry_mapping(mapping_store)
     guest = make_guest(
         registration_answers=[
@@ -608,12 +615,32 @@ async def test_industry_focus_only_other_selected_writes_nothing(luma_service, m
     )
     result = await luma_service.process_guest_event(make_event(), guest)
 
+    assert result.contact.custom_fields["investment_industry"] == ["Other"]
+
+
+async def test_industry_focus_only_unrecognized_writes_nothing(luma_service, mapping_store):
+    """Confirms normalize_industry_focus_labels's "nothing valid survives
+    -> None -> write nothing" contract still holds for a value that was
+    never added to INDUSTRY_OPTIONS."""
+    await _seed_industry_mapping(mapping_store)
+    guest = make_guest(
+        registration_answers=[
+            {
+                "label": LUMA_INDUSTRY_QUESTION_LABEL,
+                "question_id": "q-1",
+                "question_type": "multi-select",
+                "value": ["Underwater Basket Weaving"],
+            }
+        ]
+    )
+    result = await luma_service.process_guest_event(make_event(), guest)
+
     assert "investment_industry" not in result.contact.custom_fields
 
 
 async def test_industry_focus_other_is_still_preserved_in_the_raw_registration_answer(luma_service, mapping_store):
-    """The mapped CRM field drops "Other," but the raw Luma answer is never
-    lost -- see LumaRegistration.registration_answers's own docstring."""
+    """The raw Luma answer is never lost regardless of mapping outcome --
+    see LumaRegistration.registration_answers's own docstring."""
     await _seed_industry_mapping(mapping_store)
     guest = make_guest(
         registration_answers=[

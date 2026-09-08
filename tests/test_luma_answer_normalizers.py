@@ -183,19 +183,31 @@ def test_multiple_canonical_values_are_all_preserved_in_order():
     assert result == ["Aerospace & Defense", "Cybersecurity", "Crypto / Web3"]
 
 
-def test_other_is_dropped():
-    assert normalize_industry_focus_labels(["Cybersecurity", "Other"]) == ["Cybersecurity"]
+def test_other_is_now_a_recognized_canonical_value():
+    """"Other" was added to INDUSTRY_OPTIONS 2026-09-08 (approved after a
+    schema-alignment audit found it in real historical Luma answers) --
+    it survives this filter like any other canonical member now."""
+    assert normalize_industry_focus_labels(["Cybersecurity", "Other"]) == ["Cybersecurity", "Other"]
 
 
-def test_arbitrary_unrecognized_value_is_dropped_not_just_other():
+def test_arbitrary_unrecognized_value_is_still_dropped():
+    """A genuinely uncontrolled string (never added to INDUSTRY_OPTIONS)
+    is still dropped -- only "Other" itself changed status, not the
+    general "unrecognized values are dropped" rule."""
     result = normalize_industry_focus_labels(["Cybersecurity", "Underwater Basket Weaving"])
     assert result == ["Cybersecurity"]
 
 
-def test_only_other_or_unrecognized_values_returns_none():
-    assert normalize_industry_focus_labels(["Other"]) is None
+def test_other_alone_now_survives():
+    assert normalize_industry_focus_labels(["Other"]) == ["Other"]
+
+
+def test_only_unrecognized_values_returns_none():
     assert normalize_industry_focus_labels(["Underwater Basket Weaving"]) is None
-    assert normalize_industry_focus_labels(["Other", "Underwater Basket Weaving"]) is None
+
+
+def test_other_plus_unrecognized_keeps_only_other():
+    assert normalize_industry_focus_labels(["Other", "Underwater Basket Weaving"]) == ["Other"]
 
 
 def test_empty_list_returns_none():
@@ -206,8 +218,11 @@ def test_a_bare_scalar_canonical_value_passes_through():
     assert normalize_industry_focus_labels("Cybersecurity") == "Cybersecurity"
 
 
+def test_a_bare_scalar_other_now_passes_through():
+    assert normalize_industry_focus_labels("Other") == "Other"
+
+
 def test_a_bare_scalar_unrecognized_value_returns_none():
-    assert normalize_industry_focus_labels("Other") is None
     assert normalize_industry_focus_labels("Underwater Basket Weaving") is None
 
 
@@ -217,4 +232,4 @@ def test_non_string_non_list_input_returns_none():
 
 
 def test_apply_normalizer_industry_focus_dispatches_correctly():
-    assert apply_normalizer(LumaAnswerNormalizer.INDUSTRY_FOCUS_LABEL, ["Cybersecurity", "Other"]) == ["Cybersecurity"]
+    assert apply_normalizer(LumaAnswerNormalizer.INDUSTRY_FOCUS_LABEL, ["Cybersecurity", "Other"]) == ["Cybersecurity", "Other"]

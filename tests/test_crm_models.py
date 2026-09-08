@@ -104,7 +104,14 @@ def test_industry_options_count_matches_frontend_copy():
     file directly, but pins the expected count here so a future addition
     to one list that isn't mirrored to the other is at least flagged by a
     mismatched count, prompting a check of both files."""
-    assert len(INDUSTRY_OPTIONS) == 30
+    assert len(INDUSTRY_OPTIONS) == 31
+
+
+def test_industry_options_includes_other():
+    """"Other" was added 2026-09-08 after a Luma <-> CRM schema-alignment
+    audit found it in 18 legitimate historical Luma answers -- see
+    normalize_industry_focus_labels's docstring."""
+    assert "Other" in INDUSTRY_OPTIONS
 
 
 # --- derive_investor_mode() ---

@@ -119,8 +119,12 @@ def normalize_industry_focus_labels(value: Any) -> list[str] | str | None:
     """
     Filters Luma's "primary investment or industry areas of focus"
     multi-select answer down to exact, canonical INDUSTRY_OPTIONS members
-    (app/models/crm.py) only -- "Other" and any unrecognized/uncontrolled
-    string are dropped HERE, never passed through.
+    (app/models/crm.py) only -- any unrecognized/uncontrolled string is
+    dropped HERE, never passed through. "Other" is itself a canonical
+    INDUSTRY_OPTIONS member (added 2026-09-08, approved after a schema-
+    alignment audit found 18 historical Luma answers legitimately using
+    it), so it now survives this filter like any other recognized value --
+    it is no longer special-cased as a drop.
 
     This is a deliberate exception to this module's usual "translate known
     labels, let the generic CRM option-allowlist filter drop the rest"
@@ -137,7 +141,7 @@ def normalize_industry_focus_labels(value: Any) -> list[str] | str | None:
     updated to match INDUSTRY_OPTIONS's exact wording.
 
     Returns None (skip, never write) if nothing valid survives -- e.g. the
-    guest selected only "Other" or only unrecognized values.
+    guest selected only unrecognized values.
     """
     if isinstance(value, list):
         kept = [v for v in value if isinstance(v, str) and v in INDUSTRY_OPTIONS]

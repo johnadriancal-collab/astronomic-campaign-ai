@@ -73,6 +73,7 @@ export const INDUSTRY_OPTIONS = [
   "Telecom & Connectivity",
   "Travel, Tourism & Hospitality",
   "Veterinary / Animal Health",
+  "Other",
 ];
 
 export const CHECK_SIZE_OPTIONS = [

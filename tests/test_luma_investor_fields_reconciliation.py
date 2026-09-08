@@ -430,3 +430,128 @@ def test_target_field_keys_are_exactly_the_four_approved_fields():
         "custom:deploying_capital",
         "custom:investment_industry",
     }
+
+
+# --- schema-alignment fix (2026-09-08): Corporate Venture, Fund Manager /
+# General Partner, and Other (investor_type + investment_industry) added as
+# CRM-accepted values after the audit found 18 legitimate historical Luma
+# answers using them -- these tests prove the values are accepted once the
+# options are expanded, and that expansion is additive: pre-existing
+# options/selections keep working exactly as before. ---------------------
+
+
+async def test_corporate_venture_and_fund_manager_are_still_rejected_before_the_options_are_expanded(
+    luma_service, crm_service, registration_store, mapping_store
+):
+    """Baseline/contrast case: with the field's OLD, narrower options
+    (this fixture's default -- Angel Investor, Family Office, Venture
+    Capital), these two values are still correctly rejected. The next
+    test proves the same raw answer is accepted once the field's options
+    are expanded to include them."""
+    await _seed_four_mappings(mapping_store)
+    investor_type_mapping = next(m for m in await mapping_store.list() if m.target_field_key == "custom:investor_type")
+    await mapping_store.save(investor_type_mapping.model_copy(update={"normalizer": "investor_type_label"}))
+    contact = make_contact()
+    await crm_service.contact_store.create(contact)
+    await registration_store.save(
+        make_registration(
+            crm_contact_id=contact.crm_contact_id, registered_at=_now(),
+            registration_answers=[make_answer("Investor Type", "select", ["Corporate Venture", "Fund Manager / General Partner"])],
+        )
+    )
+
+    report = await run_investor_fields_reconciliation(luma_service, registration_store, dry_run=True)
+
+    # _classify_answer counts per ANSWER, not per raw item inside it -- one
+    # multi-select answer with two rejected values is one rejected answer.
+    assert report.counts.invalid_values_rejected == 1
+    assert report.counts.contacts_would_change == 0
+
+
+async def test_corporate_venture_fund_manager_and_other_are_accepted_once_investor_type_options_are_expanded(
+    luma_service, crm_service, registration_store, mapping_store, custom_field_store
+):
+    """The actual fix: additively expanding investor_type's options to
+    include the 3 previously-rejected values makes them eligible, union-
+    merged alongside the contact's existing selection -- nothing dropped,
+    nothing renamed."""
+    field = await custom_field_store.get_by_field_key("investor_type")
+    await custom_field_store.save(
+        field.model_copy(update={"options": [*field.options, "Corporate Venture", "Fund Manager / General Partner", "Other"]})
+    )
+    await _seed_four_mappings(mapping_store)
+    investor_type_mapping = next(m for m in await mapping_store.list() if m.target_field_key == "custom:investor_type")
+    await mapping_store.save(investor_type_mapping.model_copy(update={"normalizer": "investor_type_label"}))
+    contact = make_contact(custom_fields={"investor_type": ["Angel Investor"]})
+    await crm_service.contact_store.create(contact)
+    await registration_store.save(
+        make_registration(
+            crm_contact_id=contact.crm_contact_id, registered_at=_now(),
+            registration_answers=[
+                make_answer("Investor Type", "select", ["Corporate Venture", "Fund Manager / General Partner", "Other"])
+            ],
+        )
+    )
+
+    report = await run_investor_fields_reconciliation(luma_service, registration_store, dry_run=False)
+
+    persisted = await crm_service.contact_store.get(contact.crm_contact_id)
+    assert set(persisted.custom_fields["investor_type"]) == {
+        "Angel Investor", "Corporate Venture", "Fund Manager / General Partner", "Other",
+    }
+    assert report.counts.invalid_values_rejected == 0
+    assert report.counts.changes_by_field.get("investor_type") == 1
+
+
+async def test_investment_industry_other_is_accepted_and_union_merged_using_the_real_industry_options(
+    luma_service, crm_service, registration_store, mapping_store
+):
+    """Uses the REAL app.models.crm.INDUSTRY_OPTIONS (not a fixture list)
+    via the real industry_focus_label normalizer -- "Other" is a
+    canonical member of that list as of 2026-09-08, so it survives and
+    union-merges with the contact's existing canonical selection."""
+    await _seed_four_mappings(mapping_store)
+    industry_mapping = next(m for m in await mapping_store.list() if m.target_field_key == "custom:investment_industry")
+    await mapping_store.save(industry_mapping.model_copy(update={"normalizer": "industry_focus_label"}))
+    contact = make_contact(custom_fields={"investment_industry": ["Cybersecurity"]})
+    await crm_service.contact_store.create(contact)
+    await registration_store.save(
+        make_registration(
+            crm_contact_id=contact.crm_contact_id, registered_at=_now(),
+            registration_answers=[make_answer("Investment Industry", "select", ["Cybersecurity", "Other"])],
+        )
+    )
+
+    report = await run_investor_fields_reconciliation(luma_service, registration_store, dry_run=False)
+
+    persisted = await crm_service.contact_store.get(contact.crm_contact_id)
+    assert set(persisted.custom_fields["investment_industry"]) == {"Cybersecurity", "Other"}
+    assert report.counts.invalid_values_rejected == 0
+    assert report.counts.changes_by_field.get("investment_industry") == 1
+
+
+async def test_pre_existing_investor_type_options_still_work_after_expansion(
+    luma_service, crm_service, registration_store, mapping_store, custom_field_store
+):
+    """The expansion is additive only -- pre-existing options
+    (Venture Capital, from this fixture's original 3) still resolve
+    exactly as before, unaffected by the 3 new options being appended."""
+    field = await custom_field_store.get_by_field_key("investor_type")
+    await custom_field_store.save(
+        field.model_copy(update={"options": [*field.options, "Corporate Venture", "Fund Manager / General Partner", "Other"]})
+    )
+    await _seed_four_mappings(mapping_store)
+    contact = make_contact()
+    await crm_service.contact_store.create(contact)
+    await registration_store.save(
+        make_registration(
+            crm_contact_id=contact.crm_contact_id, registered_at=_now(),
+            registration_answers=[make_answer("Investor Type", "select", ["Venture Capital"])],
+        )
+    )
+
+    report = await run_investor_fields_reconciliation(luma_service, registration_store, dry_run=False)
+
+    persisted = await crm_service.contact_store.get(contact.crm_contact_id)
+    assert persisted.custom_fields["investor_type"] == ["Venture Capital"]
+    assert report.counts.invalid_values_rejected == 0

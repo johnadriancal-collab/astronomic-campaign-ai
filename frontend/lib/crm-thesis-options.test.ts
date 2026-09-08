@@ -39,6 +39,7 @@ const EXPECTED_INDUSTRY_OPTIONS = [
   "Telecom & Connectivity",
   "Travel, Tourism & Hospitality",
   "Veterinary / Animal Health",
+  "Other",
 ];
 
 test("INDUSTRY_OPTIONS matches the expected canonical list exactly (parity guard against app/models/crm.py)", () => {
@@ -48,6 +49,10 @@ test("INDUSTRY_OPTIONS matches the expected canonical list exactly (parity guard
 test("INDUSTRY_OPTIONS includes the Luma-added Crypto / Web3 and Professional / Business Services options", () => {
   assert.ok(INDUSTRY_OPTIONS.includes("Crypto / Web3"));
   assert.ok(INDUSTRY_OPTIONS.includes("Professional / Business Services"));
+});
+
+test("INDUSTRY_OPTIONS includes the Luma-added Other option (2026-09-08 schema-alignment fix)", () => {
+  assert.ok(INDUSTRY_OPTIONS.includes("Other"));
 });
 
 test("INDUSTRY_OPTIONS has no duplicate or near-duplicate (case-insensitive) entries", () => {

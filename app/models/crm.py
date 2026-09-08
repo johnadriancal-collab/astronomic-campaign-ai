@@ -120,6 +120,7 @@ INDUSTRY_OPTIONS = [
     "Telecom & Connectivity",
     "Travel, Tourism & Hospitality",
     "Veterinary / Animal Health",
+    "Other",
 ]
 
 CHECK_SIZE_OPTIONS = [
