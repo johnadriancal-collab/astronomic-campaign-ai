@@ -27,6 +27,17 @@ session cookie:
     mechanism (verify_luma_webhook_request in app/dependencies.py), not a
     token we issue. /sync/luma-backfill is deliberately NOT here -- it's
     an internal admin action and stays behind the normal session gate.
+  - /integrations/contacts/photo: the existing Leads List Google Apps
+    Script (no browser, no session cookie possible) resolving a
+    Contact's profile_photo_url by email -- its OWN shared-secret
+    bearer-token check (verify_integrations_api_token in
+    app/dependencies.py), a separate secret from itf_webhook_token.
+    Listed here for the same reason as the /sync/* entries above: without
+    this, the Authorization header this route requires would instead be
+    intercepted by the admin/service-token mode below (which only
+    recognizes ADMIN_SERVICE_READ_TOKEN/ADMIN_SERVICE_OPERATOR_TOKEN and
+    only allows the /crm/ prefix), rejecting a legitimate request before
+    this route's own dependency ever ran.
   - /mail/unsubscribe, /mail/unsubscribe/one-click (Phase B3): reached by
     an anonymous recipient (a human clicking a link, or a mail provider's
     infrastructure POSTing List-Unsubscribe-Post) who by definition has
@@ -248,6 +259,7 @@ PUBLIC_PATHS = frozenset(
         "/sync/luma-event",
         "/mail/unsubscribe",
         "/mail/unsubscribe/one-click",
+        "/integrations/contacts/photo",
     }
 )
 

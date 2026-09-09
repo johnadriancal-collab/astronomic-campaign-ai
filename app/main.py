@@ -54,6 +54,7 @@ from app.api.client_crm import router as client_crm_router
 from app.api.crm import router as crm_router
 from app.api.email_intake import crm_router as email_intake_crm_router
 from app.api.email_intake import sync_router as email_intake_sync_router
+from app.api.integrations import router as integrations_router
 from app.api.leads import router as leads_router
 from app.api.luma import mapping_router as luma_mapping_router
 from app.api.luma import router as luma_router
@@ -570,6 +571,7 @@ app.include_router(mail_unsubscribe_router)
 app.include_router(mailboxes_router)
 app.include_router(luma_router)
 app.include_router(luma_mapping_router)
+app.include_router(integrations_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">
