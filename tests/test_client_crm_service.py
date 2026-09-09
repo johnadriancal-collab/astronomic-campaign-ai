@@ -14,6 +14,7 @@ import pytest_asyncio
 from app.models.activity import ActivityCategory
 from app.models.client_crm import ClientRelationshipClassification, ClientStatus
 from app.models.crm import CrmContact
+from app.models.luma import LumaEvent
 from app.repositories.client_contact_store import ClientContactStore, MemoryClientContactStore
 from app.repositories.client_note_store import MemoryClientNoteStore
 from app.repositories.client_store import ClientStore, MemoryClientStore
@@ -21,6 +22,7 @@ from app.repositories.crm_contact_store import CrmContactStore, MemoryCrmContact
 from app.repositories.engagement_closeout_store import EngagementCloseoutStore, MemoryEngagementCloseoutStore
 from app.repositories.engagement_participant_store import EngagementParticipantStore, MemoryEngagementParticipantStore
 from app.repositories.engagement_store import EngagementStore, MemoryEngagementStore
+from app.repositories.luma_event_store import LumaEventStore, MemoryLumaEventStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.services.activity_log_service import ActivityLogService
 from app.repositories.activity_event_store import MemoryActivityEventStore
@@ -30,9 +32,11 @@ from app.services.client_crm_service import (
     ClientNotFound,
     EngagementCloseoutAlreadyExists,
     EngagementCloseoutNotFound,
+    EngagementLumaEventAlreadyLinked,
     EngagementNotFound,
     EngagementParticipantDuplicate,
     EngagementParticipantNotFound,
+    LumaEventNotFound,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -46,6 +50,7 @@ def _make_service(
     engagement_store: EngagementStore | None = None,
     engagement_closeout_store: EngagementCloseoutStore | None = None,
     engagement_participant_store: EngagementParticipantStore | None = None,
+    luma_event_store: LumaEventStore | None = None,
 ) -> tuple[ClientCrmService, ActivityLogService]:
     activity_log = ActivityLogService(MemoryActivityEventStore())
     service = ClientCrmService(
@@ -56,6 +61,7 @@ def _make_service(
         engagement_store=engagement_store or MemoryEngagementStore(),
         engagement_closeout_store=engagement_closeout_store or MemoryEngagementCloseoutStore(),
         engagement_participant_store=engagement_participant_store or MemoryEngagementParticipantStore(),
+        luma_event_store=luma_event_store or MemoryLumaEventStore(),
     )
     return service, activity_log
 
@@ -117,6 +123,18 @@ async def _seed_crm_contact(crm_contact_store: CrmContactStore, **overrides) -> 
 # =====================================================================
 # Engagement -- Client CRM Stage 1E (2026-09-07)
 # =====================================================================
+
+
+def _luma_event(luma_event_id="luma-123", name="Hive ASMBLD SF Investor Dinner", start_at=None, **overrides) -> LumaEvent:
+    now = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    return LumaEvent(
+        luma_event_id=luma_event_id,
+        name=name,
+        start_at=start_at,
+        synced_at=now,
+        updated_at=now,
+        **overrides,
+    )
 
 
 @pytest.fixture
@@ -789,6 +807,7 @@ async def test_create_engagement_minimal_generates_id_and_defaults(engagement_se
 async def test_create_engagement_accepts_every_field(engagement_service):
     service, _activity_log, _engagement_store = engagement_service
     client = await service.create_client({"name": "Hive ASMBLD"})
+    await service.luma_event_store.save(_luma_event("luma-123"))
     engagement = await service.create_client_engagement(
         client.client_id,
         {
@@ -974,6 +993,173 @@ def test_engagement_type_and_dinner_type_enum_values_match_stage_1e1_taxonomy():
     assert {member.value for member in DinnerType} == {
         "investor_dinner", "fireside_dinner", "bizdev_dinner", "donor_dinner", "custom_dinner",
     }
+
+
+# =====================================================================
+# Engagement <-> Luma event link -- Client CRM Stage 1H-A (2026-09-09)
+# =====================================================================
+
+
+async def test_create_engagement_rejects_a_nonexistent_luma_event_id(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_engagement(
+            client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "does-not-exist"}
+        )
+
+
+async def test_create_engagement_never_persists_a_raw_unverified_luma_event_id(engagement_service):
+    """The rejected create() above must never reach the store at all."""
+    service, _activity_log, engagement_store = engagement_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_engagement(
+            client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "does-not-exist"}
+        )
+    assert await engagement_store.get_by_luma_event_id("does-not-exist") is None
+
+
+async def test_create_engagement_rejects_a_luma_event_already_linked_elsewhere(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("luma-123"))
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    await service.create_client_engagement(
+        client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"}
+    )
+    with pytest.raises(EngagementLumaEventAlreadyLinked):
+        await service.create_client_engagement(
+            client.client_id, {"title": "A Second Engagement", "engagement_type": "dinner", "luma_event_id": "luma-123"}
+        )
+
+
+async def test_create_engagement_with_no_luma_event_id_is_unlinked(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
+    assert engagement.luma_event_id is None
+
+
+async def test_update_client_engagement_links_a_valid_luma_event(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("luma-123"))
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
+
+    updated = await service.update_client_engagement(client.client_id, engagement.engagement_id, {"luma_event_id": "luma-123"})
+    assert updated.luma_event_id == "luma-123"
+
+
+async def test_update_client_engagement_rejects_a_nonexistent_luma_event_id(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
+    with pytest.raises(ValueError):
+        await service.update_client_engagement(client.client_id, engagement.engagement_id, {"luma_event_id": "does-not-exist"})
+
+
+async def test_update_client_engagement_rejects_a_luma_event_already_linked_to_a_different_engagement(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("luma-123"))
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    await service.create_client_engagement(
+        client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"}
+    )
+    other = await service.create_client_engagement(client.client_id, {"title": "Other Dinner", "engagement_type": "dinner"})
+
+    with pytest.raises(EngagementLumaEventAlreadyLinked):
+        await service.update_client_engagement(client.client_id, other.engagement_id, {"luma_event_id": "luma-123"})
+
+
+async def test_update_client_engagement_repatching_its_own_luma_event_id_does_not_conflict_with_itself(engagement_service):
+    """A caller re-sending the SAME luma_event_id an Engagement is already
+    linked to (e.g. re-submitting an unchanged form) must not be rejected
+    as "already linked to another Engagement" -- it's linked to THIS one."""
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("luma-123"))
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    engagement = await service.create_client_engagement(
+        client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"}
+    )
+    updated = await service.update_client_engagement(
+        client.client_id, engagement.engagement_id, {"luma_event_id": "luma-123", "owner": "Chris"}
+    )
+    assert updated.luma_event_id == "luma-123"
+    assert updated.owner == "Chris"
+
+
+async def test_update_client_engagement_unlinks_via_null(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("luma-123"))
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    engagement = await service.create_client_engagement(
+        client.client_id, {"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"}
+    )
+    unlinked = await service.update_client_engagement(client.client_id, engagement.engagement_id, {"luma_event_id": None})
+    assert unlinked.luma_event_id is None
+
+    # And the slot is free again -- a different Engagement can now claim it.
+    other = await service.create_client_engagement(
+        client.client_id, {"title": "Other Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"}
+    )
+    assert other.luma_event_id == "luma-123"
+
+
+async def test_update_client_engagement_other_fields_never_require_a_luma_event_id(engagement_service):
+    """PATCHing a field unrelated to luma_event_id must never trigger Luma
+    validation at all -- omitted means "leave it alone," not "clear it"."""
+    service, _activity_log, _engagement_store = engagement_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    engagement = await service.create_client_engagement(client.client_id, {"title": "SF Dinner", "engagement_type": "dinner"})
+    updated = await service.update_client_engagement(client.client_id, engagement.engagement_id, {"status": "confirmed"})
+    assert updated.luma_event_id is None
+    assert updated.status == "confirmed"
+
+
+async def test_list_luma_events_orders_most_recent_upcoming_first_with_nulls_last(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("e-past", name="Past Dinner", start_at=datetime(2026, 1, 1, tzinfo=timezone.utc)))
+    await service.luma_event_store.save(_luma_event("e-future", name="Future Dinner", start_at=datetime(2026, 12, 1, tzinfo=timezone.utc)))
+    await service.luma_event_store.save(_luma_event("e-no-date", name="Undated Dinner", start_at=None))
+
+    events = await service.list_luma_events()
+    assert [e.luma_event_id for e in events] == ["e-future", "e-past", "e-no-date"]
+
+
+async def test_list_luma_events_filters_case_insensitively_by_name_substring(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("e1", name="SF Investor Dinner"))
+    await service.luma_event_store.save(_luma_event("e2", name="NY Founder Breakfast"))
+
+    events = await service.list_luma_events(q="investor")
+    assert [e.luma_event_id for e in events] == ["e1"]
+    assert await service.list_luma_events(q="INVESTOR") == events
+    assert await service.list_luma_events(q="nonexistent") == []
+
+
+async def test_list_luma_events_returns_only_picker_relevant_fields(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(
+        _luma_event("e1", name="SF Investor Dinner", location_summary="The Battery", url="https://lu.ma/e1", calendar_id="cal-1")
+    )
+    events = await service.list_luma_events()
+    assert events[0].location_summary == "The Battery"
+    assert events[0].url == "https://lu.ma/e1"
+    assert not hasattr(events[0], "calendar_id")
+
+
+async def test_get_luma_event_returns_the_stored_summary(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    await service.luma_event_store.save(_luma_event("luma-123", name="SF Investor Dinner"))
+    summary = await service.get_luma_event("luma-123")
+    assert summary.luma_event_id == "luma-123"
+    assert summary.name == "SF Investor Dinner"
+
+
+async def test_get_luma_event_missing_raises_not_found(engagement_service):
+    service, _activity_log, _engagement_store = engagement_service
+    with pytest.raises(LumaEventNotFound):
+        await service.get_luma_event("does-not-exist")
 
 
 # =====================================================================

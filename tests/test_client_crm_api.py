@@ -17,6 +17,7 @@ from fastapi.testclient import TestClient
 from app.api.client_crm import router as client_crm_router
 from app.dependencies import get_client_crm_service
 from app.models.crm import CrmContact
+from app.models.luma import LumaEvent
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.client_contact_store import MemoryClientContactStore
 from app.repositories.client_store import MemoryClientStore
@@ -24,6 +25,7 @@ from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.engagement_closeout_store import MemoryEngagementCloseoutStore
 from app.repositories.engagement_participant_store import MemoryEngagementParticipantStore
 from app.repositories.engagement_store import MemoryEngagementStore
+from app.repositories.luma_event_store import MemoryLumaEventStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.client_crm_service import ClientCrmService
 
@@ -38,6 +40,7 @@ def test_client():
         engagement_store=MemoryEngagementStore(),
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
         engagement_participant_store=MemoryEngagementParticipantStore(),
+        luma_event_store=MemoryLumaEventStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -59,12 +62,42 @@ def contact_test_client():
         engagement_store=MemoryEngagementStore(),
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
         engagement_participant_store=MemoryEngagementParticipantStore(),
+        luma_event_store=MemoryLumaEventStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
     app.dependency_overrides[get_client_crm_service] = lambda: service
     with TestClient(app) as client:
         yield client, service, crm_contact_store
+
+
+@pytest.fixture
+def luma_test_client():
+    """Same as test_client, but also exposes the LumaEventStore directly
+    so a test can seed a persisted Luma event before linking an Engagement
+    to it (Client CRM Stage 1H-A)."""
+    luma_event_store = MemoryLumaEventStore()
+    service = ClientCrmService(
+        client_store=MemoryClientStore(),
+        activity_log=ActivityLogService(MemoryActivityEventStore()),
+        client_contact_store=MemoryClientContactStore(),
+        crm_contact_store=MemoryCrmContactStore(),
+        engagement_store=MemoryEngagementStore(),
+        engagement_closeout_store=MemoryEngagementCloseoutStore(),
+        engagement_participant_store=MemoryEngagementParticipantStore(),
+        luma_event_store=luma_event_store,
+    )
+    app = FastAPI()
+    app.include_router(client_crm_router)
+    app.dependency_overrides[get_client_crm_service] = lambda: service
+    with TestClient(app) as client:
+        yield client, service, luma_event_store
+
+
+def _seed_luma_event(luma_event_store, luma_event_id="luma-123", name="Hive ASMBLD SF Investor Dinner", **overrides) -> None:
+    now = datetime.now(timezone.utc)
+    event = LumaEvent(luma_event_id=luma_event_id, name=name, synced_at=now, updated_at=now, **overrides)
+    asyncio.run(luma_event_store.save(event))
 
 
 def _seed_crm_contact(crm_contact_store, **overrides) -> None:
@@ -607,6 +640,139 @@ def test_no_delete_route_exists_for_engagements(test_client):
     ).json()
     resp = client.delete(f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}")
     assert resp.status_code in (404, 405)
+
+
+# =====================================================================
+# Engagement <-> Luma event link -- Client CRM Stage 1H-A (2026-09-09)
+# =====================================================================
+
+
+def test_create_engagement_with_luma_event_id_round_trips(luma_test_client):
+    client, _service, luma_event_store = luma_test_client
+    _seed_luma_event(luma_event_store, "luma-123")
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["luma_event_id"] == "luma-123"
+
+
+def test_create_engagement_with_nonexistent_luma_event_id_is_400(luma_test_client):
+    client, _service, _luma_event_store = luma_test_client
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "does-not-exist"},
+    )
+    assert resp.status_code == 400
+
+
+def test_create_engagement_with_already_linked_luma_event_id_is_409(luma_test_client):
+    client, _service, luma_event_store = luma_test_client
+    _seed_luma_event(luma_event_store, "luma-123")
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"},
+    )
+    resp = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "A Second Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"},
+    )
+    assert resp.status_code == 409
+
+
+def test_update_engagement_links_and_unlinks_a_luma_event(luma_test_client):
+    client, _service, luma_event_store = luma_test_client
+    _seed_luma_event(luma_event_store, "luma-123")
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    created = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "SF Dinner", "engagement_type": "dinner"},
+    ).json()
+    engagement_url = f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}"
+
+    linked = client.patch(engagement_url, json={"luma_event_id": "luma-123"})
+    assert linked.status_code == 200
+    assert linked.json()["luma_event_id"] == "luma-123"
+
+    fetched = client.get(engagement_url)
+    assert fetched.json()["luma_event_id"] == "luma-123"
+
+    unlinked = client.patch(engagement_url, json={"luma_event_id": None})
+    assert unlinked.status_code == 200
+    assert unlinked.json()["luma_event_id"] is None
+
+
+def test_update_engagement_with_nonexistent_luma_event_id_is_400(luma_test_client):
+    client, _service, _luma_event_store = luma_test_client
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    created = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "SF Dinner", "engagement_type": "dinner"},
+    ).json()
+    resp = client.patch(
+        f"/client-crm/clients/{created_client['client_id']}/engagements/{created['engagement_id']}",
+        json={"luma_event_id": "does-not-exist"},
+    )
+    assert resp.status_code == 400
+
+
+def test_update_engagement_with_luma_event_already_linked_elsewhere_is_409(luma_test_client):
+    client, _service, luma_event_store = luma_test_client
+    _seed_luma_event(luma_event_store, "luma-123")
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "SF Dinner", "engagement_type": "dinner", "luma_event_id": "luma-123"},
+    )
+    other = client.post(
+        f"/client-crm/clients/{created_client['client_id']}/engagements",
+        json={"title": "Other Dinner", "engagement_type": "dinner"},
+    ).json()
+    resp = client.patch(
+        f"/client-crm/clients/{created_client['client_id']}/engagements/{other['engagement_id']}",
+        json={"luma_event_id": "luma-123"},
+    )
+    assert resp.status_code == 409
+
+
+def test_list_luma_events_returns_stored_events(luma_test_client):
+    client, _service, luma_event_store = luma_test_client
+    _seed_luma_event(luma_event_store, "luma-123", name="SF Investor Dinner")
+    resp = client.get("/client-crm/luma-events")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["luma_event_id"] == "luma-123"
+    assert body[0]["name"] == "SF Investor Dinner"
+    assert "calendar_id" not in body[0]
+
+
+def test_list_luma_events_filters_by_q(luma_test_client):
+    client, _service, luma_event_store = luma_test_client
+    _seed_luma_event(luma_event_store, "e1", name="SF Investor Dinner")
+    _seed_luma_event(luma_event_store, "e2", name="NY Founder Breakfast")
+    resp = client.get("/client-crm/luma-events", params={"q": "investor"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [e["luma_event_id"] for e in body] == ["e1"]
+
+
+def test_get_luma_event_existing(luma_test_client):
+    client, _service, luma_event_store = luma_test_client
+    _seed_luma_event(luma_event_store, "luma-123", name="SF Investor Dinner")
+    resp = client.get("/client-crm/luma-events/luma-123")
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "SF Investor Dinner"
+
+
+def test_get_luma_event_missing_is_404(luma_test_client):
+    client, _service, _luma_event_store = luma_test_client
+    resp = client.get("/client-crm/luma-events/does-not-exist")
+    assert resp.status_code == 404
 
 
 # =====================================================================

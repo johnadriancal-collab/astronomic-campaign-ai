@@ -71,6 +71,43 @@ test("no Luma picker/sync UI exists on the Engagement form -- luma_event_id is n
   assert.doesNotMatch(modal, /Luma/);
 });
 
+// --- Stage 1H-A: real Linked Luma Event section (link only) ----------------
+// The picker deliberately lives on the DETAIL page (this section), not the
+// Add/Engagement form above -- the test right above this one keeps proving
+// that boundary. Link-only: no participant sync/backfill control exists
+// anywhere on this page yet (that's a future, separate stage).
+
+test("a real Linked Luma Event section is present, using the real picker component", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Linked Luma Event/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /LumaEventPicker/);
+});
+
+test("the linked state shows the event's name/date and an explicit Unlink action, not a raw id field", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /lumaEvent\.name/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /formatEngagementDate\(lumaEvent\.start_at\)/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Unlink/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /handleUnlinkLumaEvent/);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /<Input[^>]*luma_event_id/);
+});
+
+test("a stored Luma event URL renders as an Open-in-Luma link", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /Open in Luma/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /lumaEvent\.url/);
+});
+
+test("no hard-delete control or participant-sync control exists for the Luma link", () => {
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /Delete.{0,10}Luma/i);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /Sync Participants/i);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /Backfill/i);
+});
+
+test("the picker component itself is never imported into the Engagement or Participant forms", () => {
+  const engagementModal = readFileSync(new URL("../components/engagement-form-modal.tsx", import.meta.url), "utf-8");
+  const participantModal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.doesNotMatch(engagementModal, /LumaEventPicker/);
+  assert.doesNotMatch(participantModal, /LumaEventPicker/);
+});
+
 test("retired Supernova/Galaxy/Aurora program terminology does not appear anywhere in Client CRM's frontend source (Stage 1E.1)", () => {
   const files = [
     "../lib/client-crm.ts",

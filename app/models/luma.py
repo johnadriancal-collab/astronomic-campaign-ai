@@ -101,6 +101,21 @@ class LumaRegistration(BaseModel):
     updated_at: datetime
 
 
+class LumaEventSummary(BaseModel):
+    """Read-only summary of one LumaEvent for the Client CRM Engagement-
+    linking picker (Stage 1H-A, 2026-09-09) -- deliberately excludes
+    `calendar_id`/`synced_at`/`updated_at`, which that picker has no use
+    for. Same "read-only summary, not the full underlying record"
+    precedent as CrmContactLumaRegistration below."""
+
+    luma_event_id: str
+    name: str
+    start_at: datetime | None = None
+    status: str | None = None
+    location_summary: str | None = None
+    url: str | None = None
+
+
 class CrmContactLumaRegistration(BaseModel):
     """Read-only summary of one LumaRegistration for a CRM contact's Event
     History section (contact detail page). Deliberately excludes

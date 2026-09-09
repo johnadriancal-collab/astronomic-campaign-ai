@@ -272,6 +272,7 @@ async def lifespan(app: FastAPI):
         engagement_store=engagement_store,
         engagement_closeout_store=engagement_closeout_store,
         engagement_participant_store=engagement_participant_store,
+        luma_event_store=luma_event_store,
     )
     crm_service = CrmService(
         contact_store=crm_contact_store,

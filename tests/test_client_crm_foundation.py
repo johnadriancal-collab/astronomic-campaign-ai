@@ -19,6 +19,7 @@ conftest.py, each test file redeclares its own fixtures/helpers).
 
 from datetime import date, datetime, timezone
 
+import aiosqlite
 import pytest
 import pytest_asyncio
 
@@ -53,7 +54,7 @@ from app.repositories.engagement_participant_store import (
     EngagementParticipantNotFoundError,
     MemoryEngagementParticipantStore,
 )
-from app.repositories.engagement_store import EngagementNotFoundError, MemoryEngagementStore
+from app.repositories.engagement_store import EngagementLumaEventAlreadyLinkedError, EngagementNotFoundError, MemoryEngagementStore
 from app.repositories.sqlite_client_contact_store import SQLiteClientContactStore
 from app.repositories.sqlite_client_note_store import SQLiteClientNoteStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
@@ -735,6 +736,197 @@ async def test_sqlite_engagement_save_and_archive(sqlite_engagement_store):
     assert fresh.status == EngagementStatus.CANCELLED
     with pytest.raises(EngagementNotFoundError):
         await store.save(_engagement("e-missing"))
+
+
+# =====================================================================
+# Engagement <-> Luma event link -- Client CRM Stage 1H-A (2026-09-09)
+# =====================================================================
+
+
+async def test_memory_get_by_luma_event_id():
+    store = MemoryEngagementStore()
+    await store.create(_engagement("e1", "c1", luma_event_id="luma-123"))
+    await store.create(_engagement("e2", "c1"))
+
+    found = await store.get_by_luma_event_id("luma-123")
+    assert found.engagement_id == "e1"
+    assert await store.get_by_luma_event_id("does-not-exist") is None
+
+
+async def test_sqlite_get_by_luma_event_id(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1", luma_event_id="luma-123"))
+    await store.create(_engagement("e2", "c1"))
+
+    found = await store.get_by_luma_event_id("luma-123")
+    assert found.engagement_id == "e1"
+    assert await store.get_by_luma_event_id("does-not-exist") is None
+
+
+async def test_memory_store_rejects_a_second_engagement_linked_to_the_same_luma_event():
+    store = MemoryEngagementStore()
+    await store.create(_engagement("e1", "c1", luma_event_id="luma-123"))
+    with pytest.raises(EngagementLumaEventAlreadyLinkedError):
+        await store.create(_engagement("e2", "c1", luma_event_id="luma-123"))
+
+
+async def test_sqlite_store_rejects_a_second_engagement_linked_to_the_same_luma_event(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1", luma_event_id="luma-123"))
+    with pytest.raises(EngagementLumaEventAlreadyLinkedError):
+        await store.create(_engagement("e2", "c1", luma_event_id="luma-123"))
+    # And the rejected write left no trace -- e2 was never persisted.
+    assert await store.get("e2") is None
+
+
+async def test_sqlite_store_rejects_an_update_that_would_create_a_duplicate_luma_link(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1", luma_event_id="luma-123"))
+    await store.create(_engagement("e2", "c1"))
+
+    e2 = (await store.get("e2")).model_copy(update={"luma_event_id": "luma-123"})
+    with pytest.raises(EngagementLumaEventAlreadyLinkedError):
+        await store.save(e2)
+    # And the failed save left e2's own row untouched.
+    assert (await store.get("e2")).luma_event_id is None
+
+
+async def test_sqlite_store_two_null_luma_event_ids_never_conflict(sqlite_engagement_store):
+    """The partial unique index excludes NULL rows entirely -- unlimited
+    unlinked Engagements must coexist, same "NULLs excluded" behavior
+    already proven for EngagementParticipant.crm_contact_id."""
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    await store.create(_engagement("e2", "c1"))  # must not raise
+    assert await store.get("e2") is not None
+
+
+async def test_sqlite_store_archiving_an_engagement_does_not_free_its_luma_link(sqlite_engagement_store):
+    """Archiving an Engagement must not silently free its luma_event_id
+    for a different Engagement to claim -- same "the unique index doesn't
+    distinguish archived from active" convention already established for
+    EngagementParticipant.crm_contact_id."""
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1", luma_event_id="luma-123"))
+    archived = (await store.get("e1")).model_copy(update={"archived": True})
+    await store.save(archived)
+
+    with pytest.raises(EngagementLumaEventAlreadyLinkedError):
+        await store.create(_engagement("e2", "c1", luma_event_id="luma-123"))
+
+
+async def test_sqlite_store_relinking_an_engagement_to_a_new_luma_event_frees_the_old_one(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1", luma_event_id="luma-123"))
+    relinked = (await store.get("e1")).model_copy(update={"luma_event_id": "luma-456"})
+    await store.save(relinked)
+
+    # e1's old luma_event_id is free again for a different Engagement.
+    await store.create(_engagement("e2", "c1", luma_event_id="luma-123"))
+    assert (await store.get("e2")).luma_event_id == "luma-123"
+
+
+async def test_existing_engagements_survive_the_luma_event_id_column_migration(tmp_path):
+    """Requirement: Engagement rows created before luma_event_id existed
+    as a real column on this table (i.e. every row on production today --
+    the field has been reserved-and-unwritten since Stage 1E) must still
+    be readable, and the table still writable, after
+    SQLiteEngagementStore.connect() runs its ALTER TABLE migration --
+    proving the migration is additive, not destructive. Same convention as
+    test_sqlite_lead_store.py's own
+    test_existing_campaign_leads_survive_the_score_column_migration."""
+    db_path = str(tmp_path / "pre_migration.db")
+
+    # Simulate the OLD schema (before this change) with a real row in it,
+    # written with raw SQL exactly like the pre-migration code would have.
+    old_conn = await aiosqlite.connect(db_path)
+    await old_conn.execute(
+        """
+        CREATE TABLE engagements (
+            engagement_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            data TEXT NOT NULL
+        )
+        """
+    )
+    pre_existing = _engagement("pre-existing-engagement", "pre-existing-client")
+    await old_conn.execute(
+        "INSERT INTO engagements (engagement_id, client_id, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)",
+        (
+            pre_existing.engagement_id,
+            pre_existing.client_id,
+            pre_existing.created_at.isoformat(),
+            pre_existing.updated_at.isoformat(),
+            pre_existing.model_dump_json(),
+        ),
+    )
+    await old_conn.commit()
+    await old_conn.close()
+
+    # Now open it through the current store -- this is what happens on the
+    # next app startup against a real, already-populated database.
+    store = SQLiteEngagementStore(db_path)
+    await store.connect()
+
+    surviving = await store.get("pre-existing-engagement")
+    assert surviving is not None
+    assert surviving.luma_event_id is None  # not fabricated -- genuinely never recorded pre-migration
+
+    # The table is still fully writable post-migration, including the new
+    # column and its uniqueness constraint.
+    await store.create(_engagement("new-engagement", "pre-existing-client", luma_event_id="luma-123"))
+    assert (await store.get("new-engagement")).luma_event_id == "luma-123"
+    with pytest.raises(EngagementLumaEventAlreadyLinkedError):
+        await store.create(_engagement("another-new-engagement", "pre-existing-client", luma_event_id="luma-123"))
+    await store.close()
+
+
+async def test_luma_event_id_column_migration_backfills_from_a_pre_existing_json_value(tmp_path):
+    """Belt-and-suspenders: even though every real production row has
+    luma_event_id unset today (see the module-level note above), the
+    backfill itself must be correct for a row that DID happen to have one
+    serialized into its JSON `data` blob before the column existed --
+    proving the migration reads real data, not "safe because it's always
+    empty."""
+    db_path = str(tmp_path / "pre_migration_with_value.db")
+
+    old_conn = await aiosqlite.connect(db_path)
+    await old_conn.execute(
+        """
+        CREATE TABLE engagements (
+            engagement_id TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            data TEXT NOT NULL
+        )
+        """
+    )
+    pre_existing = _engagement("pre-existing-engagement", "pre-existing-client", luma_event_id="already-linked-in-json")
+    await old_conn.execute(
+        "INSERT INTO engagements (engagement_id, client_id, created_at, updated_at, data) VALUES (?, ?, ?, ?, ?)",
+        (
+            pre_existing.engagement_id,
+            pre_existing.client_id,
+            pre_existing.created_at.isoformat(),
+            pre_existing.updated_at.isoformat(),
+            pre_existing.model_dump_json(),
+        ),
+    )
+    await old_conn.commit()
+    await old_conn.close()
+
+    store = SQLiteEngagementStore(db_path)
+    await store.connect()
+
+    assert (await store.get_by_luma_event_id("already-linked-in-json")).engagement_id == "pre-existing-engagement"
+    # And the backfilled uniqueness constraint is live -- a second
+    # Engagement can't claim the same (now-backfilled) luma_event_id.
+    with pytest.raises(EngagementLumaEventAlreadyLinkedError):
+        await store.create(_engagement("new-engagement", "pre-existing-client", luma_event_id="already-linked-in-json"))
+    await store.close()
 
 
 # =====================================================================

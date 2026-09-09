@@ -55,6 +55,7 @@ from app.models.client_crm import (
     EngagementParticipant,
     ParticipantSource,
 )
+from app.models.luma import LumaEventSummary
 from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
 from app.repositories.crm_contact_store import CrmContactStore
@@ -63,7 +64,8 @@ from app.repositories.engagement_participant_store import (
     EngagementParticipantDuplicateError,
     EngagementParticipantStore,
 )
-from app.repositories.engagement_store import EngagementStore
+from app.repositories.engagement_store import EngagementLumaEventAlreadyLinkedError, EngagementStore
+from app.repositories.luma_event_store import LumaEventStore
 from app.services.activity_log_service import ActivityLogService
 
 SORTABLE_CLIENT_FIELDS = frozenset({"name", "created_at", "updated_at", "next_action_due"})
@@ -158,6 +160,29 @@ class EngagementParticipantDuplicate(Exception):
         super().__init__(f"crm_contact_id {crm_contact_id} is already an active participant of Engagement {engagement_id}.")
 
 
+class EngagementLumaEventAlreadyLinked(Exception):
+    """Raised when linking an Engagement to a luma_event_id that's already
+    an active link on a DIFFERENT Engagement -- mapped to a clean 409 at
+    the API layer rather than a raw SQLite integrity error ever reaching a
+    caller. Client CRM Stage 1H-A's approved product decision: one Luma
+    event may be linked to at most one Engagement."""
+
+    def __init__(self, luma_event_id: str):
+        self.luma_event_id = luma_event_id
+        super().__init__(f"luma_event_id {luma_event_id} is already linked to another Engagement.")
+
+
+class LumaEventNotFound(Exception):
+    """Raised by get_luma_event() for a luma_event_id with no stored
+    LumaEvent -- mapped to a plain 404 at the API layer. Distinct from
+    ValueError (the create/update-Engagement "doesn't exist" case) since
+    this is a direct single-record lookup, not a field validation."""
+
+    def __init__(self, luma_event_id: str):
+        self.luma_event_id = luma_event_id
+        super().__init__(f"Luma event not found: {luma_event_id}")
+
+
 class ClientCrmService:
     def __init__(
         self,
@@ -169,6 +194,7 @@ class ClientCrmService:
         engagement_store: EngagementStore,
         engagement_closeout_store: EngagementCloseoutStore,
         engagement_participant_store: EngagementParticipantStore,
+        luma_event_store: LumaEventStore,
     ):
         self.client_store = client_store
         self.activity_log = activity_log
@@ -177,6 +203,7 @@ class ClientCrmService:
         self.engagement_store = engagement_store
         self.engagement_closeout_store = engagement_closeout_store
         self.engagement_participant_store = engagement_participant_store
+        self.luma_event_store = luma_event_store
 
     async def _require_client(self, client_id: str) -> Client:
         client = await self.client_store.get(client_id)
@@ -503,16 +530,55 @@ class ClientCrmService:
         await self._require_client(client_id)
         return await self.engagement_store.list_for_client(client_id)
 
+    async def _validated_luma_event_id(self, luma_event_id: Any) -> str | None:
+        """Stage 1H-A: `None`/blank means "no link" and passes through
+        unchanged. A non-blank value must refer to an already-stored
+        LumaEvent -- never a raw, unverified id persisted on trust (this
+        is the "read our own store, no Luma API call" validation the
+        Engagement-linking picker relies on)."""
+        if luma_event_id is None:
+            return None
+        luma_event_id = str(luma_event_id).strip()
+        if not luma_event_id:
+            return None
+        event = await self.luma_event_store.get(luma_event_id)
+        if event is None:
+            raise ValueError("luma_event_id does not refer to a stored Luma event.")
+        return luma_event_id
+
+    async def _check_luma_event_not_linked_elsewhere(
+        self, luma_event_id: str | None, *, exclude_engagement_id: str | None
+    ) -> None:
+        """Service-layer pre-check -- the fast, friendly-error path (a
+        clean 409 before any write is attempted). The real guarantee is
+        the DB's own partial unique index (see sqlite_engagement_store.py
+        -- one Luma event links to at most one Engagement, Stage 1H-A's
+        approved product decision); a race that slips past this pre-check
+        is still caught there, surfaced as the same
+        EngagementLumaEventAlreadyLinked via the store's
+        EngagementLumaEventAlreadyLinkedError (see create_client_engagement/
+        update_client_engagement below)."""
+        if luma_event_id is None:
+            return
+        existing = await self.engagement_store.get_by_luma_event_id(luma_event_id)
+        if existing is not None and existing.engagement_id != exclude_engagement_id:
+            raise EngagementLumaEventAlreadyLinked(luma_event_id)
+
     async def create_client_engagement(self, client_id: str, fields: dict[str, Any]) -> Engagement:
         """`fields` is assumed already validated/shaped by the API layer's
         own EngagementCreateRequest (enum values, field types). No
         canonical-record linking happens here (unlike ClientContact) --
-        every field is either user-supplied or server-defaulted."""
+        every field is either user-supplied or server-defaulted, except
+        `luma_event_id` (Stage 1H-A), which IS validated against the
+        stored luma_events -- see _validated_luma_event_id()'s own
+        docstring."""
         await self._require_client(client_id)
         fields = _strip_server_owned_fields(fields)
         title = (fields.get("title") or "").strip()
         if not title:
             raise ValueError("Engagement title is required.")
+        luma_event_id = await self._validated_luma_event_id(fields.get("luma_event_id"))
+        await self._check_luma_event_not_linked_elsewhere(luma_event_id, exclude_engagement_id=None)
 
         now = datetime.now(timezone.utc)
         engagement = Engagement(
@@ -520,12 +586,15 @@ class ClientCrmService:
             client_id=client_id,
             created_at=now,
             updated_at=now,
-            **{**fields, "title": title},
+            **{**fields, "title": title, "luma_event_id": luma_event_id},
         )
         engagement = engagement.model_copy(
             update={"dinner_type": self._normalize_dinner_type(engagement.engagement_type, engagement.dinner_type)}
         )
-        await self.engagement_store.create(engagement)
+        try:
+            await self.engagement_store.create(engagement)
+        except EngagementLumaEventAlreadyLinkedError as exc:
+            raise EngagementLumaEventAlreadyLinked(exc.luma_event_id) from exc
         await self.activity_log.record(
             event_type="engagement.created",
             category=ActivityCategory.CLIENT_CRM,
@@ -547,7 +616,11 @@ class ClientCrmService:
         `patch` first; `updated_at` is always server-set to now. Archive/
         restore is not a separate method -- both are just
         update_client_engagement(id, {"archived": True/False}), same
-        convention as Client/ClientContact."""
+        convention as Client/ClientContact. `luma_event_id` (Stage 1H-A)
+        is the one field here that both links AND unlinks -- sending it as
+        `null` clears the link (no separate unlink method), same "a patch
+        applies whatever was actually sent" convention as every other
+        field."""
         engagement = await self._require_engagement(client_id, engagement_id)
         patch = _strip_server_owned_fields(patch)
         if "title" in patch:
@@ -555,14 +628,62 @@ class ClientCrmService:
             if not stripped:
                 raise ValueError("Engagement title cannot be blank.")
             patch = {**patch, "title": stripped}
+        if "luma_event_id" in patch:
+            luma_event_id = await self._validated_luma_event_id(patch.get("luma_event_id"))
+            await self._check_luma_event_not_linked_elsewhere(luma_event_id, exclude_engagement_id=engagement_id)
+            patch = {**patch, "luma_event_id": luma_event_id}
 
         updated = engagement.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
         updated = updated.model_copy(
             update={"dinner_type": self._normalize_dinner_type(updated.engagement_type, updated.dinner_type)}
         )
-        await self.engagement_store.save(updated)
+        try:
+            await self.engagement_store.save(updated)
+        except EngagementLumaEventAlreadyLinkedError as exc:
+            raise EngagementLumaEventAlreadyLinked(exc.luma_event_id) from exc
         await self._record_engagement_update_activity(engagement, updated)
         return updated
+
+    @staticmethod
+    def _luma_event_summary(event: Any) -> LumaEventSummary:
+        return LumaEventSummary(
+            luma_event_id=event.luma_event_id,
+            name=event.name,
+            start_at=event.start_at,
+            status=event.status,
+            location_summary=event.location_summary,
+            url=event.url,
+        )
+
+    async def list_luma_events(self, q: str | None = None) -> list[LumaEventSummary]:
+        """Read-only listing of persisted LumaEvent records for the
+        Engagement-linking picker (Stage 1H-A) -- reads ONLY what's
+        already stored via the live webhook/backfill, never calls Luma's
+        own API. Ordered most-recent/upcoming-first (start_at descending;
+        events with no start_at sort last) -- the events most useful to
+        pick from for a new or recent Engagement link. `q`, when given, is
+        a case-insensitive substring match against `name` only."""
+        events = await self.luma_event_store.list()
+        needle = (q or "").strip().lower()
+        if needle:
+            events = [e for e in events if needle in e.name.lower()]
+
+        with_start = [e for e in events if e.start_at is not None]
+        without_start = [e for e in events if e.start_at is None]
+        with_start.sort(key=lambda e: e.start_at, reverse=True)
+        ordered = with_start + without_start
+        return [self._luma_event_summary(e) for e in ordered]
+
+    async def get_luma_event(self, luma_event_id: str) -> LumaEventSummary:
+        """Single-record counterpart to list_luma_events() -- the
+        Engagement detail page's own "show the linked event's name/date"
+        need (Stage 1H-A). Same read-only, stored-data-only contract;
+        raises LumaEventNotFound (-> 404) if nothing is stored under this
+        id."""
+        event = await self.luma_event_store.get(luma_event_id)
+        if event is None:
+            raise LumaEventNotFound(luma_event_id)
+        return self._luma_event_summary(event)
 
     async def _record_engagement_update_activity(self, before: Engagement, after: Engagement) -> None:
         """Distinguishes archive/restore from a plain edit by diffing the

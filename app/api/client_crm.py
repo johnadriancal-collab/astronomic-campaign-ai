@@ -51,15 +51,18 @@ from app.models.client_crm import (
     ParticipantRole,
     ParticipantRsvpStatus,
 )
+from app.models.luma import LumaEventSummary
 from app.services.client_crm_service import (
     ClientContactNotFound,
     ClientCrmService,
     ClientNotFound,
     EngagementCloseoutAlreadyExists,
     EngagementCloseoutNotFound,
+    EngagementLumaEventAlreadyLinked,
     EngagementNotFound,
     EngagementParticipantDuplicate,
     EngagementParticipantNotFound,
+    LumaEventNotFound,
 )
 
 router = APIRouter(prefix="/client-crm", tags=["client-crm"])
@@ -125,10 +128,12 @@ class EngagementCreateRequest(BaseModel):
     is only ever meaningful when `engagement_type == DINNER` -- the
     service layer is the authoritative enforcement of that (forces it to
     None otherwise), this request model just accepts whatever the caller
-    sends. `luma_event_id` is accepted here (reference-only, "expose the
-    reference appropriately" per Stage 1E's own approved scope) but is
-    deliberately NOT exposed in the frontend Add/Engagement form yet -- no
-    Luma picker/sync/auto-create is part of Client CRM yet."""
+    sends. `luma_event_id` is accepted here (validated against stored
+    luma_events, Stage 1H-A) but is deliberately NOT exposed on the
+    Add/Engagement form -- Stage 1H-A's own linking UI lives as a
+    dedicated section on the Engagement detail page instead (PATCH via
+    EngagementUpdateRequest below), not this create form. No participant
+    sync/auto-create from Luma exists yet -- link-only."""
 
     title: str
     engagement_type: EngagementType
@@ -142,7 +147,8 @@ class EngagementCreateRequest(BaseModel):
     contract_url: str | None = None
     signed_date: date | None = None
     payment_status: EngagementPaymentStatus = EngagementPaymentStatus.UNPAID
-    luma_event_id: str | None = None
+    luma_event_id: str | None = None  # validated against stored luma_events, see
+    # ClientCrmService._validated_luma_event_id() -- Stage 1H-A
 
 
 class EngagementUpdateRequest(BaseModel):
@@ -382,10 +388,16 @@ async def list_client_engagements(client_id: str, service: ClientCrmService = De
 async def create_client_engagement(
     client_id: str, payload: EngagementCreateRequest, service: ClientCrmService = Depends(get_client_crm_service)
 ):
+    """400 if `luma_event_id` is set but doesn't refer to a stored Luma
+    event. 409 if it refers to one already linked to a DIFFERENT
+    Engagement (Stage 1H-A: one Luma event links to at most one
+    Engagement)."""
     try:
         return await service.create_client_engagement(client_id, payload.model_dump())
     except ClientNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except EngagementLumaEventAlreadyLinked as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -408,13 +420,41 @@ async def update_client_engagement(
     service: ClientCrmService = Depends(get_client_crm_service),
 ):
     """`exclude_unset=True` is what makes this a genuine partial PATCH --
-    same convention as update_client()/update_client_contact()."""
+    same convention as update_client()/update_client_contact(). Sending
+    `luma_event_id` links (or, sent as `null`, unlinks) this Engagement's
+    Luma event -- see EngagementUpdateRequest's own docstring. 400 if the
+    given id doesn't refer to a stored Luma event; 409 if it's already
+    linked to a DIFFERENT Engagement (Stage 1H-A: one Luma event links to
+    at most one Engagement)."""
     try:
         return await service.update_client_engagement(client_id, engagement_id, payload.model_dump(exclude_unset=True))
     except (ClientNotFound, EngagementNotFound) as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except EngagementLumaEventAlreadyLinked as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/luma-events", response_model=list[LumaEventSummary])
+async def list_luma_events(q: str | None = None, service: ClientCrmService = Depends(get_client_crm_service)):
+    """Read-only listing of persisted Luma events for the Engagement-
+    linking picker (Stage 1H-A) -- see ClientCrmService.list_luma_events()'s
+    own docstring. Reads only what's already stored via the live Luma
+    webhook/backfill; makes no Luma API call itself. `q`, when given,
+    filters by a case-insensitive substring match against the event name."""
+    return await service.list_luma_events(q=q)
+
+
+@router.get("/luma-events/{luma_event_id}", response_model=LumaEventSummary)
+async def get_luma_event(luma_event_id: str, service: ClientCrmService = Depends(get_client_crm_service)):
+    """Single-record counterpart to list_luma_events() -- the Engagement
+    detail page's own "show the linked event's name/date" need. 404 if
+    nothing is stored under this id."""
+    try:
+        return await service.get_luma_event(luma_event_id)
+    except LumaEventNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/clients/{client_id}/engagements/{engagement_id}/closeout", response_model=EngagementCloseout)

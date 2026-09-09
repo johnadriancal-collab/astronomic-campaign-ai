@@ -8,14 +8,17 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ExternalLink } from "lucide-react";
 import { EngagementFormModal } from "@/components/engagement-form-modal";
 import { EngagementCloseoutFormModal } from "@/components/engagement-closeout-form-modal";
 import { EngagementParticipantFormModal } from "@/components/engagement-participant-form-modal";
+import { LumaEventPicker } from "@/components/luma-event-picker";
 import {
   ApiError,
   getClient,
   getClientEngagement,
   getEngagementCloseout,
+  getLumaEvent,
   listEngagementParticipants,
   updateClientEngagement,
   updateEngagementCloseout,
@@ -24,6 +27,7 @@ import {
   type Engagement,
   type EngagementCloseout,
   type EngagementParticipant,
+  type LumaEventSummary,
 } from "@/lib/api";
 import {
   dinnerTypeLabel,
@@ -44,14 +48,17 @@ import { cn } from "@/lib/utils";
 // Stage 1E: Overview + Commercial; Stage 1F adds a real Closeout section
 // now that EngagementCloseout actually exists; Stage 1G adds a real
 // Participants section now that EngagementParticipant actually exists
-// (see each stage's own STOP report). Still deliberately NOT a tabbed
-// page with other empty/fake sections (staged relationship follow-ups,
-// notes/activity) -- only Overview, Commercial, Closeout, and
-// Participants have any real, backend-supported data behind them today.
-// Nothing about turnout, guest quality, or outcomes is fabricated
-// anywhere on this page -- a Closeout only ever renders once one has
-// actually been recorded, and Participant-derived counts are never used
-// to auto-fill Closeout's own separate aggregate fields.
+// (see each stage's own STOP report). Stage 1H-A adds a real Linked Luma
+// Event section -- link-only: no EngagementParticipant is ever created,
+// updated, or historically imported from Luma here (that's a future,
+// separate, dedicated sync stage). Still deliberately NOT a tabbed page with other
+// empty/fake sections (staged relationship follow-ups, notes/activity) --
+// only Overview, Linked Luma Event, Commercial, Closeout, and Participants
+// have any real, backend-supported data behind them today. Nothing about
+// turnout, guest quality, or outcomes is fabricated anywhere on this page
+// -- a Closeout only ever renders once one has actually been recorded,
+// and Participant-derived counts are never used to auto-fill Closeout's
+// own separate aggregate fields.
 export default function EngagementDetailPage() {
   const params = useParams<{ id: string; engagementId: string }>();
   const clientId = params.id;
@@ -80,6 +87,16 @@ export default function EngagementDetailPage() {
   const [editingParticipant, setEditingParticipant] = useState<EngagementParticipant | null>(null);
   const [busyParticipantId, setBusyParticipantId] = useState<string | null>(null);
   const [participantActionError, setParticipantActionError] = useState<string | null>(null);
+
+  // Client CRM Stage 1H-A -- Luma <-> Engagement link. undefined = still
+  // resolving; null = confirmed unlinked; an object = the linked Luma
+  // event's read-only summary (fetched separately, since Engagement only
+  // stores the bare luma_event_id). Link-only: no participant sync exists
+  // yet, so linking/unlinking never touches Participants above.
+  const [lumaEvent, setLumaEvent] = useState<LumaEventSummary | null | undefined>(undefined);
+  const [lumaEventError, setLumaEventError] = useState<string | null>(null);
+  const [savingLumaLink, setSavingLumaLink] = useState(false);
+  const [lumaLinkError, setLumaLinkError] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -134,6 +151,32 @@ export default function EngagementDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId, engagementId]);
 
+  useEffect(() => {
+    if (engagement === null) return;
+    if (!engagement.luma_event_id) {
+      setLumaEvent(null);
+      setLumaEventError(null);
+      return;
+    }
+    let cancelled = false;
+    setLumaEvent(undefined);
+    setLumaEventError(null);
+    getLumaEvent(engagement.luma_event_id)
+      .then((event) => {
+        if (!cancelled) setLumaEvent(event);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setLumaEventError(
+          err instanceof ApiError ? `Couldn't load the linked Luma event (${err.status}): ${err.message}` : "Couldn't reach the backend."
+        );
+        setLumaEvent(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [engagement]);
+
   async function handleArchiveCloseoutToggle() {
     if (!closeout) return;
     const nextArchived = !closeout.archived;
@@ -180,6 +223,40 @@ export default function EngagementDetailPage() {
       const exists = prev.some((p) => p.participant_id === saved.participant_id);
       return exists ? prev.map((p) => (p.participant_id === saved.participant_id ? saved : p)) : [...prev, saved];
     });
+  }
+
+  async function handleLinkLumaEvent(event: LumaEventSummary) {
+    if (!engagement) return;
+    setSavingLumaLink(true);
+    setLumaLinkError(null);
+    try {
+      const saved = await updateClientEngagement(clientId, engagement.engagement_id, { luma_event_id: event.luma_event_id });
+      setEngagement(saved);
+      setLumaEvent(event);
+    } catch (err) {
+      setLumaLinkError(
+        err instanceof ApiError ? `Couldn't link this Luma event (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    } finally {
+      setSavingLumaLink(false);
+    }
+  }
+
+  async function handleUnlinkLumaEvent() {
+    if (!engagement) return;
+    setSavingLumaLink(true);
+    setLumaLinkError(null);
+    try {
+      const saved = await updateClientEngagement(clientId, engagement.engagement_id, { luma_event_id: null });
+      setEngagement(saved);
+      setLumaEvent(null);
+    } catch (err) {
+      setLumaLinkError(
+        err instanceof ApiError ? `Couldn't unlink this Luma event (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    } finally {
+      setSavingLumaLink(false);
+    }
   }
 
   async function handleArchiveToggle() {
@@ -304,6 +381,56 @@ export default function EngagementDetailPage() {
             <OverviewField label="Date" value={formatEngagementDate(engagement.engagement_date)} />
             <OverviewField label="Location" value={engagement.location || "—"} />
             <OverviewField label="Owner" value={engagement.owner || "—"} />
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Linked Luma Event</CardTitle>
+          </CardHeader>
+          <CardContent>
+            {lumaEventError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{lumaEventError}</AlertDescription>
+              </Alert>
+            )}
+            {lumaLinkError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{lumaLinkError}</AlertDescription>
+              </Alert>
+            )}
+
+            {lumaEvent === undefined && !lumaEventError && <p className="text-sm text-muted-foreground">Loading…</p>}
+
+            {lumaEvent === null && (
+              <LumaEventPicker selected={null} onSelect={(event) => event && handleLinkLumaEvent(event)} />
+            )}
+
+            {lumaEvent && (
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="font-medium">{lumaEvent.name}</p>
+                  <p className="text-xs text-muted-foreground">
+                    {formatEngagementDate(lumaEvent.start_at)}
+                    {lumaEvent.location_summary ? ` · ${lumaEvent.location_summary}` : ""}
+                  </p>
+                  {lumaEvent.url && (
+                    <a
+                      href={lumaEvent.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1 inline-flex items-center gap-1 text-xs text-foreground hover:underline"
+                    >
+                      Open in Luma
+                      <ExternalLink className="h-3 w-3" />
+                    </a>
+                  )}
+                </div>
+                <Button size="sm" variant="outline" disabled={savingLumaLink} onClick={handleUnlinkLumaEvent}>
+                  {savingLumaLink ? "Saving..." : "Unlink"}
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
 

@@ -1,5 +1,9 @@
 """
-Storage abstraction for Engagement (Client CRM Stage 1A, 2026-09-07).
+Storage abstraction for Engagement (Client CRM Stage 1A, 2026-09-07),
+extended in Stage 1H-A (2026-09-09) with get_by_luma_event_id() and the
+at-most-one-Engagement-per-luma_event_id invariant (the approved product
+decision for the Luma <-> Engagement link: one Luma event links to at most
+one Engagement).
 
 No `delete()` -- same approved archive/soft-delete-only design as
 ClientStore (see that module's own docstring); removal is always
@@ -17,11 +21,26 @@ class EngagementNotFoundError(Exception):
         super().__init__(f"Engagement not found: {engagement_id}")
 
 
+class EngagementLumaEventAlreadyLinkedError(Exception):
+    """Raised by create()/save() when the write would leave two Engagements
+    linked to the same non-null luma_event_id -- Stage 1H-A's approved
+    product decision, enforced by a real SQLite partial unique index (see
+    sqlite_engagement_store.py), not only a service-layer pre-check, so it
+    holds even under concurrent requests -- same pattern as
+    EngagementParticipantDuplicateError."""
+
+    def __init__(self, luma_event_id: str):
+        self.luma_event_id = luma_event_id
+        super().__init__(f"luma_event_id {luma_event_id} is already linked to another Engagement.")
+
+
 class EngagementStore(ABC):
     @abstractmethod
     async def create(self, engagement: Engagement) -> None:
         """Persist a newly-created Engagement. engagement_id is assumed
-        unique (minted by the caller, e.g. uuid4)."""
+        unique (minted by the caller, e.g. uuid4). Raises
+        EngagementLumaEventAlreadyLinkedError if `engagement.luma_event_id`
+        is not None and already linked to a DIFFERENT Engagement."""
 
     @abstractmethod
     async def get(self, engagement_id: str) -> Engagement | None:
@@ -30,8 +49,10 @@ class EngagementStore(ABC):
     @abstractmethod
     async def save(self, engagement: Engagement) -> None:
         """Persist mutations to an existing Engagement, including
-        archiving it. Raises EngagementNotFoundError if engagement_id
-        doesn't exist."""
+        archiving it or linking/unlinking its luma_event_id. Raises
+        EngagementNotFoundError if engagement_id doesn't exist, or
+        EngagementLumaEventAlreadyLinkedError if the new luma_event_id is
+        already linked to a DIFFERENT Engagement."""
 
     @abstractmethod
     async def list_for_client(self, client_id: str) -> list[Engagement]:
@@ -43,6 +64,12 @@ class EngagementStore(ABC):
         exists yet for those -- no concrete cross-client query needs
         them today)."""
 
+    @abstractmethod
+    async def get_by_luma_event_id(self, luma_event_id: str) -> Engagement | None:
+        """Returns the Engagement currently linked to this Luma event, or
+        None if none is -- Stage 1H-A's own lookup direction (Luma event ->
+        Engagement), the one a future registration-sync stage will need."""
+
 
 class MemoryEngagementStore(EngagementStore):
     """Dict-backed, keyed by engagement_id -- not persistent, for tests/local dev."""
@@ -50,7 +77,16 @@ class MemoryEngagementStore(EngagementStore):
     def __init__(self):
         self._rows: dict[str, Engagement] = {}
 
+    def _linked_elsewhere(self, luma_event_id: str | None, exclude_engagement_id: str | None) -> bool:
+        if luma_event_id is None:
+            return False
+        return any(
+            e.luma_event_id == luma_event_id and e.engagement_id != exclude_engagement_id for e in self._rows.values()
+        )
+
     async def create(self, engagement: Engagement) -> None:
+        if self._linked_elsewhere(engagement.luma_event_id, exclude_engagement_id=None):
+            raise EngagementLumaEventAlreadyLinkedError(engagement.luma_event_id)
         self._rows[engagement.engagement_id] = engagement
 
     async def get(self, engagement_id: str) -> Engagement | None:
@@ -59,8 +95,16 @@ class MemoryEngagementStore(EngagementStore):
     async def save(self, engagement: Engagement) -> None:
         if engagement.engagement_id not in self._rows:
             raise EngagementNotFoundError(engagement.engagement_id)
+        if self._linked_elsewhere(engagement.luma_event_id, exclude_engagement_id=engagement.engagement_id):
+            raise EngagementLumaEventAlreadyLinkedError(engagement.luma_event_id)
         self._rows[engagement.engagement_id] = engagement
 
     async def list_for_client(self, client_id: str) -> list[Engagement]:
         rows = [e for e in self._rows.values() if e.client_id == client_id]
         return sorted(rows, key=lambda e: e.created_at)
+
+    async def get_by_luma_event_id(self, luma_event_id: str) -> Engagement | None:
+        for e in self._rows.values():
+            if e.luma_event_id == luma_event_id:
+                return e
+        return None

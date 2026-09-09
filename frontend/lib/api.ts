@@ -1912,7 +1912,40 @@ export interface EngagementCreateInput {
   payment_status?: EngagementPaymentStatus;
 }
 
-export type EngagementUpdateInput = Partial<EngagementCreateInput> & { archived?: boolean };
+export type EngagementUpdateInput = Partial<EngagementCreateInput> & {
+  archived?: boolean;
+  // Stage 1H-A: link (a stored luma_event_id) or unlink (null) this
+  // Engagement's Luma event. Deliberately absent from EngagementCreateInput --
+  // the linking UI lives on the Engagement detail page (see
+  // components/luma-event-picker.tsx), not the Add/Engagement form.
+  luma_event_id?: string | null;
+};
+
+// One persisted Luma event, as returned by the Engagement-linking picker's
+// own read-only listing (Stage 1H-A) -- see app/models/luma.py's own
+// LumaEventSummary docstring for why this is a slim summary, not the full
+// underlying LumaEvent.
+export interface LumaEventSummary {
+  luma_event_id: string;
+  name: string;
+  start_at: string | null;
+  status: string | null;
+  location_summary: string | null;
+  url: string | null;
+}
+
+/** Reads ONLY what's already stored via the live Luma webhook/backfill --
+ * never calls Luma's own API. `q`, when given, filters by a
+ * case-insensitive substring match against the event name. */
+export function listLumaEvents(q?: string): Promise<LumaEventSummary[]> {
+  const query = q?.trim() ? `?q=${encodeURIComponent(q.trim())}` : "";
+  return request<LumaEventSummary[]>(`/client-crm/luma-events${query}`);
+}
+
+/** 404 (surfaced as an ApiError) means nothing is stored under this id. */
+export function getLumaEvent(lumaEventId: string): Promise<LumaEventSummary> {
+  return request<LumaEventSummary>(`/client-crm/luma-events/${lumaEventId}`);
+}
 
 export function listClientEngagements(clientId: string): Promise<Engagement[]> {
   return request<Engagement[]>(`/client-crm/clients/${clientId}/engagements`);
