@@ -46,7 +46,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, get_args, get_origin
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, computed_field, field_validator
 
 # Shared option lists -- Section 2 (private) and Section 3 (institutional)
 # of the real form ask these seven questions with IDENTICAL choices, so one
@@ -512,8 +512,44 @@ class CrmContact(BaseModel):
     thesis_dietary_preferences_other: str | None = None  # free-text overflow for unrecognized values
     thesis_referral_emails: str | None = None  # Q25, raw text (not split/parsed)
 
+    # --- Profile Photos (Stage 1, 2026-09-09) ---
+    # profile_photo_key: the object-storage key (e.g. Cloudflare R2) of
+    # this Contact's canonical, normalized 512x512 avatar -- never a full
+    # URL. See app/services/profile_photo_service.py for the upload/
+    # replace pipeline and overwrite-precedence rules (manual upload,
+    # LinkedIn/Apollo/CSV-import enrichment). Deliberately NOT a URL: the
+    # storage provider/CDN domain can change later (or Cloudflare R2 could
+    # be swapped for a different provider entirely) without ever having to
+    # backfill every stored Contact -- profile_photo_url below is always
+    # DERIVED from this key plus the CURRENT settings.profile_photo_cdn_base_url,
+    # never persisted itself. Provenance (source/source_url/updated_at)
+    # lives at custom_fields["field_provenance"]["profile_photo"], the
+    # same mechanism Luma Company/Title enrichment already uses for its
+    # own fields -- reused, not duplicated.
+    profile_photo_key: str | None = None
+
     # --- Group 3: custom fields ---
     custom_fields: dict[str, Any] = Field(default_factory=dict)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def profile_photo_url(self) -> str | None:
+        """Computed, never stored -- see profile_photo_key's own
+        docstring for why. Round-trips safely through this model's own
+        model_dump_json()/model_validate_json() persistence (verified: an
+        extra "profile_photo_url" key in stored JSON is silently ignored
+        on load, since this model's default `extra="ignore"` behavior
+        applies and the property is recomputed fresh every time
+        regardless of what was in the persisted blob)."""
+        if not self.profile_photo_key:
+            return None
+        from app.config import settings  # deferred: avoids this models module taking a
+        # module-level dependency on app config, matching every other model file here.
+
+        base = (settings.profile_photo_cdn_base_url or "").rstrip("/")
+        if not base:
+            return None  # unconfigured (e.g. local dev, or before Stage 2's infra exists) -- never a broken URL
+        return f"{base}/{self.profile_photo_key}"
 
     @field_validator("thesis_dietary_preferences", mode="before")
     @classmethod

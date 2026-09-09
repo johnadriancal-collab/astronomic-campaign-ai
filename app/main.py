@@ -137,7 +137,9 @@ from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mail_trigger_service import MailTriggerService
 from app.services.mailbox_service import MailboxService
+from app.services.profile_photo_service import ProfilePhotoService
 from app.services.worker_lease_service import WorkerLeaseService
+from app.storage.r2_object_storage_client import R2ObjectStorageClient
 
 
 @asynccontextmanager
@@ -278,6 +280,7 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
     )
     app.state.crm_service = crm_service
+    app.state.profile_photo_service = ProfilePhotoService(crm_service=crm_service, storage_client=R2ObjectStorageClient())
     crm_import_service = CrmImportService(crm_service=crm_service, batch_store=crm_import_batch_store)
     app.state.crm_import_service = crm_import_service
 

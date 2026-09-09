@@ -36,6 +36,7 @@ from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mail_trigger_service import MailTriggerService
 from app.services.mailbox_service import MailboxService
+from app.services.profile_photo_service import ProfilePhotoService
 
 
 async def get_campaign_service(request: Request) -> CampaignService:
@@ -64,6 +65,10 @@ async def get_crm_service(request: Request) -> CrmService:
 
 async def get_client_crm_service(request: Request) -> ClientCrmService:
     return request.app.state.client_crm_service
+
+
+async def get_profile_photo_service(request: Request) -> ProfilePhotoService:
+    return request.app.state.profile_photo_service
 
 
 async def get_crm_import_service(request: Request) -> CrmImportService:

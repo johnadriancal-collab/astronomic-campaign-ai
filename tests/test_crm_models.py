@@ -348,3 +348,69 @@ def test_custom_field_definition_supports_all_seven_required_types():
     assert {t.value for t in CustomFieldType} == {
         "text", "long_text", "number", "date", "boolean", "single_select", "multi_select",
     }
+
+
+# --- profile_photo_url URL-joining (2026-09-09 deployment-readiness audit) --
+#
+# Confirms CrmContact.profile_photo_url never produces a double slash (or a
+# missing one) regardless of whether PROFILE_PHOTO_CDN_BASE_URL is
+# configured with or without a trailing slash -- both must resolve to the
+# EXACT SAME URL. Uses Astronomic's actual intended production domain
+# (photos.astronomicconnect.com) rather than a placeholder, per the audit
+# that added these.
+
+
+def _make_contact_with_photo_key(key: str = "avatars/11111111-1111-1111-1111-111111111111.jpg") -> CrmContact:
+    now = datetime.now(timezone.utc)
+    return CrmContact(crm_contact_id="c1", created_at=now, updated_at=now, profile_photo_key=key)
+
+
+def test_profile_photo_url_with_no_trailing_slash_on_the_base_url(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", "https://photos.astronomicconnect.com")
+    contact = _make_contact_with_photo_key()
+    assert contact.profile_photo_url == (
+        "https://photos.astronomicconnect.com/avatars/11111111-1111-1111-1111-111111111111.jpg"
+    )
+
+
+def test_profile_photo_url_with_a_trailing_slash_on_the_base_url_resolves_identically(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", "https://photos.astronomicconnect.com/")
+    contact = _make_contact_with_photo_key()
+    assert contact.profile_photo_url == (
+        "https://photos.astronomicconnect.com/avatars/11111111-1111-1111-1111-111111111111.jpg"
+    )
+    assert "//avatars" not in contact.profile_photo_url  # no double slash
+
+
+def test_profile_photo_url_with_multiple_trailing_slashes_still_resolves_correctly(monkeypatch):
+    """Defensive: even a base URL with more than one accidental trailing
+    slash (e.g. a copy-paste mistake in the Railway variable) still
+    produces a single, correct join -- rstrip("/") removes all of them."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", "https://photos.astronomicconnect.com///")
+    contact = _make_contact_with_photo_key()
+    assert contact.profile_photo_url == (
+        "https://photos.astronomicconnect.com/avatars/11111111-1111-1111-1111-111111111111.jpg"
+    )
+
+
+def test_profile_photo_url_is_none_when_no_cdn_base_url_is_configured(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", None)
+    contact = _make_contact_with_photo_key()
+    assert contact.profile_photo_url is None
+
+
+def test_profile_photo_url_is_none_when_contact_has_no_photo_key_regardless_of_cdn_config(monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", "https://photos.astronomicconnect.com")
+    now = datetime.now(timezone.utc)
+    contact = CrmContact(crm_contact_id="c1", created_at=now, updated_at=now)
+    assert contact.profile_photo_url is None

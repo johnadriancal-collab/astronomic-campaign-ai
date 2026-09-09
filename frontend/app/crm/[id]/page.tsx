@@ -12,6 +12,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { AddToListPanel } from "@/components/add-to-list-panel";
+import { ContactAvatar } from "@/components/contact-avatar";
 import {
   ApiError,
   archiveCrmContact,
@@ -452,14 +453,17 @@ export default function CrmContactDetailPage() {
       </button>
 
       <div className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <h1 className="font-serif text-2xl font-medium tracking-tight">{name}</h1>
-            {contact.archived && <Badge variant="outline">Archived</Badge>}
+        <div className="flex items-start gap-4">
+          <ContactAvatar contact={contact} onUploaded={setContact} />
+          <div>
+            <div className="flex items-center gap-2">
+              <h1 className="font-serif text-2xl font-medium tracking-tight">{name}</h1>
+              {contact.archived && <Badge variant="outline">Archived</Badge>}
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {[contact.title, contact.company].filter(Boolean).join(" @ ")}
+            </p>
           </div>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {[contact.title, contact.company].filter(Boolean).join(" @ ")}
-          </p>
         </div>
         <div className="flex flex-wrap justify-end gap-2">
           {contact.email && suppression && (

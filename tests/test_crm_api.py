@@ -11,22 +11,26 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.api.crm import router as crm_router
-from app.dependencies import get_crm_import_service, get_crm_service
+from app.dependencies import get_crm_import_service, get_crm_service, get_profile_photo_service
 from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.crm_import_batch_store import MemoryCrmImportBatchStore
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
+from app.services.profile_photo_service import ProfilePhotoService
+from app.storage.memory_object_storage_client import MemoryObjectStorageClient
 
 
 @pytest.fixture
 def test_client():
     crm_service = CrmService(contact_store=MemoryCrmContactStore())
     import_service = CrmImportService(crm_service=crm_service, batch_store=MemoryCrmImportBatchStore())
+    photo_service = ProfilePhotoService(crm_service=crm_service, storage_client=MemoryObjectStorageClient())
 
     app = FastAPI()
     app.include_router(crm_router)
     app.dependency_overrides[get_crm_service] = lambda: crm_service
     app.dependency_overrides[get_crm_import_service] = lambda: import_service
+    app.dependency_overrides[get_profile_photo_service] = lambda: photo_service
 
     with TestClient(app) as client:
         yield client
@@ -542,3 +546,91 @@ def test_get_contact_route_itself_is_unaffected_by_luma_route_addition(luma_test
     client.get(f"/crm/contacts/{contact_id}/luma-registrations")
     after = client.get(f"/crm/contacts/{contact_id}").json()
     assert before == after
+
+
+# --- Profile photo upload (Stage 1) -----------------------------------------
+
+
+def _jpeg_bytes(size=(600, 600), color=(200, 50, 50)) -> bytes:
+    from PIL import Image
+
+    img = Image.new("RGB", size, color=color)
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_new_contact_has_null_photo_url(test_client):
+    resp = test_client.post("/crm/contacts", json={"first_name": "Ada", "email": "ada@example.com"})
+    assert resp.json()["profile_photo_url"] is None
+
+
+def test_uploading_a_valid_photo_returns_a_derived_url(test_client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", "https://cdn.example.com")
+    contact_id = test_client.post("/crm/contacts", json={"first_name": "Ada", "email": "ada@example.com"}).json()["crm_contact_id"]
+
+    resp = test_client.post(f"/crm/contacts/{contact_id}/photo", files={"file": ("photo.jpg", io.BytesIO(_jpeg_bytes()), "image/jpeg")})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["profile_photo_url"].startswith("https://cdn.example.com/avatars/")
+    assert body["profile_photo_url"].endswith(".jpg")
+
+
+def test_uploading_to_a_nonexistent_contact_returns_404(test_client):
+    resp = test_client.post(
+        "/crm/contacts/does-not-exist/photo", files={"file": ("photo.jpg", io.BytesIO(_jpeg_bytes()), "image/jpeg")}
+    )
+    assert resp.status_code == 404
+
+
+def test_uploading_an_invalid_image_returns_422_and_leaves_the_contact_unchanged(test_client):
+    contact_id = test_client.post("/crm/contacts", json={"first_name": "Ada", "email": "ada@example.com"}).json()["crm_contact_id"]
+
+    resp = test_client.post(
+        f"/crm/contacts/{contact_id}/photo", files={"file": ("not_a_photo.jpg", io.BytesIO(b"not an image" * 50), "image/jpeg")}
+    )
+
+    assert resp.status_code == 422
+    assert test_client.get(f"/crm/contacts/{contact_id}").json()["profile_photo_url"] is None
+
+
+def test_uploading_an_unsupported_format_returns_422(test_client):
+    contact_id = test_client.post("/crm/contacts", json={"first_name": "Ada", "email": "ada@example.com"}).json()["crm_contact_id"]
+
+    resp = test_client.post(
+        f"/crm/contacts/{contact_id}/photo", files={"file": ("photo.gif", io.BytesIO(_jpeg_bytes()), "image/gif")}
+    )
+
+    assert resp.status_code == 422
+
+
+def test_replacing_a_photo_via_the_api_produces_a_different_url(test_client, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", "https://cdn.example.com")
+    contact_id = test_client.post("/crm/contacts", json={"first_name": "Ada", "email": "ada@example.com"}).json()["crm_contact_id"]
+
+    first = test_client.post(
+        f"/crm/contacts/{contact_id}/photo", files={"file": ("photo.jpg", io.BytesIO(_jpeg_bytes(color=(255, 0, 0))), "image/jpeg")}
+    ).json()
+    second = test_client.post(
+        f"/crm/contacts/{contact_id}/photo", files={"file": ("photo.jpg", io.BytesIO(_jpeg_bytes(color=(0, 0, 255))), "image/jpeg")}
+    ).json()
+
+    assert first["profile_photo_url"] != second["profile_photo_url"]
+    assert test_client.get(f"/crm/contacts/{contact_id}").json()["profile_photo_url"] == second["profile_photo_url"]
+
+
+def test_archiving_a_contact_with_a_photo_keeps_the_photo_url_in_the_response(test_client):
+    contact_id = test_client.post("/crm/contacts", json={"first_name": "Ada", "email": "ada@example.com"}).json()["crm_contact_id"]
+    uploaded = test_client.post(
+        f"/crm/contacts/{contact_id}/photo", files={"file": ("photo.jpg", io.BytesIO(_jpeg_bytes()), "image/jpeg")}
+    ).json()
+
+    archived = test_client.delete(f"/crm/contacts/{contact_id}").json()
+
+    assert archived["archived"] is True
+    assert archived["profile_photo_key"] == uploaded["profile_photo_key"]

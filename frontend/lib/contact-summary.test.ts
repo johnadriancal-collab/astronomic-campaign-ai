@@ -74,6 +74,8 @@ function makeContact(overrides: Partial<CrmContact> = {}): CrmContact {
     thesis_dietary_preferences: [],
     thesis_dietary_preferences_other: null,
     thesis_referral_emails: null,
+    profile_photo_key: null,
+    profile_photo_url: null,
     custom_fields: {},
     ...overrides,
   };

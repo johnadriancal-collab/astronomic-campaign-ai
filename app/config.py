@@ -272,5 +272,41 @@ class Settings(BaseSettings):
     mail_sending_mailbox_allowlist: str | None = None
     mail_sending_recipient_allowlist: str | None = None
 
+    # Profile Photos Stage 1 (see app/services/profile_photo_service.py) --
+    # Cloudflare R2 (an S3-compatible object storage provider) holds the
+    # actual normalized-avatar JPEG bytes; CrmContact only ever stores the
+    # object KEY (profile_photo_key), never a full URL -- see that field's
+    # own docstring for why. All five of these are None until this
+    # feature's production infrastructure stage explicitly provisions a
+    # real R2 bucket/credentials; ProfilePhotoService's storage calls fail
+    # closed (a clear error) rather than crash app startup while
+    # unconfigured, matching every other integration credential's
+    # precedent above.
+    #
+    # profile_photo_cdn_base_url: the public base URL photos are served
+    # from (e.g. a Cloudflare R2 public bucket URL or a custom CDN domain)
+    # -- profile_photo_url is always computed as f"{this}/{profile_photo_key}"
+    # at read time, never persisted per-Contact, so changing this later
+    # (e.g. moving to a custom domain, or migrating providers entirely)
+    # never requires touching a single stored Contact.
+    profile_photo_cdn_base_url: str | None = None
+    r2_bucket_name: str | None = None
+    r2_endpoint_url: str | None = None
+    r2_access_key_id: str | None = None
+    r2_secret_access_key: str | None = None
+
+    # GET /integrations/contacts/photo -- a narrow, read-only machine
+    # endpoint for the existing Leads List Google Apps Script (Karla's
+    # Luma guest.registered -> Sheet automation) to resolve a Contact's
+    # canonical profile_photo_url by email, so the Sheet's existing photo
+    # column can be populated without exposing anything else about the
+    # Contact. A dedicated shared secret, separate from itf_webhook_token
+    # (a different caller, independently revocable) -- same "None until
+    # Railway is configured, 503 rather than crashing at startup"
+    # precedent as every other integration credential above. Stored in
+    # the Apps Script's own PropertiesService, sent as
+    # `Authorization: Bearer <token>`, exactly like the ITF bridge.
+    integrations_api_token: str | None = None
+
 
 settings = Settings()

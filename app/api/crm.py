@@ -11,7 +11,7 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, Uplo
 from loguru import logger
 from pydantic import BaseModel
 
-from app.dependencies import get_crm_import_service, get_crm_service, get_luma_sync_service
+from app.dependencies import get_crm_import_service, get_crm_service, get_luma_sync_service, get_profile_photo_service
 from app.models.crm import (
     CrmContact,
     CrmContactExportField,
@@ -43,6 +43,7 @@ from app.services.crm_service import (
     CrmService,
 )
 from app.services.luma_sync_service import LumaSyncService
+from app.services.profile_photo_service import InvalidImageError, ProfilePhotoService
 
 router = APIRouter(prefix="/crm", tags=["crm"])
 
@@ -208,11 +209,44 @@ async def update_contact(
 
 @router.delete("/contacts/{crm_contact_id}", response_model=CrmContact)
 async def archive_contact(crm_contact_id: str, service: CrmService = Depends(get_crm_service)):
-    """Archives (soft-deletes) the contact -- never hard-deleted."""
+    """Archives (soft-deletes) the contact -- never hard-deleted. Its
+    profile photo (if any) is deliberately left completely untouched --
+    see ProfilePhotoService's own test coverage: archived Contacts remain
+    part of AstroHub's historical institutional memory and may still
+    appear in historical dinners/engagements, so there is no code path
+    anywhere that deletes or clears profile_photo_key on archive."""
     try:
         return await service.archive_contact(crm_contact_id)
     except CrmContactNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/contacts/{crm_contact_id}/photo", response_model=CrmContact)
+async def upload_contact_photo(
+    crm_contact_id: str,
+    file: UploadFile = File(...),
+    crm_service: CrmService = Depends(get_crm_service),
+    photo_service: ProfilePhotoService = Depends(get_profile_photo_service),
+):
+    """Manual profile-photo upload/replace. Always source="manual" --
+    ProfilePhotoService.upload_manual_photo() applies the centralized
+    overwrite-precedence rule (a manual upload always wins, and no
+    automated source may later overwrite it) and the safe replacement
+    transaction (new object uploaded and the Contact successfully
+    updated before the old object is ever deleted) -- see that module's
+    own docstring for the full contract. Rejects (422) an upload that
+    fails validation or fails to actually decode as a real image, before
+    any storage or Contact write happens."""
+    try:
+        await crm_service.get_contact(crm_contact_id)  # 404 early, before reading/processing the upload
+    except CrmContactNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    raw_bytes = await file.read()
+    try:
+        return await photo_service.upload_manual_photo(crm_contact_id, raw_bytes, file.content_type)
+    except InvalidImageError as e:
+        raise HTTPException(status_code=422, detail=str(e))
 
 
 # --- Lists: named, persistent groupings of existing contacts ---

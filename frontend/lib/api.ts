@@ -493,6 +493,13 @@ export interface CrmContact {
   thesis_dietary_preferences_other: string | null;
   thesis_referral_emails: string | null;
 
+  // Profile Photos Stage 1 -- profile_photo_key is the internal object-storage
+  // key (never a full URL); profile_photo_url is derived server-side from it
+  // plus the current CDN base URL and is null when no photo has been set.
+  // See app/services/profile_photo_service.py for the upload/replace pipeline.
+  profile_photo_key: string | null;
+  profile_photo_url: string | null;
+
   custom_fields: Record<string, unknown>;
 }
 
@@ -631,6 +638,18 @@ export function updateCrmContact(crmContactId: string, patch: Record<string, unk
 
 export function archiveCrmContact(crmContactId: string): Promise<CrmContact> {
   return request<CrmContact>(`/crm/contacts/${crmContactId}`, { method: "DELETE" });
+}
+
+// Manual profile-photo upload/replace -- always applied as source="manual"
+// server-side, which is a hard override no automated source can later
+// silently reverse (see ProfilePhotoService's own precedence rules). A
+// non-image or unsupported-format file resolves this promise's rejection
+// via ApiError with a 422 status, exactly like other validation failures
+// in this file.
+export function uploadCrmContactPhoto(crmContactId: string, file: File): Promise<CrmContact> {
+  const formData = new FormData();
+  formData.append("file", file);
+  return request<CrmContact>(`/crm/contacts/${crmContactId}/photo`, { method: "POST", body: formData });
 }
 
 export function listCrmCustomFields(includeInactive = true): Promise<CrmCustomFieldDefinition[]> {
