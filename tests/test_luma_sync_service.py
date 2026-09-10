@@ -1976,18 +1976,23 @@ def test_no_automatic_call_site_syncs_a_registration_to_an_engagement_participan
     """Structural guard, mirroring test_only_the_live_webhook_path_and_
     the_explicit_backfill_script_ever_call_the_self_report_merge_functions
     above: sync_luma_registration_to_engagement_participant() is called
-    from exactly ONE place in the entire app -- the live guest-processing
+    from exactly TWO places in the entire app -- the live guest-processing
     path in luma_sync_service.py (itself shared by the webhook AND the
-    operator-triggered backfill, by this app's own existing, unmodified
-    design) -- never from app startup (main.py), never from Stage 1H-A's
-    own Engagement-linking code (client_crm_service.py), never from a
-    scheduled job."""
+    operator-triggered full-calendar backfill, by this app's own existing,
+    unmodified design), and Stage 1H-C's own explicit, operator-scoped-to-
+    one-Engagement historical backfill driver
+    (luma_engagement_participant_backfill.py, invoked only via
+    scripts/run_luma_engagement_participant_backfill.py's two-gate CLI --
+    never automatically). Never from app startup (main.py), never from
+    Stage 1H-A's own Engagement-linking code (client_crm_service.py),
+    never from a scheduled job."""
     import pathlib
 
     repo_root = pathlib.Path(__file__).resolve().parent.parent
     allowed_files = {
         repo_root / "app" / "services" / "luma_engagement_participant_sync_service.py",  # the function's own definition
-        repo_root / "app" / "services" / "luma_sync_service.py",  # the one caller
+        repo_root / "app" / "services" / "luma_sync_service.py",  # the live/full-calendar-backfill caller
+        repo_root / "app" / "services" / "luma_engagement_participant_backfill.py",  # Stage 1H-C's own explicit, one-Engagement-at-a-time caller
     }
     offending_files = []
     for path in (repo_root / "app").rglob("*.py"):
