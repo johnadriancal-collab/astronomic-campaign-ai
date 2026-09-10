@@ -32,6 +32,8 @@ from app.models.client_crm import (
     ClientNoteType,
     ClientRelationshipClassification,
     ClientStatus,
+    ClientTouchpoint,
+    ContactType,
     DinnerType,
     Engagement,
     EngagementCloseout,
@@ -48,6 +50,7 @@ from app.models.client_crm import (
 from app.repositories.client_contact_store import ClientContactNotFoundError, MemoryClientContactStore
 from app.repositories.client_note_store import ClientNoteNotFoundError, MemoryClientNoteStore
 from app.repositories.client_store import ClientNotFoundError, MemoryClientStore
+from app.repositories.client_touchpoint_store import ClientTouchpointNotFoundError, MemoryClientTouchpointStore
 from app.repositories.engagement_closeout_store import EngagementCloseoutNotFoundError, MemoryEngagementCloseoutStore
 from app.repositories.engagement_participant_store import (
     EngagementParticipantDuplicateError,
@@ -58,6 +61,7 @@ from app.repositories.engagement_store import EngagementLumaEventAlreadyLinkedEr
 from app.repositories.sqlite_client_contact_store import SQLiteClientContactStore
 from app.repositories.sqlite_client_note_store import SQLiteClientNoteStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
+from app.repositories.sqlite_client_touchpoint_store import SQLiteClientTouchpointStore
 from app.repositories.sqlite_engagement_closeout_store import SQLiteEngagementCloseoutStore
 from app.repositories.sqlite_engagement_participant_store import SQLiteEngagementParticipantStore
 from app.repositories.sqlite_engagement_store import SQLiteEngagementStore
@@ -120,6 +124,21 @@ def _participant(
     )
 
 
+def _touchpoint(
+    touchpoint_id="t1", client_id="c1", occurred_at=NOW, created_at=NOW, updated_at=NOW, **overrides
+) -> ClientTouchpoint:
+    overrides.setdefault("contact_type", ContactType.EMAIL)
+    overrides.setdefault("contacted_by", "Ria")
+    return ClientTouchpoint(
+        touchpoint_id=touchpoint_id,
+        client_id=client_id,
+        occurred_at=occurred_at,
+        created_at=created_at,
+        updated_at=updated_at,
+        **overrides,
+    )
+
+
 def _note(client_note_id="n1", client_id="c1", occurred_at=NOW, created_at=NOW, updated_at=NOW, **overrides) -> ClientNote:
     return ClientNote(
         client_note_id=client_note_id,
@@ -175,6 +194,14 @@ async def sqlite_engagement_participant_store(tmp_path):
 @pytest_asyncio.fixture
 async def sqlite_client_note_store(tmp_path):
     s = SQLiteClientNoteStore(str(tmp_path / "client_notes.db"))
+    await s.connect()
+    yield s
+    await s.close()
+
+
+@pytest_asyncio.fixture
+async def sqlite_client_touchpoint_store(tmp_path):
+    s = SQLiteClientTouchpointStore(str(tmp_path / "client_touchpoints.db"))
     await s.connect()
     yield s
     await s.close()
@@ -1179,3 +1206,151 @@ async def test_client_note_occurred_at_may_differ_from_created_at_for_a_backfill
     restored = ClientNote.model_validate_json(backfilled.model_dump_json())
     assert restored.occurred_at == NOW
     assert restored.created_at == EVEN_LATER
+
+
+# =====================================================================
+# ClientTouchpoint model + ContactType -- Client CRM Stage 2A (2026-09-11)
+# =====================================================================
+
+
+def test_contact_type_v1_values():
+    assert {member.value for member in ContactType} == {"email", "call", "slack", "linkedin", "in_person"}
+
+
+def test_client_touchpoint_json_round_trip_preserves_every_field():
+    touchpoint = _touchpoint(
+        crm_contact_id="contact-1",
+        contact_name="Sid Atkinson",
+        occurred_at=NOW,
+        contact_type=ContactType.CALL,
+        contacted_by="Ria",
+        note="Intro call, went well.",
+        archived=True,
+    )
+    restored = ClientTouchpoint.model_validate_json(touchpoint.model_dump_json())
+    assert restored == touchpoint
+
+
+def test_client_touchpoint_contact_fields_default_to_none():
+    touchpoint = _touchpoint()
+    assert touchpoint.crm_contact_id is None
+    assert touchpoint.contact_name is None
+    assert touchpoint.note is None
+    assert touchpoint.archived is False
+
+
+# =====================================================================
+# ClientTouchpoint store -- Memory + SQLite parity
+# =====================================================================
+
+
+async def test_memory_client_touchpoint_create_get_and_list_scoped_by_client():
+    store = MemoryClientTouchpointStore()
+    await store.create(_touchpoint("t1", "c1", occurred_at=NOW))
+    await store.create(_touchpoint("t2", "c1", occurred_at=LATER))
+    await store.create(_touchpoint("t3", "c2", occurred_at=NOW))  # different client
+
+    assert (await store.get("t1")).touchpoint_id == "t1"
+    assert await store.get("t-missing") is None
+
+    for_c1 = await store.list_for_client("c1")
+    assert {t.touchpoint_id for t in for_c1} == {"t1", "t2"}
+    assert await store.list_for_client("c-missing") == []
+
+
+async def test_sqlite_client_touchpoint_create_get_and_list_scoped_by_client(sqlite_client_touchpoint_store):
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint("t1", "c1", occurred_at=NOW))
+    await store.create(_touchpoint("t2", "c1", occurred_at=LATER))
+    await store.create(_touchpoint("t3", "c2", occurred_at=NOW))
+
+    assert (await store.get("t1")).touchpoint_id == "t1"
+    assert await store.get("t-missing") is None
+
+    for_c1 = await store.list_for_client("c1")
+    assert {t.touchpoint_id for t in for_c1} == {"t1", "t2"}
+    assert await store.list_for_client("c-missing") == []
+
+
+async def test_memory_client_touchpoint_deterministic_newest_first_ordering():
+    store = MemoryClientTouchpointStore()
+    # Distinct occurred_at -- the primary sort key.
+    await store.create(_touchpoint("t-old", "c1", occurred_at=NOW))
+    await store.create(_touchpoint("t-new", "c1", occurred_at=LATER))
+    # Same occurred_at as t-tie-a, but a LATER created_at -- the tiebreak.
+    await store.create(_touchpoint("t-tie-a", "c1", occurred_at=EVEN_LATER, created_at=NOW))
+    await store.create(_touchpoint("t-tie-b", "c1", occurred_at=EVEN_LATER, created_at=LATER))
+    # Same occurred_at AND created_at as each other -- touchpoint_id is the final tiebreak.
+    await store.create(_touchpoint("t-final-a", "c1", occurred_at=NOW, created_at=NOW))
+    await store.create(_touchpoint("t-final-z", "c1", occurred_at=NOW, created_at=NOW))
+
+    ordered = await store.list_for_client("c1")
+    ids = [t.touchpoint_id for t in ordered]
+    # The EVEN_LATER-occurred_at pair sorts first (occurred_at DESC is the
+    # primary key), ordered between themselves by created_at DESC
+    # (t-tie-b's LATER created_at before t-tie-a's NOW); then t-new
+    # (LATER occurred_at); then the NOW-occurred_at group, where t-old (no
+    # created_at tie) and the final-a/final-z pair (tied on both
+    # occurred_at AND created_at) sort by touchpoint_id DESC as the last
+    # resort.
+    assert ids[0:2] == ["t-tie-b", "t-tie-a"]
+    assert ids[2] == "t-new"
+    assert set(ids[3:]) == {"t-old", "t-final-a", "t-final-z"}
+    # Within the fully-tied (NOW, NOW) pair specifically, touchpoint_id DESC.
+    final_pair_order = [i for i in ids if i in ("t-final-a", "t-final-z")]
+    assert final_pair_order == ["t-final-z", "t-final-a"]
+
+
+async def test_sqlite_client_touchpoint_deterministic_newest_first_ordering(sqlite_client_touchpoint_store):
+    """Same scenario as the Memory test, but ALSO inserted in a
+    deliberately shuffled order -- proving the SQLite store sorts
+    explicitly rather than relying on insertion/row order."""
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint("t-final-z", "c1", occurred_at=NOW, created_at=NOW))
+    await store.create(_touchpoint("t-tie-a", "c1", occurred_at=EVEN_LATER, created_at=NOW))
+    await store.create(_touchpoint("t-new", "c1", occurred_at=LATER))
+    await store.create(_touchpoint("t-final-a", "c1", occurred_at=NOW, created_at=NOW))
+    await store.create(_touchpoint("t-old", "c1", occurred_at=NOW))
+    await store.create(_touchpoint("t-tie-b", "c1", occurred_at=EVEN_LATER, created_at=LATER))
+
+    ordered = await store.list_for_client("c1")
+    ids = [t.touchpoint_id for t in ordered]
+    assert ids[0:2] == ["t-tie-b", "t-tie-a"]
+    assert ids[2] == "t-new"
+    final_pair_order = [i for i in ids if i in ("t-final-a", "t-final-z")]
+    assert final_pair_order == ["t-final-z", "t-final-a"]
+
+
+async def test_memory_client_touchpoint_save_and_archive():
+    store = MemoryClientTouchpointStore()
+    await store.create(_touchpoint())
+    updated = (await store.get("t1")).model_copy(update={"archived": True})
+    await store.save(updated)
+    assert (await store.get("t1")).archived is True
+    with pytest.raises(ClientTouchpointNotFoundError):
+        await store.save(_touchpoint("t-missing"))
+
+
+async def test_sqlite_client_touchpoint_save_and_archive(sqlite_client_touchpoint_store):
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint())
+    updated = (await store.get("t1")).model_copy(update={"archived": True})
+    await store.save(updated)
+    assert (await store.get("t1")).archived is True
+    with pytest.raises(ClientTouchpointNotFoundError):
+        await store.save(_touchpoint("t-missing"))
+
+
+async def test_sqlite_client_touchpoint_save_and_restore_round_trips_optional_contact_fields(sqlite_client_touchpoint_store):
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint(crm_contact_id="contact-1", contact_name="Sid Atkinson", note="Dinner planning."))
+    fresh = await store.get("t1")
+    assert fresh.crm_contact_id == "contact-1"
+    assert fresh.contact_name == "Sid Atkinson"
+    assert fresh.note == "Dinner planning."
+
+    cleared = fresh.model_copy(update={"crm_contact_id": None, "contact_name": None})
+    await store.save(cleared)
+    fresh_again = await store.get("t1")
+    assert fresh_again.crm_contact_id is None
+    assert fresh_again.contact_name is None

@@ -547,3 +547,91 @@ class EngagementParticipant(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived: bool = False
+
+
+class ContactType(str, Enum):
+    """Client CRM Stage 2A. The channel a ClientTouchpoint happened
+    through -- V1's fixed, approved set; no other values are accepted."""
+
+    EMAIL = "email"
+    CALL = "call"
+    SLACK = "slack"
+    LINKEDIN = "linkedin"
+    IN_PERSON = "in_person"
+
+
+class ClientTouchpoint(BaseModel):
+    """Client CRM Stage 2A -- a persistent, structured record of one
+    communication/interaction with a Client, e.g. "emailed Sid Atkinson
+    about dinner planning." Deliberately its OWN entity, not a repurposed
+    ClientNote -- see this stage's own investigation report for the full
+    comparison. ClientNote's own docstring already draws a hard line
+    around what it refuses to become (structured Day 3/30/90 business
+    data); a Touchpoint needs a required `contact_type`, an optional link
+    to a specific canonical Contact, and a `contacted_by` field -- none of
+    which ClientNote has or should grow, and none of which belong mixed
+    into `note_type` (a relationship-lifecycle tag, not a contact
+    channel).
+
+    `crm_contact_id` is OPTIONAL -- a touchpoint isn't always about one
+    identifiable person (a Slack message to a whole channel, a voicemail
+    with no callback yet), and forcing one here would be the same mistake
+    Stage 1G's own investigation already ruled out for EngagementParticipant.
+    When supplied, the service layer requires that this canonical Contact
+    already be linked to this SAME Client via an active (non-archived)
+    ClientContact -- Stage 2A does NOT allow attaching an arbitrary global
+    Contact directly to a Touchpoint; if the person isn't a ClientContact
+    yet, they must be linked to the Client first (see
+    ClientCrmService.create_client_touchpoint()'s own docstring for the
+    exact validation).
+
+    `contact_name` is a SNAPSHOT, populated FROM the canonical Contact at
+    link time (create, or a later crm_contact_id change) -- same "point-
+    in-time snapshot, never a live reference" principle ClientContact and
+    EngagementParticipant already established, so a Touchpoint keeps
+    rendering correctly even after the canonical Contact is later renamed,
+    archived, or merged. It is a single combined display string (not a
+    first_name/last_name split) -- this model's only UI need is one
+    "Contact" column, not a queryable name. Clearing crm_contact_id also
+    clears contact_name; changing crm_contact_id re-snapshots from the
+    newly-selected Contact. The canonical Contact changing later NEVER
+    retroactively rewrites an existing Touchpoint's own snapshot.
+
+    `contacted_by` stays plain free text -- same placeholder convention as
+    Client.owner/Engagement.owner/ClientNote.created_by/EngagementCloseout.
+    completed_by (no authenticated-per-user identity system exists
+    anywhere in this app yet; see each of those fields' own identical
+    comment). Required (non-blank after trimming) for a NEW Touchpoint at
+    the service/API layer -- not a schema-level constraint, matching how
+    Client.name's own required-non-blank rule is enforced in the service,
+    not via a Pydantic Field constraint.
+
+    `note` is optional -- the structured fields (occurred_at/contact_type/
+    contacted_by/crm_contact_id) are this model's primary content; a
+    "left voicemail, no answer" touchpoint has nothing more to say and
+    shouldn't be blocked on writing one.
+
+    No `delete()` on this store -- same archive-only convention as every
+    other Client CRM entity. Archiving a Client does NOT cascade-archive
+    its Touchpoints (same "no cascading archive" precedent already
+    established elsewhere in this app).
+
+    Deliberately carries NO derived Last Contact/Last Contacted/Next
+    Dinner concept -- Stage 2A is the persistence layer only; deriving
+    "the newest active Touchpoint" for display is a later stage's job,
+    computed at read time, never stored here or on Client."""
+
+    touchpoint_id: str
+    client_id: str
+
+    crm_contact_id: str | None = None
+    contact_name: str | None = None  # snapshot -- see model docstring
+
+    occurred_at: datetime
+    contact_type: ContactType
+    contacted_by: str | None = None  # free text; required non-blank on CREATE, enforced in the service layer
+    note: str | None = None
+
+    created_at: datetime
+    updated_at: datetime
+    archived: bool = False

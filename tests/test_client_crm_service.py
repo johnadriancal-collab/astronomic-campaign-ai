@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 
 from app.models.activity import ActivityCategory
-from app.models.client_crm import ClientRelationshipClassification, ClientStatus
+from app.models.client_crm import ClientRelationshipClassification, ClientStatus, ClientTouchpoint, ContactType
 from app.models.crm import CrmContact
 from app.models.luma import LumaEvent
 from app.repositories.client_contact_store import ClientContactStore, MemoryClientContactStore
@@ -22,6 +22,7 @@ from app.repositories.crm_contact_store import CrmContactStore, MemoryCrmContact
 from app.repositories.engagement_closeout_store import EngagementCloseoutStore, MemoryEngagementCloseoutStore
 from app.repositories.engagement_participant_store import EngagementParticipantStore, MemoryEngagementParticipantStore
 from app.repositories.engagement_store import EngagementStore, MemoryEngagementStore
+from app.repositories.client_touchpoint_store import ClientTouchpointStore, MemoryClientTouchpointStore
 from app.repositories.luma_event_store import LumaEventStore, MemoryLumaEventStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.services.activity_log_service import ActivityLogService
@@ -30,6 +31,7 @@ from app.services.client_crm_service import (
     ClientContactNotFound,
     ClientCrmService,
     ClientNotFound,
+    ClientTouchpointNotFound,
     EngagementCloseoutAlreadyExists,
     EngagementCloseoutNotFound,
     EngagementLumaEventAlreadyLinked,
@@ -51,6 +53,7 @@ def _make_service(
     engagement_closeout_store: EngagementCloseoutStore | None = None,
     engagement_participant_store: EngagementParticipantStore | None = None,
     luma_event_store: LumaEventStore | None = None,
+    client_touchpoint_store: ClientTouchpointStore | None = None,
 ) -> tuple[ClientCrmService, ActivityLogService]:
     activity_log = ActivityLogService(MemoryActivityEventStore())
     service = ClientCrmService(
@@ -62,6 +65,7 @@ def _make_service(
         engagement_closeout_store=engagement_closeout_store or MemoryEngagementCloseoutStore(),
         engagement_participant_store=engagement_participant_store or MemoryEngagementParticipantStore(),
         luma_event_store=luma_event_store or MemoryLumaEventStore(),
+        client_touchpoint_store=client_touchpoint_store or MemoryClientTouchpointStore(),
     )
     return service, activity_log
 
@@ -99,6 +103,24 @@ async def contact_service(tmp_path):
         client_store, client_contact_store=client_contact_store, crm_contact_store=crm_contact_store
     )
     return service, activity_log, client_contact_store, crm_contact_store
+
+
+@pytest.fixture
+def touchpoint_service():
+    """Same as contact_service, but ALSO exposes the ClientTouchpointStore
+    directly (needed to inspect rows Stage 2A's own service methods don't
+    otherwise return, e.g. archived ones)."""
+    client_store = MemoryClientStore()
+    client_contact_store = MemoryClientContactStore()
+    crm_contact_store = MemoryCrmContactStore()
+    client_touchpoint_store = MemoryClientTouchpointStore()
+    service, activity_log = _make_service(
+        client_store,
+        client_contact_store=client_contact_store,
+        crm_contact_store=crm_contact_store,
+        client_touchpoint_store=client_touchpoint_store,
+    )
+    return service, activity_log, client_contact_store, crm_contact_store, client_touchpoint_store
 
 
 async def _seed_crm_contact(crm_contact_store: CrmContactStore, **overrides) -> CrmContact:
@@ -1984,3 +2006,442 @@ async def test_creating_participants_never_mutates_the_engagement_closeout(parti
     assert refreshed_closeout.confirmed_guest_count == 24
     assert refreshed_closeout.attended_count == 24
     assert refreshed_closeout.updated_at == closeout.updated_at
+
+
+# =====================================================================
+# ClientTouchpoint -- Client CRM Stage 2A (2026-09-11)
+# =====================================================================
+
+
+async def _make_client_with_linked_contact(service, crm_contact_store, **contact_overrides):
+    contact = await _seed_crm_contact(crm_contact_store, **contact_overrides)
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    await service.create_client_contact(client.client_id, {"crm_contact_id": contact.crm_contact_id})
+    return client, contact
+
+
+# --- Create -------------------------------------------------------------
+
+
+async def test_create_touchpoint_without_contact_succeeds(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(
+        client.client_id, {"contact_type": "email", "contacted_by": "Ria"}
+    )
+    assert touchpoint.crm_contact_id is None
+    assert touchpoint.contact_name is None
+    assert touchpoint.client_id == client.client_id
+    assert touchpoint.archived is False
+
+
+async def test_create_touchpoint_with_valid_linked_client_contact_succeeds(touchpoint_service):
+    service, _activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    client, contact = await _make_client_with_linked_contact(service, crm_contact_store)
+    touchpoint = await service.create_client_touchpoint(
+        client.client_id, {"crm_contact_id": contact.crm_contact_id, "contact_type": "call", "contacted_by": "Ria"}
+    )
+    assert touchpoint.crm_contact_id == contact.crm_contact_id
+
+
+async def test_create_touchpoint_populates_contact_name_snapshot(touchpoint_service):
+    service, _activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    client, contact = await _make_client_with_linked_contact(
+        service, crm_contact_store, first_name="Sid", last_name="Atkinson"
+    )
+    touchpoint = await service.create_client_touchpoint(
+        client.client_id, {"crm_contact_id": contact.crm_contact_id, "contact_type": "email", "contacted_by": "Ria"}
+    )
+    assert touchpoint.contact_name == "Sid Atkinson"
+
+
+async def test_create_touchpoint_nonexistent_contact_rejected(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_touchpoint(
+            client.client_id, {"crm_contact_id": "does-not-exist", "contact_type": "email", "contacted_by": "Ria"}
+        )
+
+
+async def test_create_touchpoint_contact_belonging_to_another_client_rejected(touchpoint_service):
+    service, _activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    other_client, contact = await _make_client_with_linked_contact(service, crm_contact_store)
+    this_client = await service.create_client({"name": "Applied Curiosity"})
+    with pytest.raises(ValueError):
+        await service.create_client_touchpoint(
+            this_client.client_id, {"crm_contact_id": contact.crm_contact_id, "contact_type": "email", "contacted_by": "Ria"}
+        )
+
+
+async def test_create_touchpoint_global_contact_not_linked_through_client_contact_rejected(touchpoint_service):
+    service, _activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    contact = await _seed_crm_contact(crm_contact_store)  # exists in the CRM, but never linked to any Client
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_touchpoint(
+            client.client_id, {"crm_contact_id": contact.crm_contact_id, "contact_type": "email", "contacted_by": "Ria"}
+        )
+
+
+async def test_create_touchpoint_archived_client_contact_rejected(touchpoint_service):
+    service, _activity_log, client_contact_store, crm_contact_store, _tp = touchpoint_service
+    client, contact = await _make_client_with_linked_contact(service, crm_contact_store)
+    client_contacts = await client_contact_store.list_for_client(client.client_id)
+    await service.update_client_contact(client.client_id, client_contacts[0].client_contact_id, {"archived": True})
+    with pytest.raises(ValueError):
+        await service.create_client_touchpoint(
+            client.client_id, {"crm_contact_id": contact.crm_contact_id, "contact_type": "email", "contacted_by": "Ria"}
+        )
+
+
+async def test_create_touchpoint_invalid_contact_type_rejected(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_touchpoint(client.client_id, {"contact_type": "carrier_pigeon", "contacted_by": "Ria"})
+
+
+async def test_create_touchpoint_blank_contacted_by_rejected(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ValueError):
+        await service.create_client_touchpoint(client.client_id, {"contact_type": "email", "contacted_by": "   "})
+    with pytest.raises(ValueError):
+        await service.create_client_touchpoint(client.client_id, {"contact_type": "email"})
+
+
+async def test_create_touchpoint_note_is_optional(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    assert touchpoint.note is None
+
+
+async def test_create_touchpoint_defaults_occurred_at_to_now(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    before = datetime.now(timezone.utc)
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    after = datetime.now(timezone.utc)
+    assert before <= touchpoint.occurred_at <= after
+
+
+async def test_create_touchpoint_requires_a_real_client(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    with pytest.raises(ClientNotFound):
+        await service.create_client_touchpoint("does-not-exist", {"contact_type": "email", "contacted_by": "Ria"})
+
+
+# --- Update ---------------------------------------------------------------
+
+
+async def test_update_touchpoint_normal_fields(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    updated = await service.update_client_touchpoint(
+        client.client_id, touchpoint.touchpoint_id, {"note": "Left a voicemail.", "contact_type": "email"}
+    )
+    assert updated.note == "Left a voicemail."
+    assert updated.contact_type == "email"
+    assert updated.contacted_by == "Ria"  # untouched
+
+
+async def test_update_touchpoint_changing_crm_contact_id_refreshes_snapshot(touchpoint_service):
+    service, _activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    client, _contact_a = await _make_client_with_linked_contact(
+        service, crm_contact_store, crm_contact_id="a-1", first_name="Alice", last_name="Anders"
+    )
+    contact_b = await _seed_crm_contact(crm_contact_store, crm_contact_id="b-1", first_name="Bob", last_name=None)
+    await service.create_client_contact(client.client_id, {"crm_contact_id": "b-1"})
+
+    touchpoint = await service.create_client_touchpoint(
+        client.client_id, {"crm_contact_id": "a-1", "contact_type": "call", "contacted_by": "Ria"}
+    )
+    assert touchpoint.contact_name == "Alice Anders"
+
+    updated = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"crm_contact_id": "b-1"})
+    assert updated.crm_contact_id == "b-1"
+    assert updated.contact_name == "Bob"
+
+
+async def test_update_touchpoint_clearing_crm_contact_id_clears_snapshot(touchpoint_service):
+    service, _activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    client, contact = await _make_client_with_linked_contact(service, crm_contact_store, first_name="Sid")
+    touchpoint = await service.create_client_touchpoint(
+        client.client_id, {"crm_contact_id": contact.crm_contact_id, "contact_type": "call", "contacted_by": "Ria"}
+    )
+    updated = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"crm_contact_id": None})
+    assert updated.crm_contact_id is None
+    assert updated.contact_name is None
+
+
+async def test_update_touchpoint_archive(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    archived = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": True})
+    assert archived.archived is True
+
+
+async def test_update_touchpoint_restore(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": True})
+    restored = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": False})
+    assert restored.archived is False
+
+
+async def test_update_touchpoint_empty_patch_leaves_updated_at_unchanged(touchpoint_service):
+    """Stage 2A's own approved correction: a TRUE no-op (empty patch)
+    must NOT bump updated_at at all -- stricter than update_client()'s
+    own "always writes on PATCH" base case, because updated_at on a
+    Touchpoint is meant to represent a real change to the historical
+    interaction record, not merely that a PATCH request arrived."""
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    updated = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {})
+    assert updated.updated_at == touchpoint.updated_at
+    assert updated == touchpoint
+
+
+async def test_update_touchpoint_same_value_patch_leaves_updated_at_unchanged(touchpoint_service):
+    """A patch whose every value already matches the stored row is
+    equally a TRUE no-op, even though it isn't literally empty."""
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(
+        client.client_id, {"contact_type": "call", "contacted_by": "Ria", "note": "Intro call."}
+    )
+    updated = await service.update_client_touchpoint(
+        client.client_id, touchpoint.touchpoint_id, {"contact_type": "call", "contacted_by": "Ria", "note": "Intro call."}
+    )
+    assert updated.updated_at == touchpoint.updated_at
+    assert updated == touchpoint
+
+
+async def test_update_touchpoint_material_change_does_change_updated_at(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    updated = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"note": "Left a voicemail."})
+    assert updated.updated_at > touchpoint.updated_at
+
+
+async def test_update_touchpoint_archive_and_restore_still_change_updated_at(touchpoint_service):
+    """Archiving/restoring is never treated as a no-op, even though a
+    caller might think of it as "just a flag flip" -- it's a real,
+    material change to the row."""
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+
+    archived = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": True})
+    assert archived.updated_at > touchpoint.updated_at
+
+    restored = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": False})
+    assert restored.updated_at > archived.updated_at
+
+
+async def test_update_touchpoint_invalid_contact_type_rejected(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    with pytest.raises(ValueError):
+        await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"contact_type": "fax"})
+
+
+async def test_update_touchpoint_blank_contacted_by_rejected(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    with pytest.raises(ValueError):
+        await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"contacted_by": "  "})
+
+
+async def test_update_touchpoint_missing_is_not_found(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    with pytest.raises(ClientTouchpointNotFound):
+        await service.update_client_touchpoint(client.client_id, "does-not-exist", {"note": "x"})
+
+
+async def test_touchpoint_requested_through_wrong_client_is_not_found(touchpoint_service):
+    """A Touchpoint belonging to Client A must never be exposed or
+    mutable through Client B's URL -- same isolation rule as every other
+    Client CRM entity."""
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client_a = await service.create_client({"name": "Hive ASMBLD"})
+    client_b = await service.create_client({"name": "Other Co"})
+    touchpoint = await service.create_client_touchpoint(client_a.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+
+    with pytest.raises(ClientTouchpointNotFound):
+        await service.update_client_touchpoint(client_b.client_id, touchpoint.touchpoint_id, {"note": "hijacked"})
+
+
+async def test_canonical_contact_changing_later_never_rewrites_an_existing_snapshot(touchpoint_service):
+    service, _activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    client, contact = await _make_client_with_linked_contact(service, crm_contact_store, first_name="Sid", last_name="Atkinson")
+    touchpoint = await service.create_client_touchpoint(
+        client.client_id, {"crm_contact_id": contact.crm_contact_id, "contact_type": "call", "contacted_by": "Ria"}
+    )
+    assert touchpoint.contact_name == "Sid Atkinson"
+
+    # The canonical Contact is renamed AFTER the Touchpoint was created --
+    # nothing about that write should ever touch the existing Touchpoint.
+    renamed = contact.model_copy(update={"first_name": "Sidney", "updated_at": datetime.now(timezone.utc)})
+    await crm_contact_store.save(renamed)
+
+    unrelated_update = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"note": "unrelated"})
+    assert unrelated_update.contact_name == "Sid Atkinson"  # still the ORIGINAL snapshot
+
+
+async def test_list_client_touchpoints_scoped_to_client_newest_first(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client_a = await service.create_client({"name": "Hive ASMBLD"})
+    client_b = await service.create_client({"name": "Other Co"})
+    t1 = await service.create_client_touchpoint(
+        client_a.client_id, {"contact_type": "call", "contacted_by": "Ria", "occurred_at": datetime(2026, 9, 1, tzinfo=timezone.utc)}
+    )
+    t2 = await service.create_client_touchpoint(
+        client_a.client_id, {"contact_type": "email", "contacted_by": "Ria", "occurred_at": datetime(2026, 9, 10, tzinfo=timezone.utc)}
+    )
+    await service.create_client_touchpoint(client_b.client_id, {"contact_type": "call", "contacted_by": "Chris"})
+
+    touchpoints = await service.list_client_touchpoints(client_a.client_id)
+    assert [t.touchpoint_id for t in touchpoints] == [t2.touchpoint_id, t1.touchpoint_id]
+
+
+async def test_list_client_touchpoints_excludes_archived_by_default(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    active = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    to_archive = await service.create_client_touchpoint(client.client_id, {"contact_type": "email", "contacted_by": "Ria"})
+    await service.update_client_touchpoint(client.client_id, to_archive.touchpoint_id, {"archived": True})
+
+    touchpoints = await service.list_client_touchpoints(client.client_id)
+    assert [t.touchpoint_id for t in touchpoints] == [active.touchpoint_id]
+
+
+async def test_list_client_touchpoints_include_archived_true_returns_both(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    active = await service.create_client_touchpoint(
+        client.client_id, {"contact_type": "call", "contacted_by": "Ria", "occurred_at": datetime(2026, 9, 10, tzinfo=timezone.utc)}
+    )
+    to_archive = await service.create_client_touchpoint(
+        client.client_id, {"contact_type": "email", "contacted_by": "Ria", "occurred_at": datetime(2026, 9, 1, tzinfo=timezone.utc)}
+    )
+    await service.update_client_touchpoint(client.client_id, to_archive.touchpoint_id, {"archived": True})
+
+    touchpoints = await service.list_client_touchpoints(client.client_id, include_archived=True)
+    # Both present, and ordering is still deterministic newest-first --
+    # filtering never reorders the already-sorted list.
+    assert [t.touchpoint_id for t in touchpoints] == [active.touchpoint_id, to_archive.touchpoint_id]
+    assert touchpoints[1].archived is True
+
+
+async def test_list_client_touchpoints_requires_a_real_client(touchpoint_service):
+    service, _activity_log, _cc, _crm, _tp = touchpoint_service
+    with pytest.raises(ClientNotFound):
+        await service.list_client_touchpoints("does-not-exist")
+
+
+# --- Activity Log -----------------------------------------------------------
+
+
+async def test_create_touchpoint_logs_exactly_one_created_activity(touchpoint_service):
+    service, activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria", "note": "secret note"})
+
+    events = (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items
+    touchpoint_events = [e for e in events if e.event_type == "client_touchpoint.created"]
+    assert len(touchpoint_events) == 1
+
+
+async def test_material_touchpoint_update_logs_updated(touchpoint_service):
+    service, activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"note": "Left a voicemail."})
+
+    events = (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items
+    assert any(e.event_type == "client_touchpoint.updated" for e in events)
+
+
+async def test_touchpoint_archive_logs_archived(touchpoint_service):
+    service, activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": True})
+
+    events = (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items
+    assert any(e.event_type == "client_touchpoint.archived" for e in events)
+    assert not any(e.event_type == "client_touchpoint.updated" for e in events)
+
+
+async def test_touchpoint_restore_logs_restored(touchpoint_service):
+    service, activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": True})
+    await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"archived": False})
+
+    events = (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items
+    assert any(e.event_type == "client_touchpoint.restored" for e in events)
+
+
+async def test_touchpoint_no_op_update_produces_no_activity_entry(touchpoint_service):
+    service, activity_log, _cc, _crm, _tp = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+    before_count = len((await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items)
+
+    # Re-sending the SAME value is a genuine no-op -- nothing material changes.
+    await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {"contacted_by": "Ria"})
+
+    after_count = len((await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items)
+    assert after_count == before_count
+
+
+async def test_touchpoint_true_no_op_never_reaches_the_store(touchpoint_service):
+    """Stronger than the updated_at assertion alone -- monkeypatches the
+    store's own save() to fail the test if it's ever called, proving a
+    true no-op PATCH exits before any write attempt."""
+    service, _activity_log, _cc, _crm, client_touchpoint_store = touchpoint_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+    touchpoint = await service.create_client_touchpoint(client.client_id, {"contact_type": "call", "contacted_by": "Ria"})
+
+    async def _fail_if_called(*_args, **_kwargs):
+        raise AssertionError("save() must never be called for a true no-op PATCH")
+
+    client_touchpoint_store.save = _fail_if_called
+
+    updated = await service.update_client_touchpoint(client.client_id, touchpoint.touchpoint_id, {})
+    assert updated == touchpoint
+
+
+async def test_touchpoint_activity_metadata_has_no_pii(touchpoint_service):
+    service, activity_log, _cc, crm_contact_store, _tp = touchpoint_service
+    client, contact = await _make_client_with_linked_contact(service, crm_contact_store, first_name="Sid", last_name="Atkinson")
+    await service.create_client_touchpoint(
+        client.client_id,
+        {
+            "crm_contact_id": contact.crm_contact_id,
+            "contact_type": "email",
+            "contacted_by": "Ria",
+            "note": "Discussed Q4 budget and the CEO's private phone number 555-1234.",
+        },
+    )
+
+    events = (await activity_log.list_events(category=ActivityCategory.CLIENT_CRM)).items
+    touchpoint_event = next(e for e in events if e.event_type == "client_touchpoint.created")
+    assert touchpoint_event.entity_name is None
+    metadata_str = str(touchpoint_event.metadata)
+    for forbidden in ("Ria", "Sid Atkinson", "555-1234", "Discussed Q4 budget", contact.crm_contact_id):
+        assert forbidden not in metadata_str
+    assert set(touchpoint_event.metadata.keys()) <= {"client_id", "contact_type", "fields_updated"}

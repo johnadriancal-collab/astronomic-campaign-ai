@@ -1,9 +1,12 @@
 """
 ClientCrmService -- Client CRM Stage 1B (2026-09-07), extended for
-ClientContact (Stage 1D) and Engagement (Stage 1E, 2026-09-07).
-ClientNote remains completely inert: its Stage 1A store exists, but
-nothing constructs or wires it into live app state yet, and this service
-never touches it.
+ClientContact (Stage 1D), Engagement (Stage 1E, 2026-09-07), and
+ClientTouchpoint (Stage 2A, 2026-09-11). ClientNote remains completely
+inert: its Stage 1A store exists, but nothing constructs or wires it into
+live app state yet, and this service never touches it -- Stage 2A
+deliberately built a dedicated ClientTouchpoint entity instead of
+repurposing ClientNote (see ClientTouchpoint's own model docstring for the
+full comparison).
 
 Engagement (Stage 1E) is historical/commercial delivery data ONLY --
 creating, updating, or archiving/restoring an Engagement NEVER writes to
@@ -50,6 +53,8 @@ from app.models.client_crm import (
     ClientPage,
     ClientRelationshipClassification,
     ClientStatus,
+    ClientTouchpoint,
+    ContactType,
     Engagement,
     EngagementCloseout,
     EngagementParticipant,
@@ -58,6 +63,7 @@ from app.models.client_crm import (
 from app.models.luma import LumaEventSummary
 from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
+from app.repositories.client_touchpoint_store import ClientTouchpointStore
 from app.repositories.crm_contact_store import CrmContactStore
 from app.repositories.engagement_closeout_store import EngagementCloseoutStore
 from app.repositories.engagement_participant_store import (
@@ -83,6 +89,19 @@ _SERVER_OWNED_FIELDS = frozenset({"client_id", "created_at", "updated_at"})
 
 def _strip_server_owned_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in fields.items() if k not in _SERVER_OWNED_FIELDS}
+
+
+# ClientTouchpoint's own server-owned set -- its PK is named `touchpoint_id`
+# (not `client_id`, the generic set above's PK name), and `contact_name` is
+# ALWAYS server-derived from crm_contact_id (see create_client_touchpoint's
+# own docstring) -- never directly caller-settable, even by a direct
+# service-layer call that bypasses the API layer's own request models
+# (which already have no field for it at all).
+_TOUCHPOINT_SERVER_OWNED_FIELDS = frozenset({"touchpoint_id", "client_id", "created_at", "updated_at", "contact_name"})
+
+
+def _strip_touchpoint_server_owned_fields(fields: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in fields.items() if k not in _TOUCHPOINT_SERVER_OWNED_FIELDS}
 
 
 class ClientNotFound(Exception):
@@ -183,6 +202,18 @@ class LumaEventNotFound(Exception):
         super().__init__(f"Luma event not found: {luma_event_id}")
 
 
+class ClientTouchpointNotFound(Exception):
+    """Raised for a touchpoint_id that doesn't exist, OR that exists but
+    belongs to a different client_id than the one in the URL -- same
+    deliberately-indistinguishable-404 rule as EngagementNotFound, so a
+    Touchpoint requested through Client A can never expose (or be
+    mutated through) Client B's URL."""
+
+    def __init__(self, touchpoint_id: str):
+        self.touchpoint_id = touchpoint_id
+        super().__init__(f"ClientTouchpoint not found: {touchpoint_id}")
+
+
 class ClientCrmService:
     def __init__(
         self,
@@ -195,6 +226,7 @@ class ClientCrmService:
         engagement_closeout_store: EngagementCloseoutStore,
         engagement_participant_store: EngagementParticipantStore,
         luma_event_store: LumaEventStore,
+        client_touchpoint_store: ClientTouchpointStore,
     ):
         self.client_store = client_store
         self.activity_log = activity_log
@@ -204,6 +236,7 @@ class ClientCrmService:
         self.engagement_closeout_store = engagement_closeout_store
         self.engagement_participant_store = engagement_participant_store
         self.luma_event_store = luma_event_store
+        self.client_touchpoint_store = client_touchpoint_store
 
     async def _require_client(self, client_id: str) -> Client:
         client = await self.client_store.get(client_id)
@@ -228,6 +261,12 @@ class ClientCrmService:
         if participant is None or participant.engagement_id != engagement_id:
             raise EngagementParticipantNotFound(participant_id)
         return participant
+
+    async def _require_client_touchpoint(self, client_id: str, touchpoint_id: str) -> ClientTouchpoint:
+        touchpoint = await self.client_touchpoint_store.get(touchpoint_id)
+        if touchpoint is None or touchpoint.client_id != client_id:
+            raise ClientTouchpointNotFound(touchpoint_id)
+        return touchpoint
 
     async def create_client(self, fields: dict[str, Any]) -> Client:
         """`fields` is assumed already validated/shaped by the API layer's
@@ -1013,4 +1052,224 @@ class ClientCrmService:
             entity_id=after.participant_id,
             entity_name=display_name,
             metadata={"client_id": after.client_id, "engagement_id": after.engagement_id},
+        )
+
+    # =====================================================================
+    # ClientTouchpoint -- Client CRM Stage 2A (2026-09-11). A persistent,
+    # structured communication-history record for a Client -- see
+    # ClientTouchpoint's own model docstring for the full architecture
+    # (dedicated entity, not a repurposed ClientNote; optional
+    # crm_contact_id gated on an active ClientContact link; contact_name
+    # is a server-owned snapshot; contacted_by is free text, required
+    # non-blank on create). Deliberately does NOT implement any derived
+    # Last Contact / Last Contacted / Next Dinner computation -- that is a
+    # later stage's job, reading these rows, never stored here or on
+    # Client (see this stage's own investigation report).
+    # =====================================================================
+
+    @staticmethod
+    def _validated_contact_type(value: Any) -> ContactType:
+        if isinstance(value, ContactType):
+            return value
+        try:
+            return ContactType(value)
+        except ValueError as exc:
+            raise ValueError(f"contact_type must be one of {[m.value for m in ContactType]}.") from exc
+
+    async def _validated_client_linked_contact_name(self, client_id: str, crm_contact_id: str) -> str | None:
+        """The Stage 2A rule for `crm_contact_id`: it must already be
+        linked to THIS Client via an active (non-archived) ClientContact --
+        an arbitrary global Contact can never be attached directly to a
+        Touchpoint. Returns the snapshot display name to store
+        (first + last, falling back to email, same "name, or email, or
+        nothing" convention already used by
+        luma_sync_service.py's own _contact_display_name -- minus the
+        final crm_contact_id fallback, since a bare internal id is never
+        a meaningful display snapshot)."""
+        crm_contact = await self.crm_contact_store.get(crm_contact_id)
+        if crm_contact is None:
+            raise ValueError("crm_contact_id does not refer to an existing Contact.")
+
+        client_contacts = await self.client_contact_store.list_for_client(client_id)
+        is_active_client_contact = any(
+            cc.crm_contact_id == crm_contact_id and not cc.archived for cc in client_contacts
+        )
+        if not is_active_client_contact:
+            raise ValueError(
+                "crm_contact_id must already be linked to this Client through an active Client Contact "
+                "relationship -- link the Contact to this Client first."
+            )
+
+        name = " ".join(part for part in (crm_contact.first_name, crm_contact.last_name) if part)
+        return name or crm_contact.email or None
+
+    async def list_client_touchpoints(self, client_id: str, include_archived: bool = False) -> list[ClientTouchpoint]:
+        """Newest first (occurred_at DESC, created_at DESC, touchpoint_id
+        DESC -- see ClientTouchpointStore's own docstring for the full
+        tiebreak chain). Archived Touchpoints are excluded by default --
+        Stage 2A's own approved correction, overriding the initial "return
+        everything" precedent list_client_contacts()/
+        list_engagement_participants() use: a Touchpoint is a historical
+        interaction LOG, not a relationship a human actively browses
+        archived-or-not, so hiding archived rows by default is the more
+        useful behavior here. `include_archived=True` returns both,
+        still in the same deterministic order (filtering never reorders
+        the already-sorted list the store returns)."""
+        await self._require_client(client_id)
+        touchpoints = await self.client_touchpoint_store.list_for_client(client_id)
+        if not include_archived:
+            touchpoints = [t for t in touchpoints if not t.archived]
+        return touchpoints
+
+    async def create_client_touchpoint(self, client_id: str, fields: dict[str, Any]) -> ClientTouchpoint:
+        """`contact_type` is required and validated against ContactType.
+        `contacted_by` is required, non-blank after trimming -- Stage 2A's
+        own locked product decision (free text, no auth-identity system
+        exists yet -- see ClientTouchpoint's own model docstring).
+        `occurred_at` defaults to now if omitted (the "Date defaults to
+        today" UX requirement, enforced here so it holds for a direct
+        service-layer caller too, not just the API's own default). When
+        `crm_contact_id` is supplied, it must resolve to a Contact already
+        linked to this Client via an active ClientContact -- see
+        _validated_client_linked_contact_name()'s own docstring -- and
+        `contact_name` is populated from it; a caller-supplied
+        `contact_name` is always ignored (server-owned, see
+        _strip_touchpoint_server_owned_fields)."""
+        await self._require_client(client_id)
+        fields = _strip_touchpoint_server_owned_fields(fields)
+
+        contact_type = self._validated_contact_type(fields.get("contact_type"))
+
+        contacted_by = (fields.get("contacted_by") or "").strip()
+        if not contacted_by:
+            raise ValueError("contacted_by is required.")
+
+        occurred_at = fields.get("occurred_at") or datetime.now(timezone.utc)
+
+        crm_contact_id = (fields.get("crm_contact_id") or "").strip() or None
+        contact_name = None
+        if crm_contact_id:
+            contact_name = await self._validated_client_linked_contact_name(client_id, crm_contact_id)
+
+        now = datetime.now(timezone.utc)
+        touchpoint = ClientTouchpoint(
+            touchpoint_id=str(uuid.uuid4()),
+            client_id=client_id,
+            crm_contact_id=crm_contact_id,
+            contact_name=contact_name,
+            occurred_at=occurred_at,
+            contact_type=contact_type,
+            contacted_by=contacted_by,
+            note=(fields.get("note") or "").strip() or None,
+            created_at=now,
+            updated_at=now,
+        )
+        await self.client_touchpoint_store.create(touchpoint)
+        await self.activity_log.record(
+            event_type="client_touchpoint.created",
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary="A Touchpoint was logged for the Client.",
+            entity_type="client_touchpoint",
+            entity_id=touchpoint.touchpoint_id,
+            entity_name=None,  # never contact_name/contacted_by -- see this stage's own Activity Log privacy rule
+            metadata={"client_id": client_id, "contact_type": contact_type.value},
+        )
+        return touchpoint
+
+    async def update_client_touchpoint(self, client_id: str, touchpoint_id: str, patch: dict[str, Any]) -> ClientTouchpoint:
+        """Genuine partial update. Archive/restore is not a separate
+        method -- both are just update_client_touchpoint(id,
+        {"archived": True/False}), same convention as every other Client
+        CRM entity. `contacted_by`, once set, cannot be cleared back to
+        blank via this PATCH (same "required" spirit as create, extended
+        to keep an existing Touchpoint from ending up with no recorded
+        owner). Changing `crm_contact_id` re-validates and re-snapshots
+        `contact_name` from the newly-linked Contact; explicitly clearing
+        it to null also clears `contact_name`. The canonical Contact
+        changing LATER never retroactively rewrites an existing, unrelated
+        Touchpoint's own snapshot -- only an explicit crm_contact_id change
+        on THIS Touchpoint does.
+
+        TRUE no-op guard (Stage 2A's own approved correction, stricter
+        than update_client()'s own "always writes on PATCH" base case):
+        an empty patch, or a patch whose every value already matches the
+        stored row, results in NO store write, NO updated_at bump, and NO
+        Activity Log entry -- the existing row is returned exactly as
+        stored. `updated_at` is meant to represent a real change to this
+        historical interaction record, not merely that a PATCH request
+        arrived. Archiving/restoring (a real `archived` flip) is never a
+        no-op by this definition -- it always writes and always bumps
+        updated_at, same as any other material change."""
+        await self._require_client(client_id)
+        touchpoint = await self._require_client_touchpoint(client_id, touchpoint_id)
+        patch = _strip_touchpoint_server_owned_fields(patch)
+
+        if "contact_type" in patch:
+            patch = {**patch, "contact_type": self._validated_contact_type(patch.get("contact_type"))}
+
+        if "contacted_by" in patch:
+            contacted_by = (patch.get("contacted_by") or "").strip()
+            if not contacted_by:
+                raise ValueError("contacted_by cannot be blank.")
+            patch = {**patch, "contacted_by": contacted_by}
+
+        if "note" in patch:
+            patch = {**patch, "note": (patch.get("note") or "").strip() or None}
+
+        if "crm_contact_id" in patch:
+            new_crm_contact_id = (patch.get("crm_contact_id") or "").strip() or None
+            if new_crm_contact_id != touchpoint.crm_contact_id:
+                if new_crm_contact_id is None:
+                    patch = {**patch, "crm_contact_id": None, "contact_name": None}
+                else:
+                    contact_name = await self._validated_client_linked_contact_name(client_id, new_crm_contact_id)
+                    patch = {**patch, "crm_contact_id": new_crm_contact_id, "contact_name": contact_name}
+            else:
+                patch = {k: v for k, v in patch.items() if k != "crm_contact_id"}
+
+        candidate = touchpoint.model_copy(update=patch)
+        if candidate.model_dump(exclude={"updated_at"}) == touchpoint.model_dump(exclude={"updated_at"}):
+            # TRUE no-op -- see this method's own docstring. Never reaches
+            # the store, never bumps updated_at, never logs anything.
+            return touchpoint
+
+        updated = candidate.model_copy(update={"updated_at": datetime.now(timezone.utc)})
+        await self.client_touchpoint_store.save(updated)
+        await self._record_client_touchpoint_update_activity(touchpoint, updated)
+        return updated
+
+    async def _record_client_touchpoint_update_activity(self, before: ClientTouchpoint, after: ClientTouchpoint) -> None:
+        """Distinguishes archive/restore from a plain edit by diffing the
+        `archived` flag -- same convention as every other Client CRM
+        entity. Only ever called by update_client_touchpoint() AFTER it
+        has already confirmed a material change occurred (see that
+        method's own true-no-op guard) -- so, unlike an earlier revision
+        of this method, there is no "nothing changed" branch here at all
+        anymore; every call here corresponds to a real write."""
+        if before.archived != after.archived:
+            event_type, verb = ("client_touchpoint.archived", "archived") if after.archived else ("client_touchpoint.restored", "restored")
+        else:
+            event_type, verb = "client_touchpoint.updated", "updated"
+
+        metadata: dict[str, Any] = {"client_id": after.client_id, "contact_type": after.contact_type.value}
+        if event_type == "client_touchpoint.updated":
+            # Field KEYS only, never values -- same "structural, never a
+            # value" convention as luma_contact_enrichment's own
+            # fields_updated metadata. Never includes note/contacted_by/
+            # contact_name/email as VALUES; the field NAME "note" or
+            # "contacted_by" appearing here is not itself PII.
+            before_dump = before.model_dump(exclude={"updated_at"})
+            after_dump = after.model_dump(exclude={"updated_at"})
+            metadata["fields_updated"] = sorted(k for k in after_dump if before_dump.get(k) != after_dump[k])
+
+        await self.activity_log.record(
+            event_type=event_type,
+            category=ActivityCategory.CLIENT_CRM,
+            source=ActivitySource.MANUAL_CLIENT_CRM,
+            summary=f"A Touchpoint for the Client was {verb}.",
+            entity_type="client_touchpoint",
+            entity_id=after.touchpoint_id,
+            entity_name=None,
+            metadata=metadata,
         )

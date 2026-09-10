@@ -71,6 +71,7 @@ from app.repositories.sqlite_campaign_store import SQLiteCampaignStore
 from app.repositories.sqlite_client_contact_store import SQLiteClientContactStore
 from app.repositories.sqlite_client_store import SQLiteClientStore
 from app.repositories.sqlite_engagement_closeout_store import SQLiteEngagementCloseoutStore
+from app.repositories.sqlite_client_touchpoint_store import SQLiteClientTouchpointStore
 from app.repositories.sqlite_engagement_participant_store import SQLiteEngagementParticipantStore
 from app.repositories.sqlite_engagement_store import SQLiteEngagementStore
 from app.repositories.sqlite_crm_contact_list_member_store import SQLiteCrmContactListMemberStore
@@ -161,6 +162,7 @@ async def lifespan(app: FastAPI):
     engagement_store = SQLiteEngagementStore(settings.database_path)
     engagement_closeout_store = SQLiteEngagementCloseoutStore(settings.database_path)
     engagement_participant_store = SQLiteEngagementParticipantStore(settings.database_path)
+    client_touchpoint_store = SQLiteClientTouchpointStore(settings.database_path)
     crm_contact_store = SQLiteCrmContactStore(settings.database_path)
     crm_custom_field_store = SQLiteCrmCustomFieldStore(settings.database_path)
     crm_import_batch_store = SQLiteCrmImportBatchStore(settings.database_path)
@@ -206,6 +208,7 @@ async def lifespan(app: FastAPI):
     await engagement_store.connect()
     await engagement_closeout_store.connect()
     await engagement_participant_store.connect()
+    await client_touchpoint_store.connect()
     await crm_contact_store.connect()
     await crm_custom_field_store.connect()
     await crm_import_batch_store.connect()
@@ -274,6 +277,7 @@ async def lifespan(app: FastAPI):
         engagement_closeout_store=engagement_closeout_store,
         engagement_participant_store=engagement_participant_store,
         luma_event_store=luma_event_store,
+        client_touchpoint_store=client_touchpoint_store,
     )
     crm_service = CrmService(
         contact_store=crm_contact_store,
@@ -526,6 +530,7 @@ async def lifespan(app: FastAPI):
     await engagement_store.close()
     await engagement_closeout_store.close()
     await engagement_participant_store.close()
+    await client_touchpoint_store.close()
     await crm_contact_store.close()
     await crm_custom_field_store.close()
     await crm_import_batch_store.close()

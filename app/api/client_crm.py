@@ -39,6 +39,8 @@ from app.models.client_crm import (
     ClientPage,
     ClientRelationshipClassification,
     ClientStatus,
+    ClientTouchpoint,
+    ContactType,
     DinnerType,
     Engagement,
     EngagementCloseout,
@@ -56,6 +58,7 @@ from app.services.client_crm_service import (
     ClientContactNotFound,
     ClientCrmService,
     ClientNotFound,
+    ClientTouchpointNotFound,
     EngagementCloseoutAlreadyExists,
     EngagementCloseoutNotFound,
     EngagementLumaEventAlreadyLinked,
@@ -274,6 +277,36 @@ class EngagementParticipantUpdateRequest(BaseModel):
     rsvp_status: ParticipantRsvpStatus | None = None
     attendance_status: ParticipantAttendanceStatus | None = None
     is_walk_in: bool | None = None
+    archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
+
+
+class ClientTouchpointCreateRequest(BaseModel):
+    """Client CRM Stage 2A. `occurred_at` is optional here -- omitting it
+    defaults to "now" in ClientCrmService.create_client_touchpoint() (the
+    "Date defaults to today" UX requirement). `contact_type`/`contacted_by`
+    are required. `contact_name` has no field here at all -- always
+    server-derived from `crm_contact_id`, never caller-settable."""
+
+    crm_contact_id: str | None = None
+    occurred_at: datetime | None = None
+    contact_type: ContactType
+    contacted_by: str
+    note: str | None = None
+
+
+class ClientTouchpointUpdateRequest(BaseModel):
+    """Every field optional -- a genuine partial PATCH, same convention as
+    every other Client CRM update request. Sending `crm_contact_id`
+    links/relinks (re-validated + re-snapshotted) or, sent as `null`,
+    unlinks (clearing `contact_name` too) -- see
+    ClientCrmService.update_client_touchpoint()'s own docstring. No
+    `contact_name` field here either -- still entirely server-owned."""
+
+    crm_contact_id: str | None = None
+    occurred_at: datetime | None = None
+    contact_type: ContactType | None = None
+    contacted_by: str | None = None
+    note: str | None = None
     archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
 
 
@@ -564,5 +597,62 @@ async def update_engagement_participant(
         raise HTTPException(status_code=404, detail=str(e))
     except EngagementParticipantDuplicate as e:
         raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# =========================================================================
+# ClientTouchpoint -- Client CRM Stage 2A (2026-09-11). Backend foundation
+# only -- no derived Last Contact/Last Contacted/Next Dinner is computed
+# or returned anywhere in this stage. No DELETE route -- archive/restore
+# only, same convention as every other Client CRM entity.
+# =========================================================================
+
+
+@router.get("/clients/{client_id}/touchpoints", response_model=list[ClientTouchpoint])
+async def list_client_touchpoints(
+    client_id: str, include_archived: bool = False, service: ClientCrmService = Depends(get_client_crm_service)
+):
+    """Newest first. Archived Touchpoints are excluded by default --
+    pass `include_archived=true` to include them too -- see
+    ClientCrmService.list_client_touchpoints()'s own docstring for why
+    this stage's default differs from list_client_contacts()/
+    list_engagement_participants() (neither of which filters)."""
+    try:
+        return await service.list_client_touchpoints(client_id, include_archived=include_archived)
+    except ClientNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/clients/{client_id}/touchpoints", response_model=ClientTouchpoint)
+async def create_client_touchpoint(
+    client_id: str, payload: ClientTouchpointCreateRequest, service: ClientCrmService = Depends(get_client_crm_service)
+):
+    """400 if `contacted_by` is blank, `contact_type` is invalid, or
+    `crm_contact_id` doesn't refer to a Contact already linked to this
+    Client via an active ClientContact."""
+    try:
+        return await service.create_client_touchpoint(client_id, payload.model_dump())
+    except ClientNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.patch("/clients/{client_id}/touchpoints/{touchpoint_id}", response_model=ClientTouchpoint)
+async def update_client_touchpoint(
+    client_id: str,
+    touchpoint_id: str,
+    payload: ClientTouchpointUpdateRequest,
+    service: ClientCrmService = Depends(get_client_crm_service),
+):
+    """`exclude_unset=True` is what makes this a genuine partial PATCH --
+    same convention as every other Client CRM update route. 400 for the
+    same validation cases as create, plus an attempt to blank out an
+    already-set `contacted_by`."""
+    try:
+        return await service.update_client_touchpoint(client_id, touchpoint_id, payload.model_dump(exclude_unset=True))
+    except (ClientNotFound, ClientTouchpointNotFound) as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

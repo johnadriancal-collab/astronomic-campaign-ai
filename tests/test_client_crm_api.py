@@ -21,6 +21,7 @@ from app.models.luma import LumaEvent
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.client_contact_store import MemoryClientContactStore
 from app.repositories.client_store import MemoryClientStore
+from app.repositories.client_touchpoint_store import MemoryClientTouchpointStore
 from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.engagement_closeout_store import MemoryEngagementCloseoutStore
 from app.repositories.engagement_participant_store import MemoryEngagementParticipantStore
@@ -41,6 +42,7 @@ def test_client():
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
         engagement_participant_store=MemoryEngagementParticipantStore(),
         luma_event_store=MemoryLumaEventStore(),
+        client_touchpoint_store=MemoryClientTouchpointStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -63,6 +65,7 @@ def contact_test_client():
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
         engagement_participant_store=MemoryEngagementParticipantStore(),
         luma_event_store=MemoryLumaEventStore(),
+        client_touchpoint_store=MemoryClientTouchpointStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -86,6 +89,7 @@ def luma_test_client():
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
         engagement_participant_store=MemoryEngagementParticipantStore(),
         luma_event_store=luma_event_store,
+        client_touchpoint_store=MemoryClientTouchpointStore(),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -1215,3 +1219,218 @@ def test_participant_creation_never_mutates_closeout(test_client):
     resp = client.get(closeout_url)
     assert resp.json()["confirmed_guest_count"] == 24
     assert resp.json()["attended_count"] == 24
+
+
+# =========================================================================
+# ClientTouchpoint -- Client CRM Stage 2A (2026-09-11)
+# =========================================================================
+
+
+def _touchpoints_url(client_id: str) -> str:
+    return f"/client-crm/clients/{client_id}/touchpoints"
+
+
+def _touchpoint_url(client_id: str, touchpoint_id: str) -> str:
+    return f"/client-crm/clients/{client_id}/touchpoints/{touchpoint_id}"
+
+
+def _link_client_contact(client, client_id: str, crm_contact_id: str = "ethan-1") -> dict:
+    resp = client.post(f"/client-crm/clients/{client_id}/contacts", json={"crm_contact_id": crm_contact_id})
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def test_list_touchpoints_empty_state(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.get(_touchpoints_url(created["client_id"]))
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_list_touchpoints_excludes_archived_by_default(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    active = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"}).json()
+    to_archive = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "email", "contacted_by": "Ria"}).json()
+    client.patch(_touchpoint_url(created["client_id"], to_archive["touchpoint_id"]), json={"archived": True})
+
+    resp = client.get(_touchpoints_url(created["client_id"]))
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [t["touchpoint_id"] for t in body] == [active["touchpoint_id"]]
+
+
+def test_list_touchpoints_include_archived_true_returns_both(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    active = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"}).json()
+    to_archive = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "email", "contacted_by": "Ria"}).json()
+    client.patch(_touchpoint_url(created["client_id"], to_archive["touchpoint_id"]), json={"archived": True})
+
+    resp = client.get(_touchpoints_url(created["client_id"]), params={"include_archived": "true"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {t["touchpoint_id"] for t in body} == {active["touchpoint_id"], to_archive["touchpoint_id"]}
+
+
+def test_list_touchpoints_missing_client_is_404(test_client):
+    client, _service = test_client
+    resp = client.get(_touchpoints_url("does-not-exist"))
+    assert resp.status_code == 404
+
+
+def test_create_touchpoint_minimal(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["contact_type"] == "call"
+    assert body["contacted_by"] == "Ria"
+    assert body["crm_contact_id"] is None
+    assert body["contact_name"] is None
+    assert body["archived"] is False
+
+
+def test_create_touchpoint_missing_client_is_404(test_client):
+    client, _service = test_client
+    resp = client.post(_touchpoints_url("does-not-exist"), json={"contact_type": "call", "contacted_by": "Ria"})
+    assert resp.status_code == 404
+
+
+def test_create_touchpoint_missing_contact_type_is_422(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(_touchpoints_url(created["client_id"]), json={"contacted_by": "Ria"})
+    assert resp.status_code == 422
+
+
+def test_create_touchpoint_invalid_contact_type_is_422(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "fax", "contacted_by": "Ria"})
+    assert resp.status_code == 422
+
+
+def test_create_touchpoint_missing_contacted_by_is_422(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "call"})
+    assert resp.status_code == 422
+
+
+def test_create_touchpoint_blank_contacted_by_is_400(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "   "})
+    assert resp.status_code == 400
+
+
+def test_create_touchpoint_with_linked_contact(contact_test_client):
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    _link_client_contact(client, created_client["client_id"])
+
+    resp = client.post(
+        _touchpoints_url(created_client["client_id"]),
+        json={"crm_contact_id": "ethan-1", "contact_type": "email", "contacted_by": "Ria"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["crm_contact_id"] == "ethan-1"
+    assert body["contact_name"] == "Ethan Wong"
+
+
+def test_create_touchpoint_nonexistent_contact_is_400(contact_test_client):
+    client, _service, _crm_contact_store = contact_test_client
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(
+        _touchpoints_url(created_client["client_id"]),
+        json={"crm_contact_id": "does-not-exist", "contact_type": "email", "contacted_by": "Ria"},
+    )
+    assert resp.status_code == 400
+
+
+def test_create_touchpoint_contact_not_linked_to_this_client_is_400(contact_test_client):
+    """The Contact exists in the CRM but has never been linked to THIS
+    Client via a ClientContact -- Stage 2A's own core validation rule."""
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.post(
+        _touchpoints_url(created_client["client_id"]),
+        json={"crm_contact_id": "ethan-1", "contact_type": "email", "contacted_by": "Ria"},
+    )
+    assert resp.status_code == 400
+
+
+def test_get_touchpoint_via_list_after_create(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    client.post(_touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"})
+    resp = client.get(_touchpoints_url(created["client_id"]))
+    assert resp.status_code == 200
+    assert len(resp.json()) == 1
+
+
+def test_update_touchpoint_partial_patch(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    created_touchpoint = client.post(
+        _touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"}
+    ).json()
+    resp = client.patch(
+        _touchpoint_url(created["client_id"], created_touchpoint["touchpoint_id"]), json={"note": "Left a voicemail."}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["note"] == "Left a voicemail."
+    assert body["contacted_by"] == "Ria"  # untouched
+
+
+def test_update_touchpoint_missing_is_404(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    resp = client.patch(_touchpoint_url(created["client_id"], "does-not-exist"), json={"note": "x"})
+    assert resp.status_code == 404
+
+
+def test_archive_and_restore_touchpoint_via_patch(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    created_touchpoint = client.post(
+        _touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"}
+    ).json()
+    touchpoint_url = _touchpoint_url(created["client_id"], created_touchpoint["touchpoint_id"])
+
+    archived = client.patch(touchpoint_url, json={"archived": True})
+    assert archived.status_code == 200
+    assert archived.json()["archived"] is True
+
+    restored = client.patch(touchpoint_url, json={"archived": False})
+    assert restored.status_code == 200
+    assert restored.json()["archived"] is False
+
+
+def test_no_delete_route_exists_for_touchpoints(test_client):
+    client, _service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    created_touchpoint = client.post(
+        _touchpoints_url(created["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"}
+    ).json()
+    resp = client.delete(_touchpoint_url(created["client_id"], created_touchpoint["touchpoint_id"]))
+    assert resp.status_code in (404, 405)
+
+
+def test_touchpoint_isolation_across_clients(test_client):
+    client, _service = test_client
+    client_a = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    client_b = client.post("/client-crm/clients", json={"name": "Other Co"}).json()
+    touchpoint = client.post(
+        _touchpoints_url(client_a["client_id"]), json={"contact_type": "call", "contacted_by": "Ria"}
+    ).json()
+
+    resp = client.patch(_touchpoint_url(client_b["client_id"], touchpoint["touchpoint_id"]), json={"note": "hijacked"})
+    assert resp.status_code == 404
