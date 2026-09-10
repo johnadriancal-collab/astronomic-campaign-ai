@@ -11,15 +11,19 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ClientFormModal } from "@/components/client-form-modal";
 import { ClientContactFormModal } from "@/components/client-contact-form-modal";
 import { EngagementFormModal } from "@/components/engagement-form-modal";
+import { TouchpointFormModal } from "@/components/touchpoint-form-modal";
 import {
   ApiError,
   getClient,
   listClientContacts,
   listClientEngagements,
+  listClientTouchpoints,
   updateClient,
   updateClientContact,
+  updateClientTouchpoint,
   type Client,
   type ClientContact,
+  type ClientTouchpoint,
   type Engagement,
 } from "@/lib/api";
 import {
@@ -28,12 +32,14 @@ import {
   clientRelationshipClassificationLabel,
   clientStatusBadgeClass,
   clientStatusLabel,
+  contactTypeLabel,
   dinnerTypeLabel,
   engagementStatusBadgeClass,
   engagementStatusLabel,
   engagementTypeLabel,
   formatClientDate,
   formatEngagementDate,
+  latestActiveTouchpoint,
 } from "@/lib/client-crm";
 import { cn } from "@/lib/utils";
 
@@ -67,6 +73,13 @@ export default function ClientDetailPage() {
   const [engagements, setEngagements] = useState<Engagement[] | null>(null);
   const [engagementsError, setEngagementsError] = useState<string | null>(null);
   const [engagementModalOpen, setEngagementModalOpen] = useState(false);
+
+  const [touchpoints, setTouchpoints] = useState<ClientTouchpoint[] | null>(null);
+  const [touchpointsError, setTouchpointsError] = useState<string | null>(null);
+  const [touchpointModalOpen, setTouchpointModalOpen] = useState(false);
+  const [editingTouchpoint, setEditingTouchpoint] = useState<ClientTouchpoint | null>(null);
+  const [touchpointActionError, setTouchpointActionError] = useState<string | null>(null);
+  const [busyTouchpointId, setBusyTouchpointId] = useState<string | null>(null);
 
   async function load() {
     try {
@@ -102,10 +115,22 @@ export default function ClientDetailPage() {
     }
   }
 
+  async function loadTouchpoints() {
+    try {
+      setTouchpoints(await listClientTouchpoints(clientId));
+      setTouchpointsError(null);
+    } catch (err) {
+      setTouchpointsError(
+        err instanceof ApiError ? `Couldn't load Touchpoints (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    }
+  }
+
   useEffect(() => {
     load();
     loadContacts();
     loadEngagements();
+    loadTouchpoints();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clientId]);
 
@@ -190,6 +215,27 @@ export default function ClientDetailPage() {
     }
   }
 
+  async function handleArchiveTouchpoint(touchpoint: ClientTouchpoint) {
+    if (!client) return;
+    const confirmed = window.confirm("Archive this Touchpoint? It will be removed from the visible history but can be restored anytime.");
+    if (!confirmed) return;
+    setBusyTouchpointId(touchpoint.touchpoint_id);
+    setTouchpointActionError(null);
+    try {
+      await updateClientTouchpoint(client.client_id, touchpoint.touchpoint_id, { archived: true });
+      // A full refetch (rather than a local patch) is what keeps ordering
+      // and the archived-excluded-by-default listing correct without
+      // duplicating the backend's own logic here.
+      await loadTouchpoints();
+    } catch (err) {
+      setTouchpointActionError(
+        err instanceof ApiError ? `Couldn't archive this Touchpoint (${err.status}): ${err.message}` : "Couldn't reach the backend."
+      );
+    } finally {
+      setBusyTouchpointId(null);
+    }
+  }
+
   if (notFound) {
     return (
       <div className="mx-auto max-w-3xl px-6 py-10">
@@ -223,6 +269,11 @@ export default function ClientDetailPage() {
   if (!client) {
     return <div className={cn("mx-auto max-w-3xl px-6 py-10 text-sm text-muted-foreground")}>Loading…</div>;
   }
+
+  // Derived, not stored -- see this stage's own approved design ("Do NOT
+  // create duplicate Last Contact fields on Client").
+  const lastContact = touchpoints !== null ? latestActiveTouchpoint(touchpoints) : null;
+  const activeClientContacts = contacts !== null ? contacts.filter((c) => !c.archived) : [];
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-10">
@@ -420,6 +471,112 @@ export default function ClientDetailPage() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-sm">Touchpoints</CardTitle>
+            <Button
+              size="sm"
+              variant="outline"
+              className="gap-1.5"
+              onClick={() => {
+                setEditingTouchpoint(null);
+                setTouchpointModalOpen(true);
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Log Touchpoint
+            </Button>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {touchpointsError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{touchpointsError}</AlertDescription>
+              </Alert>
+            )}
+            {touchpointActionError && (
+              <Alert variant="destructive" className="mb-3">
+                <AlertDescription>{touchpointActionError}</AlertDescription>
+              </Alert>
+            )}
+
+            {touchpoints === null && !touchpointsError && <p className="text-sm text-muted-foreground">Loading…</p>}
+
+            {touchpoints !== null && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Last Contact</p>
+                {lastContact ? (
+                  <div className="mt-1 grid gap-3 sm:grid-cols-3">
+                    <OverviewField label="Date" value={formatClientDate(lastContact.occurred_at)} />
+                    <OverviewField label="Contact Type" value={contactTypeLabel(lastContact.contact_type)} />
+                    <OverviewField label="Contacted By" value={lastContact.contacted_by || "—"} />
+                  </div>
+                ) : (
+                  <p className="mt-1 text-sm text-muted-foreground">No contact has been logged yet.</p>
+                )}
+              </div>
+            )}
+
+            {touchpoints !== null && (
+              <div>
+                <p className="text-xs font-medium text-muted-foreground">Touchpoint History</p>
+                {touchpoints.length === 0 ? (
+                  <p className="mt-1 text-sm text-muted-foreground">No Touchpoints logged yet.</p>
+                ) : (
+                  <div className="mt-2 overflow-x-auto rounded-lg border border-border/60">
+                    <table className="w-full text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-border/60 text-xs text-muted-foreground">
+                          <th className="p-2 font-medium">Date</th>
+                          <th className="p-2 font-medium">Type</th>
+                          <th className="p-2 font-medium">Activity</th>
+                          <th className="p-2 font-medium">Contact</th>
+                          <th className="p-2 font-medium">Contacted By</th>
+                          <th className="p-2 font-medium text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {touchpoints.map((touchpoint) => (
+                          <tr key={touchpoint.touchpoint_id} className="border-b border-border/60 last:border-0">
+                            <td className="whitespace-nowrap p-2">{formatClientDate(touchpoint.occurred_at)}</td>
+                            <td className="whitespace-nowrap p-2">{contactTypeLabel(touchpoint.contact_type)}</td>
+                            <td className="p-2">{touchpoint.note || "—"}</td>
+                            <td className="whitespace-nowrap p-2">{touchpoint.contact_name || "—"}</td>
+                            <td className="whitespace-nowrap p-2">{touchpoint.contacted_by || "—"}</td>
+                            <td className="p-2 text-right">
+                              <div className="flex justify-end gap-2">
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={busyTouchpointId === touchpoint.touchpoint_id}
+                                  onClick={() => {
+                                    setEditingTouchpoint(touchpoint);
+                                    setTouchpointModalOpen(true);
+                                  }}
+                                >
+                                  Edit
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="text-muted-foreground hover:text-destructive"
+                                  disabled={busyTouchpointId === touchpoint.touchpoint_id}
+                                  onClick={() => handleArchiveTouchpoint(touchpoint)}
+                                >
+                                  Archive
+                                </Button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <CardTitle className="text-sm">Engagements</CardTitle>
             <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setEngagementModalOpen(true)}>
               <Plus className="h-3.5 w-3.5" />
@@ -495,6 +652,14 @@ export default function ClientDetailPage() {
         client={client}
         existingEngagement={null}
         onSaved={handleEngagementSaved}
+      />
+      <TouchpointFormModal
+        open={touchpointModalOpen}
+        onOpenChange={setTouchpointModalOpen}
+        client={client}
+        activeContacts={activeClientContacts}
+        existingTouchpoint={editingTouchpoint}
+        onSaved={() => loadTouchpoints()}
       />
     </div>
   );

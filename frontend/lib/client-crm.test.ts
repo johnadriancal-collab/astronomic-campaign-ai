@@ -13,6 +13,9 @@ import {
   clientStatusBadgeClass,
   clientStatusLabel,
   clientUpdatePatch,
+  CONTACT_TYPE_OPTIONS,
+  CONTACTED_BY_OPTIONS,
+  contactTypeLabel,
   defaultClientListFilters,
   dinnerTypeLabel,
   emptyClientContactFormState,
@@ -20,6 +23,7 @@ import {
   emptyEngagementCloseoutFormState,
   emptyEngagementFormState,
   emptyEngagementParticipantFormState,
+  emptyTouchpointFormState,
   engagementCloseoutAttendanceRate,
   engagementCloseoutCreatePayload,
   engagementCloseoutFormStateFromCloseout,
@@ -35,16 +39,21 @@ import {
   formatClientDate,
   formatEngagementDate,
   isClientFormValid,
+  isCuratedContactedBy,
   isDinnerShapedEngagementType,
   isEngagementFormValid,
+  latestActiveTouchpoint,
   participantAttendanceStatusLabel,
   participantDisplayName,
   participantIdentityIsMeaningful,
   participantRoleLabel,
   participantRsvpStatusLabel,
+  touchpointCreatePayload,
+  touchpointFormStateFromTouchpoint,
+  touchpointUpdatePatch,
   PARTICIPANT_ROLE_OPTIONS,
 } from "./client-crm.ts";
-import type { Client, ClientContact, Engagement, EngagementCloseout, EngagementParticipant } from "./api.ts";
+import type { Client, ClientContact, ClientTouchpoint, Engagement, EngagementCloseout, EngagementParticipant } from "./api.ts";
 
 function makeClient(overrides: Partial<Client> = {}): Client {
   return {
@@ -882,4 +891,211 @@ test("engagementParticipantUpdatePatch never includes participant_id/engagement_
   assert.ok(!("source" in patch));
   assert.ok(!("created_at" in patch));
   assert.ok(!("updated_at" in patch));
+});
+
+// --- ClientTouchpoint (Stage 2A backend, Stage 2B frontend) -----------------
+
+function makeClientTouchpoint(overrides: Partial<ClientTouchpoint> = {}): ClientTouchpoint {
+  return {
+    touchpoint_id: "tp1",
+    client_id: "c1",
+    crm_contact_id: null,
+    contact_name: null,
+    occurred_at: "2026-09-10T00:00:00.000Z",
+    contact_type: "email",
+    contacted_by: "Chris",
+    note: null,
+    created_at: "2026-09-10T00:00:00.000Z",
+    updated_at: "2026-09-10T00:00:00.000Z",
+    archived: false,
+    ...overrides,
+  };
+}
+
+// --- labels/options ----------------------------------------------------------
+
+test("CONTACT_TYPE_OPTIONS has exactly the five approved V1 values", () => {
+  assert.deepEqual(
+    CONTACT_TYPE_OPTIONS.map((o) => o.value),
+    ["email", "call", "slack", "linkedin", "in_person"]
+  );
+});
+
+test("contactTypeLabel gives a friendly label for each value, including the hyphenated In-person", () => {
+  assert.equal(contactTypeLabel("email"), "Email");
+  assert.equal(contactTypeLabel("call"), "Call");
+  assert.equal(contactTypeLabel("slack"), "Slack");
+  assert.equal(contactTypeLabel("linkedin"), "LinkedIn");
+  assert.equal(contactTypeLabel("in_person"), "In-person");
+});
+
+test("CONTACTED_BY_OPTIONS is the confirmed V1 roster", () => {
+  assert.deepEqual(CONTACTED_BY_OPTIONS, ["Chris", "John", "Karla", "Ria"]);
+});
+
+test("isCuratedContactedBy is true only for an exact, case-sensitive match against the roster", () => {
+  assert.equal(isCuratedContactedBy("Chris"), true);
+  assert.equal(isCuratedContactedBy("chris"), false);
+  assert.equal(isCuratedContactedBy("Someone Else"), false);
+});
+
+// --- form helpers --------------------------------------------------------------
+
+test("emptyTouchpointFormState defaults to today, Email, no Contact, no Contacted By, no note", () => {
+  const form = emptyTouchpointFormState();
+  const today = new Date();
+  const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  assert.equal(form.occurredAt, expected);
+  assert.equal(form.contactType, "email");
+  assert.equal(form.crmContactId, null);
+  assert.equal(form.contactedBy, "");
+  assert.equal(form.note, "");
+});
+
+test("touchpointFormStateFromTouchpoint round-trips every field", () => {
+  const touchpoint = makeClientTouchpoint({
+    crm_contact_id: "crm-1",
+    contact_name: "Alice Anders",
+    occurred_at: "2026-09-05T00:00:00.000Z",
+    contact_type: "call",
+    contacted_by: "Karla",
+    note: "Dinner proposal sent",
+  });
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  assert.equal(form.occurredAt, "2026-09-05");
+  assert.equal(form.contactType, "call");
+  assert.equal(form.crmContactId, "crm-1");
+  assert.equal(form.contactedBy, "Karla");
+  assert.equal(form.note, "Dinner proposal sent");
+});
+
+test("touchpointFormStateFromTouchpoint maps null note/contacted_by/crm_contact_id to empty/null form values", () => {
+  const touchpoint = makeClientTouchpoint({ crm_contact_id: null, contacted_by: null, note: null });
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  assert.equal(form.crmContactId, null);
+  assert.equal(form.contactedBy, "");
+  assert.equal(form.note, "");
+});
+
+test("touchpointCreatePayload sends a trimmed contacted_by and null note when blank", () => {
+  const form = emptyTouchpointFormState();
+  form.occurredAt = "2026-09-10";
+  form.contactType = "slack";
+  form.contactedBy = "  Ria  ";
+  const payload = touchpointCreatePayload(form);
+  assert.equal(payload.contact_type, "slack");
+  assert.equal(payload.contacted_by, "Ria");
+  assert.equal(payload.note, null);
+  assert.equal(payload.crm_contact_id, null);
+});
+
+test("touchpointCreatePayload trims a non-blank note and keeps it, and passes through a selected crm_contact_id", () => {
+  const form = emptyTouchpointFormState();
+  form.contactedBy = "Chris";
+  form.crmContactId = "crm-9";
+  form.note = "  Dinner proposal sent  ";
+  const payload = touchpointCreatePayload(form);
+  assert.equal(payload.note, "Dinner proposal sent");
+  assert.equal(payload.crm_contact_id, "crm-9");
+});
+
+test("touchpointUpdatePatch is empty when nothing changed", () => {
+  const touchpoint = makeClientTouchpoint();
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  assert.deepEqual(touchpointUpdatePatch(form, touchpoint), {});
+});
+
+test("touchpointUpdatePatch includes only the field that actually changed", () => {
+  const touchpoint = makeClientTouchpoint();
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  form.contactType = "linkedin";
+  assert.deepEqual(touchpointUpdatePatch(form, touchpoint), { contact_type: "linkedin" });
+});
+
+test("touchpointUpdatePatch trims a changed contacted_by value", () => {
+  const touchpoint = makeClientTouchpoint({ contacted_by: "Chris" });
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  form.contactedBy = "  John  ";
+  assert.deepEqual(touchpointUpdatePatch(form, touchpoint), { contacted_by: "John" });
+});
+
+test("touchpointUpdatePatch sends an explicit null to clear a linked Contact, never just omitting the field", () => {
+  const touchpoint = makeClientTouchpoint({ crm_contact_id: "crm-1", contact_name: "Alice Anders" });
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  form.crmContactId = null;
+  const patch = touchpointUpdatePatch(form, touchpoint);
+  assert.ok("crm_contact_id" in patch);
+  assert.equal(patch.crm_contact_id, null);
+});
+
+test("touchpointUpdatePatch never includes touchpoint_id/client_id/contact_name/created_at/updated_at", () => {
+  const touchpoint = makeClientTouchpoint();
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  form.note = "changed";
+  const patch = touchpointUpdatePatch(form, touchpoint);
+  assert.ok(!("touchpoint_id" in patch));
+  assert.ok(!("client_id" in patch));
+  assert.ok(!("contact_name" in patch));
+  assert.ok(!("created_at" in patch));
+  assert.ok(!("updated_at" in patch));
+});
+
+// --- date safety ---------------------------------------------------------------
+
+test("a selected calendar date round-trips through create -> edit-form without shifting a day", () => {
+  const form = emptyTouchpointFormState();
+  form.occurredAt = "2026-09-10";
+  form.contactedBy = "Chris";
+  const payload = touchpointCreatePayload(form);
+  // Simulate the backend echoing back exactly what was stored.
+  const stored = makeClientTouchpoint({ occurred_at: payload.occurred_at! });
+  const editForm = touchpointFormStateFromTouchpoint(stored);
+  assert.equal(editForm.occurredAt, "2026-09-10");
+});
+
+test("formatClientDate displays the same calendar day the operator picked, independent of the reader's own timezone", () => {
+  const form = emptyTouchpointFormState();
+  form.occurredAt = "2026-01-01";
+  form.contactedBy = "Chris";
+  const payload = touchpointCreatePayload(form);
+  assert.equal(formatClientDate(payload.occurred_at!), "Jan 1, 2026");
+});
+
+test("touchpointUpdatePatch does not fire a date change when the edit form's date string is unchanged", () => {
+  const touchpoint = makeClientTouchpoint({ occurred_at: "2026-09-10T00:00:00.000Z" });
+  const form = touchpointFormStateFromTouchpoint(touchpoint);
+  assert.ok(!("occurred_at" in touchpointUpdatePatch(form, touchpoint)));
+});
+
+// --- Last Contact (derived, not stored) -----------------------------------------
+
+test("latestActiveTouchpoint returns null for an empty list -- the empty state, never a fabricated value", () => {
+  assert.equal(latestActiveTouchpoint([]), null);
+});
+
+test("latestActiveTouchpoint returns the newest active Touchpoint, trusting the backend's own newest-first ordering", () => {
+  const newest = makeClientTouchpoint({ touchpoint_id: "tp-newest", occurred_at: "2026-09-10T00:00:00.000Z" });
+  const older = makeClientTouchpoint({ touchpoint_id: "tp-older", occurred_at: "2026-09-01T00:00:00.000Z" });
+  assert.equal(latestActiveTouchpoint([newest, older]), newest);
+});
+
+test("latestActiveTouchpoint defensively skips an archived entry even if one leaks into the list", () => {
+  const archived = makeClientTouchpoint({ touchpoint_id: "tp-archived", archived: true });
+  const active = makeClientTouchpoint({ touchpoint_id: "tp-active", archived: false });
+  assert.equal(latestActiveTouchpoint([archived, active]), active);
+});
+
+test("archiving the current Last Contact makes the previous active Touchpoint the new Last Contact", () => {
+  const newest = makeClientTouchpoint({ touchpoint_id: "tp-newest" });
+  const previous = makeClientTouchpoint({ touchpoint_id: "tp-previous" });
+  const beforeArchive = [newest, previous];
+  assert.equal(latestActiveTouchpoint(beforeArchive), newest);
+  // The backend excludes an archived Touchpoint from the default list --
+  // a refetch after archiving never returns it, so it's simply absent here.
+  const afterArchive = [previous];
+  assert.equal(latestActiveTouchpoint(afterArchive), previous);
+});
+
+test("archiving the only Touchpoint returns to the empty Last Contact state", () => {
+  assert.equal(latestActiveTouchpoint([]), null);
 });

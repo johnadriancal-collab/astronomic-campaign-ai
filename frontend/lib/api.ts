@@ -2154,3 +2154,72 @@ export function updateEngagementParticipant(
     body: JSON.stringify(patch),
   });
 }
+
+// --- ClientTouchpoint (Client CRM Stage 2A, frontend Stage 2B) -------------
+// A persistent, structured record of one communication/interaction with a
+// Client -- deliberately its own entity, not ClientNote. `crm_contact_id`
+// is optional; when set, the backend requires it to already be an active
+// ClientContact of THIS Client, and `contact_name` is a server-populated
+// snapshot (never sent by the client, never editable directly) -- same
+// "point-in-time snapshot" convention as ClientContact/EngagementParticipant.
+// See app/models/client_crm.py's own ClientTouchpoint docstring.
+
+export type ContactType = "email" | "call" | "slack" | "linkedin" | "in_person";
+
+export interface ClientTouchpoint {
+  touchpoint_id: string;
+  client_id: string;
+  crm_contact_id: string | null;
+  contact_name: string | null;
+  occurred_at: string;
+  contact_type: ContactType;
+  contacted_by: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+  archived: boolean;
+}
+
+export interface ClientTouchpointCreateInput {
+  crm_contact_id?: string | null;
+  occurred_at?: string;
+  contact_type: ContactType;
+  contacted_by: string;
+  note?: string | null;
+}
+
+/** `crm_contact_id: null` clears both crm_contact_id and the contact_name
+ * snapshot server-side -- never send `contact_name` here, it's server-owned. */
+export type ClientTouchpointUpdateInput = Partial<ClientTouchpointCreateInput> & { archived?: boolean };
+
+function touchpointsUrl(clientId: string): string {
+  return `/client-crm/clients/${clientId}/touchpoints`;
+}
+
+/** Backend already returns newest-first, active-only by default -- see
+ * ClientCrmService.list_client_touchpoints's own ordering guarantee. */
+export function listClientTouchpoints(
+  clientId: string,
+  params: { includeArchived?: boolean } = {}
+): Promise<ClientTouchpoint[]> {
+  const query = new URLSearchParams();
+  if (params.includeArchived) query.set("include_archived", "true");
+  const qs = query.toString();
+  return request<ClientTouchpoint[]>(`${touchpointsUrl(clientId)}${qs ? `?${qs}` : ""}`);
+}
+
+export function createClientTouchpoint(clientId: string, input: ClientTouchpointCreateInput): Promise<ClientTouchpoint> {
+  return post<ClientTouchpoint>(touchpointsUrl(clientId), input);
+}
+
+export function updateClientTouchpoint(
+  clientId: string,
+  touchpointId: string,
+  patch: ClientTouchpointUpdateInput
+): Promise<ClientTouchpoint> {
+  return request<ClientTouchpoint>(`${touchpointsUrl(clientId)}/${touchpointId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}

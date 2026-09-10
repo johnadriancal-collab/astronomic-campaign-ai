@@ -69,3 +69,16 @@ test("no hard-delete control exists for an Engagement either", () => {
   assert.doesNotMatch(CLIENT_DETAIL_PAGE, /Delete Engagement/);
   assert.doesNotMatch(CLIENT_DETAIL_PAGE, /deleteClientEngagement/);
 });
+
+// --- Stage 2B: real Touchpoints section (Last Contact/Log Touchpoint/History) ---
+
+test("a real Touchpoints section is present, deriving Last Contact from real loaded data, not a fake field", () => {
+  assert.match(CLIENT_DETAIL_PAGE, /Touchpoints/);
+  assert.match(CLIENT_DETAIL_PAGE, /Log Touchpoint/);
+  assert.match(CLIENT_DETAIL_PAGE, /latestActiveTouchpoint\(touchpoints\)/);
+});
+
+test("no hard-delete control exists for a Touchpoint either", () => {
+  assert.doesNotMatch(CLIENT_DETAIL_PAGE, /Delete Touchpoint/);
+  assert.doesNotMatch(CLIENT_DETAIL_PAGE, /deleteClientTouchpoint/);
+});

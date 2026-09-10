@@ -14,7 +14,11 @@ import type {
   ClientCreateInput,
   ClientRelationshipClassification,
   ClientStatus,
+  ClientTouchpoint,
+  ClientTouchpointCreateInput,
+  ClientTouchpointUpdateInput,
   ClientUpdateInput,
+  ContactType,
   DinnerType,
   Engagement,
   EngagementCloseout,
@@ -857,4 +861,141 @@ export function engagementParticipantUpdatePatch(
   if (form.isWalkIn !== original.is_walk_in) patch.is_walk_in = form.isWalkIn;
 
   return patch;
+}
+
+// --- ClientTouchpoint (Stage 2A backend, Stage 2B frontend) -----------------
+// A persistent, structured record of one communication/interaction with a
+// Client -- see ClientTouchpoint's own model docstring on the backend.
+// `occurred_at` is a full datetime but the V1 UI only ever picks a
+// calendar day, so it uses the exact same UTC-midnight round-trip
+// convention as EngagementCloseout.completed_at above
+// (completedAtIsoFromFormValue) -- the displayed day never shifts because
+// of the viewer's own browser timezone.
+
+export const CONTACT_TYPE_OPTIONS: { value: ContactType; label: string }[] = [
+  { value: "email", label: "Email" },
+  { value: "call", label: "Call" },
+  { value: "slack", label: "Slack" },
+  { value: "linkedin", label: "LinkedIn" },
+  { value: "in_person", label: "In-person" },
+];
+
+export function contactTypeLabel(value: ContactType): string {
+  return CONTACT_TYPE_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+/** Curated V1 "Contacted By" roster -- confirmed directly with Astronomic,
+ * not derived from any existing data (Client.owner/Engagement.owner/
+ * EngagementCloseout.completed_by have no real values populated anywhere
+ * in this app yet, and no Staff/User model exists). Kept as one small
+ * constant, separate from the backend's free-text field, so the roster
+ * can change later without touching the model. */
+export const CONTACTED_BY_OPTIONS: string[] = ["Chris", "John", "Karla", "Ria"];
+
+/** Whether `value` is one of the curated names above (exact match, no
+ * case-folding -- the stored value is never normalized). Used by the form
+ * to decide whether to show the curated dropdown's own selection or fall
+ * back to the free-text "Other" field -- an existing stored value outside
+ * the curated list (e.g. someone removed from the roster later) must
+ * still render/preserve correctly via that fallback, never silently
+ * dropped. */
+export function isCuratedContactedBy(value: string): boolean {
+  return CONTACTED_BY_OPTIONS.includes(value);
+}
+
+export interface TouchpointFormState {
+  occurredAt: string; // "YYYY-MM-DD"
+  contactType: ContactType;
+  crmContactId: string | null;
+  contactedBy: string;
+  note: string;
+}
+
+/** Today's calendar date in the viewer's OWN local timezone, as a plain
+ * "YYYY-MM-DD" -- deliberately not `new Date().toISOString().slice(0,10)`,
+ * which would read back yesterday's or tomorrow's date depending on the
+ * viewer's timezone/time-of-day (the same off-by-one this whole feature
+ * exists to avoid). */
+function todayLocalDateInputValue(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+export function emptyTouchpointFormState(): TouchpointFormState {
+  return {
+    occurredAt: todayLocalDateInputValue(),
+    contactType: "email",
+    crmContactId: null,
+    contactedBy: "",
+    note: "",
+  };
+}
+
+export function touchpointFormStateFromTouchpoint(touchpoint: ClientTouchpoint): TouchpointFormState {
+  return {
+    occurredAt: touchpoint.occurred_at.slice(0, 10),
+    contactType: touchpoint.contact_type,
+    crmContactId: touchpoint.crm_contact_id,
+    contactedBy: touchpoint.contacted_by ?? "",
+    note: touchpoint.note ?? "",
+  };
+}
+
+/** Parses a plain "YYYY-MM-DD" as UTC midnight -- same fixed-point
+ * convention as completedAtIsoFromFormValue, so the calendar day the
+ * operator picked round-trips exactly (create -> reload -> edit) no
+ * matter what timezone the viewing browser is in. */
+function touchpointOccurredAtIsoFromFormValue(value: string): string {
+  return new Date(`${value}T00:00:00Z`).toISOString();
+}
+
+/** CREATE only. Contact Type and Contacted By are both required by the
+ * form (canSave gates on them); occurred_at is always sent explicitly
+ * (never left to the backend's own now()-default) since the operator
+ * picked a specific calendar day. */
+export function touchpointCreatePayload(form: TouchpointFormState): ClientTouchpointCreateInput {
+  return {
+    crm_contact_id: form.crmContactId,
+    occurred_at: touchpointOccurredAtIsoFromFormValue(form.occurredAt),
+    contact_type: form.contactType,
+    contacted_by: form.contactedBy.trim(),
+    note: form.note.trim() || null,
+  };
+}
+
+/** A genuine partial PATCH, same diff-only convention as the other Client
+ * CRM update-patch helpers. Clearing the Contact sends an explicit
+ * `crm_contact_id: null` (the backend then clears contact_name too) --
+ * never just omitted. */
+export function touchpointUpdatePatch(form: TouchpointFormState, original: ClientTouchpoint): ClientTouchpointUpdateInput {
+  const patch: ClientTouchpointUpdateInput = {};
+
+  const originalDate = original.occurred_at.slice(0, 10);
+  if (form.occurredAt !== originalDate) patch.occurred_at = touchpointOccurredAtIsoFromFormValue(form.occurredAt);
+
+  if (form.contactType !== original.contact_type) patch.contact_type = form.contactType;
+
+  if (form.crmContactId !== original.crm_contact_id) patch.crm_contact_id = form.crmContactId;
+
+  const contactedBy = form.contactedBy.trim();
+  if (contactedBy !== (original.contacted_by ?? "")) patch.contacted_by = contactedBy;
+
+  const note = form.note.trim() || null;
+  if (note !== original.note) patch.note = note;
+
+  return patch;
+}
+
+/** The newest active Touchpoint IS Last Contact for V1 -- no derived
+ * field is stored anywhere (see this stage's own approved design: "Do NOT
+ * create duplicate Last Contact fields on Client"). The backend already
+ * returns active Touchpoints newest-first by default, so this is a
+ * defensive `!archived` filter, not a re-sort -- if archived rows ever
+ * reach this list (e.g. a caller passed include_archived), they're
+ * excluded rather than trusted to sort correctly. */
+export function latestActiveTouchpoint(touchpoints: ClientTouchpoint[]): ClientTouchpoint | null {
+  return touchpoints.find((t) => !t.archived) ?? null;
 }
