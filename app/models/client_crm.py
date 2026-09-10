@@ -81,14 +81,49 @@ class Client(BaseModel):
     archived: bool = False  # soft-delete only, matching CrmContact.archived's own convention
 
 
+class ClientListItem(Client):
+    """Client CRM Stage 2C -- exactly a Client plus two READ-ONLY derived
+    summary columns for the Master Client CRM table, never persisted and
+    never accepted on any create/update request (only ClientPage's own
+    list_clients() response uses this type -- GET /clients/{id} and every
+    create/update route keep returning plain Client, unaugmented).
+
+    `next_dinner`: the earliest still-upcoming, qualifying Engagement's
+    own `engagement_date` for this Client (engagement_type == DINNER, not
+    archived, status != CANCELLED, engagement_date >= business-today), or
+    None if no such Engagement exists -- see
+    ClientCrmService.list_clients()'s own docstring for the exact
+    algorithm and the "business-today" timezone convention. NOT the same
+    thing as `Engagement.engagement_date` on any specific row -- this is a
+    derived MINIMUM across a Client's qualifying Engagements, recomputed
+    on every read, never cached or written back to any Engagement.
+
+    `last_contacted`: the newest active (non-archived) ClientTouchpoint's
+    own `occurred_at` for this Client, using the exact same canonical
+    `touchpoint_sort_key` ordering as the Client detail page's own Last
+    Contact -- see client_touchpoint_store.py. Deliberately the SAME
+    semantic definition in both places, computed from the same
+    ClientTouchpoint rows, so the Master CRM table and a Client's own
+    detail page can never disagree about who was contacted last.
+
+    Neither field is a new column on the `clients` table -- both are
+    computed at read time from Engagement/ClientTouchpoint data already
+    stored elsewhere, matching ClientTouchpoint's own explicit "no
+    Last Contact/Next Dinner concept belongs on Client" rule."""
+
+    next_dinner: date | None = None
+    last_contacted: datetime | None = None
+
+
 class ClientPage(BaseModel):
-    """One page of a filtered/sorted Client list (Stage 1B) -- same shape
-    as CrmContactPage/ActivityEventPage: `items` is exactly the one page
-    the caller asked for, `total` is the full filtered count (before
+    """One page of a filtered/sorted Client list (Stage 1B, `items` type
+    upgraded to ClientListItem in Stage 2C) -- same shape as
+    CrmContactPage/ActivityEventPage: `items` is exactly the one page the
+    caller asked for, `total` is the full filtered count (before
     pagination), so a caller never has to fetch everything to know how
     many pages exist."""
 
-    items: list[Client]
+    items: list[ClientListItem]
     total: int
     page: int
     page_size: int

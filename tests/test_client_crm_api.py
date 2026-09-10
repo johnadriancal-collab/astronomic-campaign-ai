@@ -8,7 +8,7 @@ isolation style as test_activity_api.py.
 """
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import FastAPI
@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.api.client_crm import router as client_crm_router
 from app.dependencies import get_client_crm_service
+from app.models.client_crm import ClientTouchpoint, ContactType, Engagement, EngagementType
 from app.models.crm import CrmContact
 from app.models.luma import LumaEvent
 from app.repositories.activity_event_store import MemoryActivityEventStore
@@ -216,6 +217,108 @@ def test_list_clients_invalid_sort_by_is_400(test_client):
     client, _service = test_client
     resp = client.get("/client-crm/clients", params={"sort_by": "not_a_real_field"})
     assert resp.status_code == 400
+
+
+# =====================================================================
+# next_dinner / last_contacted -- Client CRM Stage 2C
+# =====================================================================
+
+
+def test_list_clients_next_dinner_and_last_contacted_are_null_with_no_data(test_client):
+    client, _service = test_client
+    client.post("/client-crm/clients", json={"name": "Hive ASMBLD"})
+
+    resp = client.get("/client-crm/clients")
+    item = resp.json()["items"][0]
+    assert item["next_dinner"] is None
+    assert item["last_contacted"] is None
+
+
+def test_list_clients_next_dinner_and_last_contacted_are_populated(test_client):
+    client, service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    client_id = created["client_id"]
+
+    now = datetime.now(timezone.utc)
+    future_date = (now + timedelta(days=10)).date()
+    asyncio.run(
+        service.engagement_store.create(
+            Engagement(
+                engagement_id="e1",
+                client_id=client_id,
+                title="SF Investor Dinner",
+                engagement_type=EngagementType.DINNER,
+                engagement_date=future_date,
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
+    asyncio.run(
+        service.client_touchpoint_store.create(
+            ClientTouchpoint(
+                touchpoint_id="t1",
+                client_id=client_id,
+                occurred_at=now,
+                contact_type=ContactType.EMAIL,
+                contacted_by="Chris",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
+
+    resp = client.get("/client-crm/clients")
+    assert resp.status_code == 200
+    item = resp.json()["items"][0]
+    assert item["next_dinner"] == future_date.isoformat()
+    assert item["last_contacted"] == now.isoformat().replace("+00:00", "Z")
+
+
+def test_get_client_by_id_does_not_expose_next_dinner_or_last_contacted(test_client):
+    client, service = test_client
+    created = client.post("/client-crm/clients", json={"name": "Hive ASMBLD"}).json()
+    client_id = created["client_id"]
+
+    now = datetime.now(timezone.utc)
+    asyncio.run(
+        service.client_touchpoint_store.create(
+            ClientTouchpoint(
+                touchpoint_id="t1",
+                client_id=client_id,
+                occurred_at=now,
+                contact_type=ContactType.EMAIL,
+                contacted_by="Chris",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    )
+
+    resp = client.get(f"/client-crm/clients/{client_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "next_dinner" not in body
+    assert "last_contacted" not in body
+
+
+def test_list_clients_existing_search_filter_sort_pagination_unaffected_by_derived_fields(test_client):
+    """Regression guard: adding next_dinner/last_contacted to each item
+    must not change filtering/sorting/pagination behavior at all."""
+    client, _service = test_client
+    client.post("/client-crm/clients", json={"name": "Hive ASMBLD", "status": "active"})
+    client.post("/client-crm/clients", json={"name": "Acme Co", "status": "inactive"})
+
+    resp = client.get("/client-crm/clients", params={"q": "hive"})
+    assert resp.json()["total"] == 1
+    assert resp.json()["items"][0]["name"] == "Hive ASMBLD"
+
+    resp = client.get("/client-crm/clients", params={"sort_by": "name", "sort_dir": "desc"})
+    assert [c["name"] for c in resp.json()["items"]] == ["Hive ASMBLD", "Acme Co"]
+
+    resp = client.get("/client-crm/clients", params={"page": 1, "page_size": 1})
+    assert len(resp.json()["items"]) == 1
+    assert resp.json()["total"] == 2
 
 
 def test_update_client_partial_patch(test_client):

@@ -766,6 +766,69 @@ async def test_sqlite_engagement_save_and_archive(sqlite_engagement_store):
 
 
 # =====================================================================
+# Engagement.list_for_clients -- bulk cross-client lookup, Stage 2C
+# =====================================================================
+
+
+async def test_memory_engagement_list_for_clients_groups_correctly_and_excludes_unrelated():
+    store = MemoryEngagementStore()
+    await store.create(_engagement("e1", "c1"))
+    await store.create(_engagement("e2", "c2"))
+    await store.create(_engagement("e3", "c3"))  # unrelated -- not in the requested id list
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {e.engagement_id for e in found} == {"e1", "e2"}
+
+
+async def test_sqlite_engagement_list_for_clients_groups_correctly_and_excludes_unrelated(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    await store.create(_engagement("e2", "c2"))
+    await store.create(_engagement("e3", "c3"))
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {e.engagement_id for e in found} == {"e1", "e2"}
+
+
+async def test_memory_engagement_list_for_clients_multiple_engagements_per_client():
+    store = MemoryEngagementStore()
+    await store.create(_engagement("e1", "c1"))
+    await store.create(_engagement("e2", "c1"))
+    await store.create(_engagement("e3", "c2"))
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {e.engagement_id for e in found} == {"e1", "e2", "e3"}
+
+
+async def test_sqlite_engagement_list_for_clients_multiple_engagements_per_client(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    await store.create(_engagement("e2", "c1"))
+    await store.create(_engagement("e3", "c2"))
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {e.engagement_id for e in found} == {"e1", "e2", "e3"}
+
+
+async def test_memory_engagement_list_for_clients_empty_id_list_returns_empty():
+    store = MemoryEngagementStore()
+    await store.create(_engagement("e1", "c1"))
+    assert await store.list_for_clients([]) == []
+
+
+async def test_sqlite_engagement_list_for_clients_empty_id_list_returns_empty(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    assert await store.list_for_clients([]) == []
+
+
+async def test_sqlite_engagement_list_for_clients_unmatched_id_returns_empty(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    assert await store.list_for_clients(["c-does-not-exist"]) == []
+
+
+# =====================================================================
 # Engagement <-> Luma event link -- Client CRM Stage 1H-A (2026-09-09)
 # =====================================================================
 
@@ -1354,3 +1417,66 @@ async def test_sqlite_client_touchpoint_save_and_restore_round_trips_optional_co
     fresh_again = await store.get("t1")
     assert fresh_again.crm_contact_id is None
     assert fresh_again.contact_name is None
+
+
+# =====================================================================
+# ClientTouchpoint.list_for_clients -- bulk cross-client lookup, Stage 2C
+# =====================================================================
+
+
+async def test_memory_touchpoint_list_for_clients_groups_correctly_and_excludes_unrelated():
+    store = MemoryClientTouchpointStore()
+    await store.create(_touchpoint("t1", "c1"))
+    await store.create(_touchpoint("t2", "c2"))
+    await store.create(_touchpoint("t3", "c3"))  # unrelated -- not in the requested id list
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {t.touchpoint_id for t in found} == {"t1", "t2"}
+
+
+async def test_sqlite_touchpoint_list_for_clients_groups_correctly_and_excludes_unrelated(sqlite_client_touchpoint_store):
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint("t1", "c1"))
+    await store.create(_touchpoint("t2", "c2"))
+    await store.create(_touchpoint("t3", "c3"))
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {t.touchpoint_id for t in found} == {"t1", "t2"}
+
+
+async def test_memory_touchpoint_list_for_clients_multiple_touchpoints_per_client():
+    store = MemoryClientTouchpointStore()
+    await store.create(_touchpoint("t1", "c1"))
+    await store.create(_touchpoint("t2", "c1"))
+    await store.create(_touchpoint("t3", "c2"))
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {t.touchpoint_id for t in found} == {"t1", "t2", "t3"}
+
+
+async def test_sqlite_touchpoint_list_for_clients_multiple_touchpoints_per_client(sqlite_client_touchpoint_store):
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint("t1", "c1"))
+    await store.create(_touchpoint("t2", "c1"))
+    await store.create(_touchpoint("t3", "c2"))
+
+    found = await store.list_for_clients(["c1", "c2"])
+    assert {t.touchpoint_id for t in found} == {"t1", "t2", "t3"}
+
+
+async def test_memory_touchpoint_list_for_clients_empty_id_list_returns_empty():
+    store = MemoryClientTouchpointStore()
+    await store.create(_touchpoint("t1", "c1"))
+    assert await store.list_for_clients([]) == []
+
+
+async def test_sqlite_touchpoint_list_for_clients_empty_id_list_returns_empty(sqlite_client_touchpoint_store):
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint("t1", "c1"))
+    assert await store.list_for_clients([]) == []
+
+
+async def test_sqlite_touchpoint_list_for_clients_unmatched_id_returns_empty(sqlite_client_touchpoint_store):
+    store = sqlite_client_touchpoint_store
+    await store.create(_touchpoint("t1", "c1"))
+    assert await store.list_for_clients(["c-does-not-exist"]) == []

@@ -110,3 +110,14 @@ class SQLiteClientTouchpointStore(ClientTouchpointStore):
         await cursor.close()
         touchpoints = [_row_to_touchpoint(row) for row in rows]
         return sorted(touchpoints, key=touchpoint_sort_key, reverse=True)
+
+    async def list_for_clients(self, client_ids: list[str]) -> list[ClientTouchpoint]:
+        if not client_ids:
+            return []
+        placeholders = ",".join("?" for _ in client_ids)
+        cursor = await self._connection.execute(
+            f"SELECT * FROM client_touchpoints WHERE client_id IN ({placeholders})", tuple(client_ids)
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [_row_to_touchpoint(row) for row in rows]

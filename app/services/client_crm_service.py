@@ -43,13 +43,15 @@ backend rule enforced here.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.models.activity import ActivityCategory, ActivitySource
 from app.models.client_crm import (
     Client,
     ClientContact,
+    ClientListItem,
     ClientPage,
     ClientRelationshipClassification,
     ClientStatus,
@@ -58,12 +60,14 @@ from app.models.client_crm import (
     Engagement,
     EngagementCloseout,
     EngagementParticipant,
+    EngagementStatus,
+    EngagementType,
     ParticipantSource,
 )
 from app.models.luma import LumaEventSummary
 from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
-from app.repositories.client_touchpoint_store import ClientTouchpointStore
+from app.repositories.client_touchpoint_store import ClientTouchpointStore, touchpoint_sort_key
 from app.repositories.crm_contact_store import CrmContactStore
 from app.repositories.engagement_closeout_store import EngagementCloseoutStore
 from app.repositories.engagement_participant_store import (
@@ -75,6 +79,79 @@ from app.repositories.luma_event_store import LumaEventStore
 from app.services.activity_log_service import ActivityLogService
 
 SORTABLE_CLIENT_FIELDS = frozenset({"name", "created_at", "updated_at", "next_action_due"})
+# Deliberately does NOT include "next_dinner"/"last_contacted" -- those are
+# derived only for the current page's items (see list_clients()'s own
+# docstring), never computed for the FULL unfiltered/unpaginated Client
+# set, so sorting/filtering by either is not supported in Stage 2C.
+
+# Client CRM Stage 2C's chosen convention for interpreting
+# Engagement.engagement_date (a plain calendar date with no timezone of
+# its own) as "today" when deciding whether a dinner still qualifies as
+# upcoming -- the same App-wide choice already made once before, see
+# BUSINESS_TIMEZONE in app/services/astro_activity_tools.py for the full
+# reasoning (never UTC, never the caller's own local time). Defined again
+# here, as its own single constant, rather than imported from that
+# unrelated module, so this stage's derivation logic can later be
+# replaced by real event-local timezone semantics (see ClientListItem's
+# own docstring) by touching exactly one constant in the one module that
+# actually uses it for this purpose.
+_BUSINESS_TIMEZONE = ZoneInfo("America/Chicago")
+
+
+def _business_today(now: datetime | None = None) -> date:
+    """"Today," for Next Dinner purposes -- computed fresh from the
+    server's own clock (never client-supplied), converted into
+    _BUSINESS_TIMEZONE exactly once per list_clients() call so a single
+    response can never straddle a timezone-boundary inconsistency between
+    two Clients on the same page. `now` is a testing-only seam (an
+    already-UTC-aware instant to convert instead of the real clock) --
+    list_clients() itself always calls this with no argument."""
+    return (now or datetime.now(timezone.utc)).astimezone(_BUSINESS_TIMEZONE).date()
+
+
+def _next_dinner(engagements: list[Engagement], today: date) -> date | None:
+    """Client CRM Stage 2C. The earliest qualifying Engagement's own
+    engagement_date -- see ClientListItem's own docstring for the exact
+    qualifying definition (Dinner type, not archived, not cancelled, a
+    set date that is today or later). `today` is business-today (see
+    _business_today()), inclusive -- a dinner happening later today still
+    qualifies. Same-date ties break on engagement_id ascending, a plain,
+    deterministic (if arbitrary) order -- there is no other natural
+    ordering between two Dinners scheduled for the same calendar date."""
+    qualifying = [
+        e
+        for e in engagements
+        if e.engagement_type == EngagementType.DINNER
+        and not e.archived
+        and e.status != EngagementStatus.CANCELLED
+        and e.engagement_date is not None
+        and e.engagement_date >= today
+    ]
+    if not qualifying:
+        return None
+    qualifying.sort(key=lambda e: (e.engagement_date, e.engagement_id))
+    return qualifying[0].engagement_date
+
+
+def _last_contacted(touchpoints: list[ClientTouchpoint]) -> datetime | None:
+    """Client CRM Stage 2C. The newest active Touchpoint's own
+    occurred_at, using the exact same canonical touchpoint_sort_key
+    ordering the Client detail page's own Last Contact already uses (see
+    lib/client-crm.ts's latestActiveTouchpoint on the frontend) -- never a
+    second, independently-written ordering rule that could quietly drift
+    from it."""
+    active = [t for t in touchpoints if not t.archived]
+    if not active:
+        return None
+    newest = sorted(active, key=touchpoint_sort_key, reverse=True)[0]
+    return newest.occurred_at
+
+
+def _group_by_client_id(rows: list[Engagement] | list[ClientTouchpoint]) -> dict[str, list]:
+    grouped: dict[str, list] = {}
+    for row in rows:
+        grouped.setdefault(row.client_id, []).append(row)
+    return grouped
 
 # Server-owned fields -- stripped from any incoming create/update payload
 # BEFORE it's applied, regardless of what the caller sent. The API
@@ -366,7 +443,20 @@ class ClientCrmService:
         set is small and stable (unlike CrmContact's core+thesis+custom-
         fields shape that engine exists to handle generically), so a
         simple, explicitly-typed parameter set is a better fit and a much
-        smaller surface for Stage 1C's Clients table to build against."""
+        smaller surface for Stage 1C's Clients table to build against.
+
+        Stage 2C: returns ClientListItem (a strict superset of Client)
+        rather than Client, with two derived, never-persisted summary
+        columns -- next_dinner and last_contacted -- computed ONLY for
+        the Clients on the page actually being returned (after the
+        filter/sort/paginate slice above, not the full filtered set), via
+        exactly ONE bulk Engagement query and ONE bulk ClientTouchpoint
+        query total (EngagementStore.list_for_clients() /
+        ClientTouchpointStore.list_for_clients()) -- never one query per
+        Client. See _next_dinner()/_last_contacted() for the exact
+        derivation rules, and _business_today() for the timezone
+        convention used to decide whether a dinner still qualifies as
+        upcoming."""
         if sort_by not in SORTABLE_CLIENT_FIELDS:
             raise ValueError(f"sort_by must be one of {sorted(SORTABLE_CLIENT_FIELDS)}.")
         if sort_dir not in ("asc", "desc"):
@@ -404,7 +494,28 @@ class ClientCrmService:
         page = max(page, 1)
         page_size = max(page_size, 1)
         start = (page - 1) * page_size
-        items = filtered[start : start + page_size]
+        page_clients = filtered[start : start + page_size]
+
+        # Stage 2C: Next Dinner/Last Contacted are computed ONLY for this
+        # page's own Clients (never the full filtered/unpaginated set --
+        # see SORTABLE_CLIENT_FIELDS's own comment on why that means these
+        # two columns aren't sortable/filterable yet), via exactly two
+        # bulk queries total (one per entity type), never one query per
+        # Client -- see EngagementStore.list_for_clients()'s own docstring
+        # for why this specific shape exists.
+        page_client_ids = [c.client_id for c in page_clients]
+        engagements_by_client = _group_by_client_id(await self.engagement_store.list_for_clients(page_client_ids))
+        touchpoints_by_client = _group_by_client_id(await self.client_touchpoint_store.list_for_clients(page_client_ids))
+        today = _business_today()
+
+        items = [
+            ClientListItem(
+                **c.model_dump(),
+                next_dinner=_next_dinner(engagements_by_client.get(c.client_id, []), today),
+                last_contacted=_last_contacted(touchpoints_by_client.get(c.client_id, [])),
+            )
+            for c in page_clients
+        ]
         return ClientPage(items=items, total=total, page=page, page_size=page_size)
 
     # =====================================================================

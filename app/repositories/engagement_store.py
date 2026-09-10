@@ -70,6 +70,21 @@ class EngagementStore(ABC):
         None if none is -- Stage 1H-A's own lookup direction (Luma event ->
         Engagement), the one a future registration-sync stage will need."""
 
+    @abstractmethod
+    async def list_for_clients(self, client_ids: list[str]) -> list[Engagement]:
+        """Every Engagement (archived or not, any status) belonging to ANY
+        of these Client IDs, in one bulk call -- Stage 2C's own Next
+        Dinner derivation for the Master Client CRM table, added
+        specifically so ClientCrmService.list_clients() can compute a
+        derived summary column for a whole page of Clients with exactly
+        one query, never one list_for_client() call per Client (that
+        would be the exact N+1 shape this method exists to avoid). Order
+        is unspecified -- grouping by client_id and any further
+        filtering/sorting (by engagement_date, status, etc.) is the
+        caller's job, same "store returns everything relevant, caller
+        decides what's shown" convention as list_for_client(). Returns an
+        empty list for an empty `client_ids` (never a malformed query)."""
+
 
 class MemoryEngagementStore(EngagementStore):
     """Dict-backed, keyed by engagement_id -- not persistent, for tests/local dev."""
@@ -108,3 +123,9 @@ class MemoryEngagementStore(EngagementStore):
             if e.luma_event_id == luma_event_id:
                 return e
         return None
+
+    async def list_for_clients(self, client_ids: list[str]) -> list[Engagement]:
+        if not client_ids:
+            return []
+        ids = set(client_ids)
+        return [e for e in self._rows.values() if e.client_id in ids]

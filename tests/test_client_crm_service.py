@@ -6,13 +6,21 @@ directly by constructing their OWN independent stores and confirming
 archiving a Client never mutates rows in them.
 """
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
 
 from app.models.activity import ActivityCategory
-from app.models.client_crm import ClientRelationshipClassification, ClientStatus, ClientTouchpoint, ContactType
+from app.models.client_crm import (
+    ClientRelationshipClassification,
+    ClientStatus,
+    ClientTouchpoint,
+    ContactType,
+    Engagement,
+    EngagementStatus,
+    EngagementType,
+)
 from app.models.crm import CrmContact
 from app.models.luma import LumaEvent
 from app.repositories.client_contact_store import ClientContactStore, MemoryClientContactStore
@@ -39,6 +47,10 @@ from app.services.client_crm_service import (
     EngagementParticipantDuplicate,
     EngagementParticipantNotFound,
     LumaEventNotFound,
+    _BUSINESS_TIMEZONE,
+    _business_today,
+    _last_contacted,
+    _next_dinner,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -401,6 +413,324 @@ async def test_list_clients_pagination(memory_service):
     assert len(page1.items) == 2
     page3 = await service.list_clients(sort_by="name", page=3, page_size=2)
     assert len(page3.items) == 1
+
+
+# =====================================================================
+# next_dinner / last_contacted derivation -- Client CRM Stage 2C
+# =====================================================================
+
+
+@pytest.fixture
+def master_crm_service():
+    """Same as memory_service, but ALSO exposes the EngagementStore and
+    ClientTouchpointStore directly -- Stage 2C's Next Dinner/Last
+    Contacted derivation needs both seeded independently of any
+    dedicated create_engagement()/create_client_touchpoint() service
+    method (those enforce extra validation, e.g. a required Client
+    existence check or contacted_by non-blank rule, that's irrelevant to
+    testing list_clients()'s own derivation)."""
+    client_store = MemoryClientStore()
+    engagement_store = MemoryEngagementStore()
+    client_touchpoint_store = MemoryClientTouchpointStore()
+    service, activity_log = _make_service(
+        client_store, engagement_store=engagement_store, client_touchpoint_store=client_touchpoint_store
+    )
+    return service, activity_log, engagement_store, client_touchpoint_store
+
+
+def _svc_engagement(engagement_id="e1", client_id="c1", **overrides) -> Engagement:
+    now = datetime.now(timezone.utc)
+    overrides.setdefault("title", "SF Investor Dinner")
+    overrides.setdefault("engagement_type", EngagementType.DINNER)
+    overrides.setdefault("created_at", now)
+    overrides.setdefault("updated_at", now)
+    return Engagement(engagement_id=engagement_id, client_id=client_id, **overrides)
+
+
+def _svc_touchpoint(touchpoint_id="t1", client_id="c1", **overrides) -> ClientTouchpoint:
+    now = datetime.now(timezone.utc)
+    overrides.setdefault("occurred_at", now)
+    overrides.setdefault("contact_type", ContactType.EMAIL)
+    overrides.setdefault("contacted_by", "Ria")
+    overrides.setdefault("created_at", now)
+    overrides.setdefault("updated_at", now)
+    return ClientTouchpoint(touchpoint_id=touchpoint_id, client_id=client_id, **overrides)
+
+
+TODAY = date(2026, 9, 10)
+
+
+# --- _next_dinner (pure function) -------------------------------------------
+
+
+def test_next_dinner_qualifying_dinner_is_chosen():
+    e = _svc_engagement(engagement_date=TODAY + timedelta(days=5))
+    assert _next_dinner([e], TODAY) == TODAY + timedelta(days=5)
+
+
+def test_next_dinner_excludes_sponsorship():
+    e = _svc_engagement(engagement_type=EngagementType.SPONSORSHIP, engagement_date=TODAY + timedelta(days=5))
+    assert _next_dinner([e], TODAY) is None
+
+
+def test_next_dinner_excludes_other():
+    e = _svc_engagement(engagement_type=EngagementType.OTHER, engagement_date=TODAY + timedelta(days=5))
+    assert _next_dinner([e], TODAY) is None
+
+
+def test_next_dinner_excludes_archived():
+    e = _svc_engagement(engagement_date=TODAY + timedelta(days=5), archived=True)
+    assert _next_dinner([e], TODAY) is None
+
+
+def test_next_dinner_excludes_cancelled():
+    e = _svc_engagement(engagement_date=TODAY + timedelta(days=5), status=EngagementStatus.CANCELLED)
+    assert _next_dinner([e], TODAY) is None
+
+
+def test_next_dinner_excludes_past():
+    e = _svc_engagement(engagement_date=TODAY - timedelta(days=1))
+    assert _next_dinner([e], TODAY) is None
+
+
+def test_next_dinner_includes_today():
+    """Today is inclusive -- a dinner happening later today still qualifies."""
+    e = _svc_engagement(engagement_date=TODAY)
+    assert _next_dinner([e], TODAY) == TODAY
+
+
+def test_next_dinner_includes_future():
+    e = _svc_engagement(engagement_date=TODAY + timedelta(days=30))
+    assert _next_dinner([e], TODAY) == TODAY + timedelta(days=30)
+
+
+def test_next_dinner_excludes_null_engagement_date():
+    e = _svc_engagement(engagement_date=None)
+    assert _next_dinner([e], TODAY) is None
+
+
+def test_next_dinner_earliest_future_dinner_wins():
+    later = _svc_engagement("e1", engagement_date=TODAY + timedelta(days=30))
+    sooner = _svc_engagement("e2", engagement_date=TODAY + timedelta(days=5))
+    assert _next_dinner([later, sooner], TODAY) == TODAY + timedelta(days=5)
+
+
+def test_next_dinner_same_date_ties_still_resolve_to_that_shared_date():
+    a = _svc_engagement("e-a", engagement_date=TODAY + timedelta(days=5))
+    b = _svc_engagement("e-b", engagement_date=TODAY + timedelta(days=5))
+    assert _next_dinner([a, b], TODAY) == TODAY + timedelta(days=5)
+    assert _next_dinner([b, a], TODAY) == TODAY + timedelta(days=5)
+
+
+def test_next_dinner_same_date_tie_break_is_engagement_id_ascending():
+    """_next_dinner only returns a date (two tied Engagements share the
+    same date either way), so the tie-break rule itself is verified
+    directly against the exact sort key _next_dinner uses."""
+    a = _svc_engagement("e-a", engagement_date=TODAY + timedelta(days=5))
+    b = _svc_engagement("e-b", engagement_date=TODAY + timedelta(days=5))
+    ordered = sorted([b, a], key=lambda e: (e.engagement_date, e.engagement_id))
+    assert ordered[0].engagement_id == "e-a"
+
+
+def test_next_dinner_no_qualifying_dinner_returns_none():
+    assert _next_dinner([], TODAY) is None
+    non_qualifying = _svc_engagement(engagement_type=EngagementType.OTHER, engagement_date=TODAY)
+    assert _next_dinner([non_qualifying], TODAY) is None
+
+
+# --- _last_contacted (pure function) ----------------------------------------
+
+
+def test_last_contacted_active_touchpoint_qualifies():
+    now = datetime.now(timezone.utc)
+    t = _svc_touchpoint(occurred_at=now)
+    assert _last_contacted([t]) == now
+
+
+def test_last_contacted_excludes_archived():
+    t = _svc_touchpoint(archived=True)
+    assert _last_contacted([t]) is None
+
+
+def test_last_contacted_newest_occurred_at_wins():
+    older = _svc_touchpoint("t1", occurred_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    newer = _svc_touchpoint("t2", occurred_at=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    assert _last_contacted([older, newer]) == datetime(2026, 9, 10, tzinfo=timezone.utc)
+    assert _last_contacted([newer, older]) == datetime(2026, 9, 10, tzinfo=timezone.utc)
+
+
+def test_last_contacted_preserves_existing_touchpoint_sort_key_tie_semantics():
+    """Same occurred_at -- touchpoint_sort_key's next tie-break
+    (created_at, then touchpoint_id) is what actually decides the winner,
+    the EXACT same shared helper the Client detail page's own Last
+    Contact already uses, never a second, independently-written rule."""
+    from app.repositories.client_touchpoint_store import touchpoint_sort_key
+
+    same_time = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    earlier_created = _svc_touchpoint("t1", occurred_at=same_time, created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    later_created = _svc_touchpoint("t2", occurred_at=same_time, created_at=datetime(2026, 9, 2, tzinfo=timezone.utc))
+
+    ordered = sorted([earlier_created, later_created], key=touchpoint_sort_key, reverse=True)
+    assert ordered[0].touchpoint_id == "t2"
+    assert _last_contacted([earlier_created, later_created]) == same_time
+
+
+def test_last_contacted_no_touchpoint_returns_none():
+    assert _last_contacted([]) is None
+
+
+# --- _business_today (America/Chicago boundary) -----------------------------
+
+
+def test_business_today_uses_america_chicago_not_utc_date():
+    """2026-03-15T03:00:00 UTC = 2026-03-14T22:00:00-05:00 in
+    America/Chicago (CDT, in effect after 2026's spring-forward on Mar 8)
+    -- still March 14 in Chicago while UTC has already rolled over to
+    March 15. This is exactly why UTC was rejected as the V1 boundary: a
+    dinner scheduled for March 14 (the real, Chicago-local "today") must
+    not vanish from Next Dinner just because UTC's calendar date already
+    flipped during the U.S. evening."""
+    utc_instant = datetime(2026, 3, 15, 3, 0, tzinfo=timezone.utc)
+    assert _business_today(now=utc_instant) == date(2026, 3, 14)
+
+
+def test_business_today_matches_utc_date_well_inside_the_business_day():
+    """Confirms this isn't simply 'always one day behind UTC' -- an
+    instant with no boundary ambiguity agrees with the UTC date too."""
+    utc_instant = datetime(2026, 6, 15, 18, 0, tzinfo=timezone.utc)  # 1pm Central (CDT)
+    assert _business_today(now=utc_instant) == date(2026, 6, 15)
+
+
+def test_business_today_timezone_constant_is_america_chicago():
+    assert str(_BUSINESS_TIMEZONE) == "America/Chicago"
+
+
+# --- list_clients() integration: derived fields + bulk-query shape ---------
+
+
+async def test_list_clients_populates_next_dinner_and_last_contacted(master_crm_service):
+    service, _, engagement_store, client_touchpoint_store = master_crm_service
+    client = await service.create_client({"name": "Hive ASMBLD"})
+
+    now = datetime.now(timezone.utc)
+    await engagement_store.create(
+        _svc_engagement("e1", client.client_id, engagement_date=date.today() + timedelta(days=10))
+    )
+    await client_touchpoint_store.create(_svc_touchpoint("t1", client.client_id, occurred_at=now))
+
+    page = await service.list_clients()
+    item = page.items[0]
+    assert item.next_dinner == date.today() + timedelta(days=10)
+    assert item.last_contacted == now
+
+
+async def test_list_clients_next_dinner_and_last_contacted_are_none_with_no_data(master_crm_service):
+    service, _, _engagement_store, _client_touchpoint_store = master_crm_service
+    await service.create_client({"name": "Hive ASMBLD"})
+
+    page = await service.list_clients()
+    assert page.items[0].next_dinner is None
+    assert page.items[0].last_contacted is None
+
+
+async def test_list_clients_derivation_is_scoped_per_client_not_shared_across_clients(master_crm_service):
+    service, _, engagement_store, client_touchpoint_store = master_crm_service
+    client_a = await service.create_client({"name": "A"})
+    client_b = await service.create_client({"name": "B"})
+
+    await engagement_store.create(
+        _svc_engagement("e1", client_a.client_id, engagement_date=date.today() + timedelta(days=5))
+    )
+    await client_touchpoint_store.create(_svc_touchpoint("t1", client_a.client_id))
+    # Client B has neither an Engagement nor a Touchpoint.
+
+    page = await service.list_clients(sort_by="name")
+    by_name = {c.name: c for c in page.items}
+    assert by_name["A"].next_dinner == date.today() + timedelta(days=5)
+    assert by_name["A"].last_contacted is not None
+    assert by_name["B"].next_dinner is None
+    assert by_name["B"].last_contacted is None
+
+
+async def test_list_clients_derivation_only_covers_the_current_page(master_crm_service):
+    """Derivation must be computed for the RETURNED page's Clients only,
+    never the full filtered/unpaginated set -- confirmed indirectly here
+    by checking the paginated-out Client's own data is simply never
+    touched (no error, no cross-contamination) while the page's own
+    Client is correctly enriched."""
+    service, _, engagement_store, client_touchpoint_store = master_crm_service
+    await service.create_client({"name": "Alpha"})
+    beta = await service.create_client({"name": "Beta"})
+    await engagement_store.create(
+        _svc_engagement("e1", beta.client_id, engagement_date=date.today() + timedelta(days=5))
+    )
+
+    page1 = await service.list_clients(sort_by="name", page=1, page_size=1)
+    assert page1.items[0].name == "Alpha"
+    assert page1.items[0].next_dinner is None  # Alpha has no Engagement
+
+    page2 = await service.list_clients(sort_by="name", page=2, page_size=1)
+    assert page2.items[0].name == "Beta"
+    assert page2.items[0].next_dinner == date.today() + timedelta(days=5)
+
+
+async def test_list_clients_derivation_never_calls_list_for_client_per_client(master_crm_service):
+    """Structural regression guard: list_clients() must use the bulk
+    list_for_clients() methods, never fall back to (or additionally call)
+    list_for_client() once per Client -- that would silently reintroduce
+    the exact N+1 shape Stage 2C's bulk methods exist to avoid."""
+    service, _, engagement_store, client_touchpoint_store = master_crm_service
+
+    async def _forbidden(*_args, **_kwargs):
+        raise AssertionError("list_for_client() must never be called by list_clients() -- use list_for_clients().")
+
+    engagement_store.list_for_client = _forbidden
+    client_touchpoint_store.list_for_client = _forbidden
+
+    for i in range(5):
+        client = await service.create_client({"name": f"Client {i}"})
+        await engagement_store.create(_svc_engagement(f"e{i}", client.client_id))
+        await client_touchpoint_store.create(_svc_touchpoint(f"t{i}", client.client_id))
+
+    page = await service.list_clients(sort_by="name")
+    assert len(page.items) == 5
+
+
+async def test_list_clients_calls_each_bulk_method_exactly_once_regardless_of_client_count(master_crm_service):
+    """Precise bounded-query proof: exactly ONE list_for_clients() call
+    per entity type per list_clients() call, regardless of how many
+    Clients are on the page -- never one query per Client."""
+    service, _, engagement_store, client_touchpoint_store = master_crm_service
+
+    call_counts = {"engagements": 0, "touchpoints": 0}
+    original_engagements = engagement_store.list_for_clients
+    original_touchpoints = client_touchpoint_store.list_for_clients
+
+    async def _counted_engagements(client_ids):
+        call_counts["engagements"] += 1
+        return await original_engagements(client_ids)
+
+    async def _counted_touchpoints(client_ids):
+        call_counts["touchpoints"] += 1
+        return await original_touchpoints(client_ids)
+
+    engagement_store.list_for_clients = _counted_engagements
+    client_touchpoint_store.list_for_clients = _counted_touchpoints
+
+    for i in range(5):
+        await service.create_client({"name": f"Client {i}"})
+
+    await service.list_clients(sort_by="name")
+
+    assert call_counts == {"engagements": 1, "touchpoints": 1}
+
+
+async def test_list_clients_empty_result_still_calls_bulk_methods_safely(master_crm_service):
+    """No Clients at all -- page_client_ids is [] -- must not error."""
+    service, _, _engagement_store, _client_touchpoint_store = master_crm_service
+    page = await service.list_clients()
+    assert page.items == []
+    assert page.total == 0
 
 
 # =====================================================================

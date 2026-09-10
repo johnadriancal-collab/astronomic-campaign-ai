@@ -44,6 +44,18 @@ class ClientTouchpointStore(ABC):
         "store returns everything, caller/service decides what's shown"
         convention as every other Client CRM list_for_x()."""
 
+    @abstractmethod
+    async def list_for_clients(self, client_ids: list[str]) -> list[ClientTouchpoint]:
+        """Every ClientTouchpoint (archived or not) belonging to ANY of
+        these Client IDs, in one bulk call -- Stage 2C's own Last
+        Contacted derivation for the Master Client CRM table, added so
+        ClientCrmService.list_clients() can compute a derived summary
+        column for a whole page of Clients with exactly one query, never
+        one list_for_client() call per Client. Order is unspecified --
+        grouping by client_id, filtering to active rows, and applying
+        touchpoint_sort_key is the caller's job. Returns an empty list for
+        an empty `client_ids` (never a malformed query)."""
+
 
 def touchpoint_sort_key(touchpoint: ClientTouchpoint) -> tuple:
     return (touchpoint.occurred_at, touchpoint.created_at, touchpoint.touchpoint_id)
@@ -69,3 +81,9 @@ class MemoryClientTouchpointStore(ClientTouchpointStore):
     async def list_for_client(self, client_id: str) -> list[ClientTouchpoint]:
         rows = [t for t in self._rows.values() if t.client_id == client_id]
         return sorted(rows, key=touchpoint_sort_key, reverse=True)
+
+    async def list_for_clients(self, client_ids: list[str]) -> list[ClientTouchpoint]:
+        if not client_ids:
+            return []
+        ids = set(client_ids)
+        return [t for t in self._rows.values() if t.client_id in ids]

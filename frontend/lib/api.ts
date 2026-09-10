@@ -1743,8 +1743,20 @@ export interface Client {
   archived: boolean;
 }
 
+// Client CRM Stage 2C. A strict superset of Client -- every existing
+// Client field, plus two READ-ONLY derived summary columns for the
+// Master Client CRM table. Never persisted, never accepted on any
+// create/update request; GET /client-crm/clients/{id} keeps returning
+// plain Client, unaugmented -- ClientListItem exists ONLY on
+// ClientPage.items (see app/models/client_crm.py's own ClientListItem
+// docstring for the exact derivation rules).
+export interface ClientListItem extends Client {
+  next_dinner: string | null; // "YYYY-MM-DD", or null if no qualifying upcoming Dinner Engagement
+  last_contacted: string | null; // full ISO datetime, or null if no active Touchpoint
+}
+
 export interface ClientPage {
-  items: Client[];
+  items: ClientListItem[];
   total: number;
   page: number;
   page_size: number;

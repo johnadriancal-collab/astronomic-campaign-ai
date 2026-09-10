@@ -207,6 +207,8 @@ export default function ClientsPage() {
                   <th className="px-3 py-2 text-left font-medium">Status</th>
                   <th className="px-3 py-2 text-left font-medium">Relationship</th>
                   <th className="px-3 py-2 text-left font-medium">Owner</th>
+                  <th className="px-3 py-2 text-left font-medium">Next Dinner</th>
+                  <th className="px-3 py-2 text-left font-medium">Last Contacted</th>
                   <th className="px-3 py-2 text-left font-medium">Next Action</th>
                   <th className="px-3 py-2 text-left font-medium">Next Action Due</th>
                   <th className="px-3 py-2 text-left font-medium">Updated</th>
@@ -240,6 +242,8 @@ export default function ClientsPage() {
                       )}
                     </td>
                     <td className="px-3 py-2.5 text-muted-foreground">{client.owner || "—"}</td>
+                    <td className="px-3 py-2.5 text-muted-foreground">{formatClientDate(client.next_dinner)}</td>
+                    <td className="px-3 py-2.5 text-muted-foreground">{formatClientDate(client.last_contacted)}</td>
                     <td className="px-3 py-2.5 text-muted-foreground">{client.next_action || "—"}</td>
                     <td className="px-3 py-2.5 text-muted-foreground">{formatClientDate(client.next_action_due)}</td>
                     <td className="px-3 py-2.5 text-muted-foreground">{formatClientDate(client.updated_at)}</td>
