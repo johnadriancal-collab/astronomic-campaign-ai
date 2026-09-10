@@ -1877,12 +1877,17 @@ async def luma_service_with_participant_sync(crm_service, event_store, registrat
     """Same as `luma_service`, but with Stage 1H-B's participant sync
     actually wired in -- exposes the Engagement/EngagementParticipant/
     CrmContact stores directly so a test can link an Engagement first."""
+    from app.services.contact_engagement_signal_service import ContactEngagementSignalService
+
     sync_cls, engagement_store, engagement_participant_store, crm_contact_store = participant_sync_service
     sync_service = sync_cls(
         engagement_store=engagement_store,
         engagement_participant_store=engagement_participant_store,
         crm_contact_store=crm_service.contact_store,  # SAME contact store the webhook path itself writes to
         activity_log=crm_service.activity_log,
+        contact_engagement_signal_service=ContactEngagementSignalService(
+            crm_contact_store=crm_service.contact_store, activity_log=crm_service.activity_log
+        ),
     )
     service = LumaSyncService(
         crm_service=crm_service,

@@ -47,6 +47,8 @@ from datetime import date, datetime, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from loguru import logger
+
 from app.models.activity import ActivityCategory, ActivitySource
 from app.models.client_crm import (
     Client,
@@ -78,6 +80,7 @@ from app.repositories.engagement_participant_store import (
 from app.repositories.engagement_store import EngagementLumaEventAlreadyLinkedError, EngagementStore
 from app.repositories.luma_event_store import LumaEventStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.contact_engagement_signal_service import ContactEngagementSignalService
 
 SORTABLE_CLIENT_FIELDS = frozenset({"name", "created_at", "updated_at", "next_action_due", "next_dinner"})
 # Stage 2C.1 adds "next_dinner" -- unlike the other four (plain Client
@@ -335,6 +338,7 @@ class ClientCrmService:
         engagement_participant_store: EngagementParticipantStore,
         luma_event_store: LumaEventStore,
         client_touchpoint_store: ClientTouchpointStore,
+        contact_engagement_signal_service: ContactEngagementSignalService,
     ):
         self.client_store = client_store
         self.activity_log = activity_log
@@ -345,6 +349,7 @@ class ClientCrmService:
         self.engagement_participant_store = engagement_participant_store
         self.luma_event_store = luma_event_store
         self.client_touchpoint_store = client_touchpoint_store
+        self.contact_engagement_signal_service = contact_engagement_signal_service
 
     async def _require_client(self, client_id: str) -> Client:
         client = await self.client_store.get(client_id)
@@ -1067,6 +1072,24 @@ class ClientCrmService:
         await self._require_engagement(client_id, engagement_id)
         return await self.engagement_participant_store.list_for_engagement(engagement_id)
 
+    async def _reconcile_engagement_signal(self, participant: EngagementParticipant) -> None:
+        """Contacts CRM Stage 3B. Invoked AFTER a manual EngagementParticipant
+        create/update has already committed -- never before, and never in a
+        way that could roll that write back. A failure here is logged and
+        swallowed, never re-raised: the participant write that already
+        succeeded must remain the source of truth regardless of whether the
+        derived Contact-stage signal could be applied this time, same
+        "eligibility/failure here is never a reason to break the caller's own
+        already-successful action" principle the Luma participant sync
+        path's own call sites for this same signal service already follow."""
+        try:
+            await self.contact_engagement_signal_service.reconcile_from_participant(participant)
+        except Exception:
+            logger.exception(
+                f"ContactEngagementSignalService.reconcile_from_participant failed for participant "
+                f"{participant.participant_id} -- the participant write itself already succeeded and is unaffected."
+            )
+
     async def create_engagement_participant(self, client_id: str, engagement_id: str, fields: dict[str, Any]) -> EngagementParticipant:
         """If `crm_contact_id` is provided, snapshot fields are populated
         FROM the canonical CrmContact (any name/email/etc. also present in
@@ -1135,6 +1158,7 @@ class ClientCrmService:
             entity_name=display_name,
             metadata={"client_id": client_id, "engagement_id": engagement_id},
         )
+        await self._reconcile_engagement_signal(participant)
         return participant
 
     async def update_engagement_participant(
@@ -1201,6 +1225,7 @@ class ClientCrmService:
             raise EngagementParticipantDuplicate(exc.engagement_id, exc.crm_contact_id) from exc
 
         await self._record_engagement_participant_update_activity(participant, updated)
+        await self._reconcile_engagement_signal(updated)
         return updated
 
     async def _record_engagement_participant_update_activity(

@@ -31,6 +31,7 @@ from app.repositories.crm_contact_store import MemoryCrmContactStore
 from app.repositories.engagement_participant_store import MemoryEngagementParticipantStore
 from app.repositories.engagement_store import MemoryEngagementStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.contact_engagement_signal_service import ContactEngagementSignalService
 from app.services.luma_engagement_participant_sync_service import (
     LumaEngagementParticipantSyncService,
     LumaParticipantSyncOutcome,
@@ -114,6 +115,9 @@ async def service(stores):
         engagement_participant_store=engagement_participant_store,
         crm_contact_store=crm_contact_store,
         activity_log=activity_log,
+        contact_engagement_signal_service=ContactEngagementSignalService(
+            crm_contact_store=crm_contact_store, activity_log=activity_log
+        ),
     )
 
 
@@ -531,3 +535,109 @@ def test_sync_service_has_no_dependency_on_any_luma_registration_store():
 
     params = inspect.signature(LumaEngagementParticipantSyncService.__init__).parameters
     assert not any("registration" in name.lower() for name in params if name != "self")
+
+
+# =====================================================================
+# Contacts CRM Stage 3B -- Engagement Stage signal trigger (2026-09-11)
+# =====================================================================
+
+
+async def test_luma_create_normalized_confirmed_triggers_the_signal(service, stores):
+    _e, _p, crm_contact_store, _a = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.APPROVED)
+    )
+    assert result.outcome == LumaParticipantSyncOutcome.CREATED
+    assert result.participant.rsvp_status == ParticipantRsvpStatus.CONFIRMED
+
+    contact = await crm_contact_store.get("contact-1")
+    assert contact.custom_fields["engagement_stage"] == "Interested"
+    assert contact.custom_fields["field_provenance"]["engagement_stage"]["signal_type"] == "rsvp_confirmed"
+
+
+async def test_luma_create_invited_does_not_trigger(service, stores):
+    _e, _p, crm_contact_store, _a = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+
+    await service.sync_luma_registration_to_engagement_participant(_registration(approval_status=LumaApprovalStatus.INVITED))
+
+    contact = await crm_contact_store.get("contact-1")
+    assert contact.custom_fields.get("engagement_stage") is None
+
+
+async def test_luma_update_to_confirmed_triggers_the_signal(service, stores):
+    """Existing participant with rsvp_status=INVITED (from an earlier
+    Luma sync), a later registration update to APPROVED triggers the
+    signal via the UPDATED outcome."""
+    _e, participant_store, crm_contact_store, _a = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    await service.sync_luma_registration_to_engagement_participant(_registration(approval_status=LumaApprovalStatus.INVITED))
+    assert (await crm_contact_store.get("contact-1")).custom_fields.get("engagement_stage") is None
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.APPROVED)
+    )
+    assert result.outcome == LumaParticipantSyncOutcome.UPDATED
+
+    contact = await crm_contact_store.get("contact-1")
+    assert contact.custom_fields["engagement_stage"] == "Interested"
+
+
+async def test_repeated_luma_sync_of_the_same_approved_registration_is_idempotent(service, stores):
+    _e, _p, crm_contact_store, activity_log = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    registration = _registration(approval_status=LumaApprovalStatus.APPROVED)
+
+    first = await service.sync_luma_registration_to_engagement_participant(registration)
+    assert first.outcome == LumaParticipantSyncOutcome.CREATED
+    after_first = await crm_contact_store.get("contact-1")
+
+    for _ in range(4):
+        repeat = await service.sync_luma_registration_to_engagement_participant(registration)
+        assert repeat.outcome == LumaParticipantSyncOutcome.UNCHANGED
+
+    after_repeats = await crm_contact_store.get("contact-1")
+    assert after_repeats.updated_at == after_first.updated_at
+    assert after_repeats.custom_fields == after_first.custom_fields
+
+    page = await activity_log.list_events(category=ActivityCategory.CONTACTS)
+    assert len([e for e in page.items if e.event_type == "contact.engagement_stage.advanced"]) == 1
+
+
+async def test_existing_manual_confirmed_participant_plus_luma_sync_does_not_duplicate_or_double_advance(service, stores):
+    """Collision case: a MANUAL participant already exists, already
+    triggered the signal once; a later Luma sync discovers it, updates
+    only rsvp-mapped fields (never source/role), and must not re-trigger
+    a second advancement (already Interested -> no-op) or create a second
+    participant row."""
+    _e, participant_store, crm_contact_store, activity_log = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    manual_participant = EngagementParticipant(
+        participant_id="manual-1", engagement_id="e1", client_id="c1", crm_contact_id="contact-1",
+        first_name="Jane", role=ParticipantRole.GUEST, rsvp_status=ParticipantRsvpStatus.CONFIRMED,
+        source=ParticipantSource.MANUAL, created_at=NOW, updated_at=NOW,
+    )
+    await participant_store.create(manual_participant)
+    # Manually trigger the signal the way ClientCrmService's own create
+    # path would have (this test only exercises the Luma sync service).
+    await service.contact_engagement_signal_service.reconcile_from_participant(manual_participant)
+    assert (await crm_contact_store.get("contact-1")).custom_fields["engagement_stage"] == "Interested"
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.APPROVED)
+    )
+
+    all_participants = await participant_store.list_for_engagement("e1")
+    assert len(all_participants) == 1  # never duplicated
+    assert all_participants[0].source == ParticipantSource.MANUAL  # never overwritten to luma
+    assert all_participants[0].role == ParticipantRole.GUEST
+
+    page = await activity_log.list_events(category=ActivityCategory.CONTACTS)
+    assert len([e for e in page.items if e.event_type == "contact.engagement_stage.advanced"]) == 1  # not 2

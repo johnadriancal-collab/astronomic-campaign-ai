@@ -162,6 +162,25 @@ async def test_dry_run_makes_zero_writes_to_the_real_stores(stores):
     assert page.items == []
 
 
+async def test_dry_run_never_advances_a_real_contacts_engagement_stage(stores):
+    """Contacts CRM Stage 3B: a dry run's own signal service is bound to
+    the throwaway replica contact store, never the real one -- a
+    positive-interest registration (APPROVED) must not advance the REAL
+    Contact's engagement_stage, structurally, not just by convention."""
+    engagement_store, participant_store, contact_store, _reg_store, activity_log = stores
+    contact = _contact()
+    await _seed(
+        stores, engagement=_engagement(), contact=contact,
+        registrations=[_registration(crm_contact_id=contact.crm_contact_id, approval_status=LumaApprovalStatus.APPROVED)],
+    )
+    await _run(stores, dry_run=True)
+
+    real_contact = await contact_store.get(contact.crm_contact_id)
+    assert real_contact.custom_fields.get("engagement_stage") is None
+    page = await activity_log.list_events(category=ActivityCategory.CONTACTS)
+    assert [e for e in page.items if e.event_type == "contact.engagement_stage.advanced"] == []
+
+
 async def test_dry_run_prediction_matches_subsequent_write_result(stores):
     contact = _contact(first_name="Ethan", last_name="Wong")
     regs = [_registration(crm_contact_id=contact.crm_contact_id, approval_status=LumaApprovalStatus.INVITED)]

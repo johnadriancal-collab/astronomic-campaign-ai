@@ -74,6 +74,7 @@ from app.repositories.engagement_store import EngagementStore, MemoryEngagementS
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.luma_registration_store import LumaRegistrationStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.contact_engagement_signal_service import ContactEngagementSignalService
 from app.services.luma_engagement_participant_sync_service import (
     LumaEngagementParticipantSyncService,
     LumaParticipantSyncOutcome,
@@ -182,11 +183,21 @@ async def _build_dry_run_replica(
     # Activity Log entry, structurally, not just by convention.
     replica_activity_log = ActivityLogService(MemoryActivityEventStore())
 
+    # Contacts CRM Stage 3B: the signal service is bound to the SAME
+    # throwaway replica_contact_store/replica_activity_log above -- a dry
+    # run must remain structurally incapable of advancing a real Contact's
+    # engagement_stage or writing a real Activity entry for it, exactly
+    # the same guarantee this function already makes for participants.
+    replica_signal_service = ContactEngagementSignalService(
+        crm_contact_store=replica_contact_store, activity_log=replica_activity_log
+    )
+
     sync_service = LumaEngagementParticipantSyncService(
         engagement_store=replica_engagement_store,
         engagement_participant_store=replica_participant_store,
         crm_contact_store=replica_contact_store,
         activity_log=replica_activity_log,
+        contact_engagement_signal_service=replica_signal_service,
     )
     return sync_service, replica_participant_store
 
@@ -230,11 +241,19 @@ async def run_luma_engagement_participant_backfill(
             engagement_id, luma_event_id, engagement_store, engagement_participant_store, crm_contact_store, registrations
         )
     else:
+        # Same shared signal service every other live call site uses,
+        # constructed here from the SAME real crm_contact_store/
+        # activity_log this function already received -- not a second,
+        # differently-behaved copy of the Stage 3B logic; see
+        # contact_engagement_signal_service.py's own "one canonical
+        # service" requirement.
+        signal_service = ContactEngagementSignalService(crm_contact_store=crm_contact_store, activity_log=activity_log)
         sync_service = LumaEngagementParticipantSyncService(
             engagement_store=engagement_store,
             engagement_participant_store=engagement_participant_store,
             crm_contact_store=crm_contact_store,
             activity_log=activity_log,
+            contact_engagement_signal_service=signal_service,
         )
         counting_participant_store = engagement_participant_store
 

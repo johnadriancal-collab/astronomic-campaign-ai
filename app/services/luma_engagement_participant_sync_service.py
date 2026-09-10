@@ -57,6 +57,7 @@ from app.repositories.engagement_participant_store import (
 )
 from app.repositories.engagement_store import EngagementStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.contact_engagement_signal_service import ContactEngagementSignalService
 
 # Client CRM Stage 1H-A's own model docstring already tags LUMA as "a
 # reserved value for a future, dedicated Luma-linkage stage" -- this IS
@@ -123,11 +124,13 @@ class LumaEngagementParticipantSyncService:
         engagement_participant_store: EngagementParticipantStore,
         crm_contact_store: CrmContactStore,
         activity_log: ActivityLogService,
+        contact_engagement_signal_service: ContactEngagementSignalService,
     ):
         self.engagement_store = engagement_store
         self.engagement_participant_store = engagement_participant_store
         self.crm_contact_store = crm_contact_store
         self.activity_log = activity_log
+        self.contact_engagement_signal_service = contact_engagement_signal_service
 
     async def sync_luma_registration_to_engagement_participant(
         self, registration: LumaRegistration
@@ -225,6 +228,7 @@ class LumaEngagementParticipantSyncService:
             participant=participant,
             metadata={"engagement_id": engagement.engagement_id, "client_id": engagement.client_id},
         )
+        await self._reconcile_engagement_signal(participant)
         return LumaParticipantSyncResult(outcome=LumaParticipantSyncOutcome.CREATED, participant=participant)
 
     async def _sync_against_existing(
@@ -271,6 +275,7 @@ class LumaEngagementParticipantSyncService:
                 "fields_updated": sorted(patch.keys()),
             },
         )
+        await self._reconcile_engagement_signal(updated)
         return LumaParticipantSyncResult(outcome=LumaParticipantSyncOutcome.UPDATED, participant=updated)
 
     @staticmethod
@@ -295,6 +300,27 @@ class LumaEngagementParticipantSyncService:
             patch["rsvp_status"] = mapped_rsvp
 
         return patch
+
+    async def _reconcile_engagement_signal(self, participant: EngagementParticipant) -> None:
+        """Contacts CRM Stage 3B. Invoked only after CREATED/UPDATED --
+        the exact same two outcomes that get an Activity Log entry above,
+        i.e. only after a genuinely material participant write. Never
+        invoked merely because a Luma webhook was received or a
+        registration was processed -- see this module's own "invoke on
+        the resulting normalized EngagementParticipant state, not on
+        webhook receipt" contract. A failure here is logged and
+        swallowed, never re-raised -- it must never break Luma
+        registration/participant processing or the webhook's HTTP success
+        response, same boundary this whole sync path already draws around
+        every one of its own operations (see
+        sync_luma_registration_to_engagement_participant's own docstring)."""
+        try:
+            await self.contact_engagement_signal_service.reconcile_from_participant(participant)
+        except Exception:
+            logger.exception(
+                f"ContactEngagementSignalService.reconcile_from_participant failed for participant "
+                f"{participant.participant_id} -- the Luma participant sync itself already succeeded and is unaffected."
+            )
 
     async def _record_activity(self, *, event_type: str, summary: str, participant: EngagementParticipant, metadata: dict[str, Any]) -> None:
         """Only ever called for CREATED/UPDATED -- every NO-OP outcome

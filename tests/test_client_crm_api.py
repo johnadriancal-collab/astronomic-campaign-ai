@@ -30,20 +30,26 @@ from app.repositories.engagement_store import MemoryEngagementStore
 from app.repositories.luma_event_store import MemoryLumaEventStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.client_crm_service import ClientCrmService
+from app.services.contact_engagement_signal_service import ContactEngagementSignalService
 
 
 @pytest.fixture
 def test_client():
+    activity_log = ActivityLogService(MemoryActivityEventStore())
+    crm_contact_store = MemoryCrmContactStore()
     service = ClientCrmService(
         client_store=MemoryClientStore(),
-        activity_log=ActivityLogService(MemoryActivityEventStore()),
+        activity_log=activity_log,
         client_contact_store=MemoryClientContactStore(),
-        crm_contact_store=MemoryCrmContactStore(),
+        crm_contact_store=crm_contact_store,
         engagement_store=MemoryEngagementStore(),
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
         engagement_participant_store=MemoryEngagementParticipantStore(),
         luma_event_store=MemoryLumaEventStore(),
         client_touchpoint_store=MemoryClientTouchpointStore(),
+        contact_engagement_signal_service=ContactEngagementSignalService(
+            crm_contact_store=crm_contact_store, activity_log=activity_log
+        ),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -56,10 +62,11 @@ def test_client():
 def contact_test_client():
     """Same as test_client, but also exposes the CrmContactStore directly
     so a test can seed a canonical Contact before linking it."""
+    activity_log = ActivityLogService(MemoryActivityEventStore())
     crm_contact_store = MemoryCrmContactStore()
     service = ClientCrmService(
         client_store=MemoryClientStore(),
-        activity_log=ActivityLogService(MemoryActivityEventStore()),
+        activity_log=activity_log,
         client_contact_store=MemoryClientContactStore(),
         crm_contact_store=crm_contact_store,
         engagement_store=MemoryEngagementStore(),
@@ -67,6 +74,9 @@ def contact_test_client():
         engagement_participant_store=MemoryEngagementParticipantStore(),
         luma_event_store=MemoryLumaEventStore(),
         client_touchpoint_store=MemoryClientTouchpointStore(),
+        contact_engagement_signal_service=ContactEngagementSignalService(
+            crm_contact_store=crm_contact_store, activity_log=activity_log
+        ),
     )
     app = FastAPI()
     app.include_router(client_crm_router)
@@ -80,17 +90,22 @@ def luma_test_client():
     """Same as test_client, but also exposes the LumaEventStore directly
     so a test can seed a persisted Luma event before linking an Engagement
     to it (Client CRM Stage 1H-A)."""
+    activity_log = ActivityLogService(MemoryActivityEventStore())
+    crm_contact_store = MemoryCrmContactStore()
     luma_event_store = MemoryLumaEventStore()
     service = ClientCrmService(
         client_store=MemoryClientStore(),
-        activity_log=ActivityLogService(MemoryActivityEventStore()),
+        activity_log=activity_log,
         client_contact_store=MemoryClientContactStore(),
-        crm_contact_store=MemoryCrmContactStore(),
+        crm_contact_store=crm_contact_store,
         engagement_store=MemoryEngagementStore(),
         engagement_closeout_store=MemoryEngagementCloseoutStore(),
         engagement_participant_store=MemoryEngagementParticipantStore(),
         luma_event_store=luma_event_store,
         client_touchpoint_store=MemoryClientTouchpointStore(),
+        contact_engagement_signal_service=ContactEngagementSignalService(
+            crm_contact_store=crm_contact_store, activity_log=activity_log
+        ),
     )
     app = FastAPI()
     app.include_router(client_crm_router)

@@ -562,6 +562,7 @@ from app.repositories.engagement_participant_store import MemoryEngagementPartic
 from app.repositories.engagement_store import MemoryEngagementStore  # noqa: E402
 from app.services.activity_log_service import ActivityLogService as _ActivityLogServiceForEventHistory  # noqa: E402
 from app.services.client_crm_service import ClientCrmService  # noqa: E402
+from app.services.contact_engagement_signal_service import ContactEngagementSignalService  # noqa: E402
 
 
 @pytest.fixture
@@ -572,9 +573,10 @@ def event_history_test_setup():
     client_store = MemoryClientStore()
     engagement_store = MemoryEngagementStore()
     engagement_participant_store = MemoryEngagementParticipantStore()
+    event_history_activity_log = _ActivityLogServiceForEventHistory(MemoryActivityEventStore())
     client_crm_service = ClientCrmService(
         client_store=client_store,
-        activity_log=_ActivityLogServiceForEventHistory(MemoryActivityEventStore()),
+        activity_log=event_history_activity_log,
         client_contact_store=MemoryClientContactStore(),
         crm_contact_store=crm_contact_store,
         engagement_store=engagement_store,
@@ -582,6 +584,9 @@ def event_history_test_setup():
         engagement_participant_store=engagement_participant_store,
         luma_event_store=MemoryLumaEventStore(),
         client_touchpoint_store=MemoryClientTouchpointStore(),
+        contact_engagement_signal_service=ContactEngagementSignalService(
+            crm_contact_store=crm_contact_store, activity_log=event_history_activity_log
+        ),
     )
 
     app = FastAPI()

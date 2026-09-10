@@ -53,6 +53,11 @@ from app.services.client_crm_service import (
     _last_contacted,
     _next_dinner,
 )
+from app.services.contact_engagement_signal_service import (
+    ContactEngagementSignalOutcome,
+    ContactEngagementSignalResult,
+    ContactEngagementSignalService,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -67,18 +72,22 @@ def _make_service(
     engagement_participant_store: EngagementParticipantStore | None = None,
     luma_event_store: LumaEventStore | None = None,
     client_touchpoint_store: ClientTouchpointStore | None = None,
+    contact_engagement_signal_service: ContactEngagementSignalService | None = None,
 ) -> tuple[ClientCrmService, ActivityLogService]:
     activity_log = ActivityLogService(MemoryActivityEventStore())
+    resolved_crm_contact_store = crm_contact_store or MemoryCrmContactStore()
     service = ClientCrmService(
         client_store=client_store,
         activity_log=activity_log,
         client_contact_store=client_contact_store or MemoryClientContactStore(),
-        crm_contact_store=crm_contact_store or MemoryCrmContactStore(),
+        crm_contact_store=resolved_crm_contact_store,
         engagement_store=engagement_store or MemoryEngagementStore(),
         engagement_closeout_store=engagement_closeout_store or MemoryEngagementCloseoutStore(),
         engagement_participant_store=engagement_participant_store or MemoryEngagementParticipantStore(),
         luma_event_store=luma_event_store or MemoryLumaEventStore(),
         client_touchpoint_store=client_touchpoint_store or MemoryClientTouchpointStore(),
+        contact_engagement_signal_service=contact_engagement_signal_service
+        or ContactEngagementSignalService(crm_contact_store=resolved_crm_contact_store, activity_log=activity_log),
     )
     return service, activity_log
 
@@ -2556,6 +2565,106 @@ async def test_creating_participants_never_mutates_the_engagement_closeout(parti
     assert refreshed_closeout.confirmed_guest_count == 24
     assert refreshed_closeout.attended_count == 24
     assert refreshed_closeout.updated_at == closeout.updated_at
+
+
+# =====================================================================
+# Manual participant -> Engagement Stage signal trigger -- Contacts CRM
+# Stage 3B (2026-09-11)
+# =====================================================================
+
+
+async def test_manual_create_confirmed_guest_triggers_the_signal(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+
+    await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "role": "guest", "rsvp_status": "confirmed"}
+    )
+
+    contact = await crm_contact_store.get("ethan-1")
+    assert contact.custom_fields["engagement_stage"] == "Interested"
+
+
+async def test_manual_update_invited_to_confirmed_triggers_the_signal(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "role": "guest", "rsvp_status": "invited"}
+    )
+    assert (await crm_contact_store.get("ethan-1")).custom_fields.get("engagement_stage") is None
+
+    await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, participant.participant_id, {"rsvp_status": "confirmed"}
+    )
+
+    assert (await crm_contact_store.get("ethan-1")).custom_fields["engagement_stage"] == "Interested"
+
+
+async def test_manual_attendance_update_null_to_attended_triggers_the_signal(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "role": "guest"}
+    )
+    assert (await crm_contact_store.get("ethan-1")).custom_fields.get("engagement_stage") is None
+
+    await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, participant.participant_id, {"attendance_status": "attended"}
+    )
+
+    assert (await crm_contact_store.get("ethan-1")).custom_fields["engagement_stage"] == "Interested"
+
+
+async def test_manual_create_ineligible_role_does_not_trigger(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+
+    await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "role": "client", "rsvp_status": "confirmed"}
+    )
+
+    assert (await crm_contact_store.get("ethan-1")).custom_fields.get("engagement_stage") is None
+
+
+async def test_manual_signal_does_not_produce_a_second_generic_contact_updated_activity_event(participant_service):
+    """The signal writes directly via crm_contact_store.save(), never
+    through CrmService.update_contact() -- confirms no redundant generic
+    "contact.updated" event accompanies the specific advancement event."""
+    service, activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+
+    await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "role": "guest", "rsvp_status": "confirmed"}
+    )
+
+    page = await activity_log.list_events(category=ActivityCategory.CONTACTS)
+    event_types = [e.event_type for e in page.items]
+    assert event_types.count("contact.engagement_stage.advanced") == 1
+    assert "contact.updated" not in event_types
+
+
+async def test_manual_signal_failure_never_blocks_the_participant_write(participant_service, monkeypatch):
+    """A signal-service exception must never undo or block the already-
+    successful participant create -- the participant is still returned
+    and persisted."""
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+
+    async def _boom(_participant):
+        raise RuntimeError("simulated signal failure")
+
+    monkeypatch.setattr(service.contact_engagement_signal_service, "reconcile_from_participant", _boom)
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "role": "guest", "rsvp_status": "confirmed"}
+    )
+    assert await store.get(participant.participant_id) is not None
 
 
 # =====================================================================

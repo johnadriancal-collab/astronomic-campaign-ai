@@ -75,6 +75,13 @@ class ActivitySource(str, Enum):
     # Client CRM" is a different product area from "a human editing the
     # existing Contacts", even though both are manual/session-driven.
     MANUAL_CLIENT_CRM = "manual_client_crm"
+    # Contacts CRM Stage 3B -- the unified EngagementParticipant-driven
+    # engagement-stage signal (app/services/contact_engagement_signal_service.py).
+    # Deliberately NOT LUMA_SYNC: the same signal fires identically whether
+    # the triggering participant was created/updated manually or by Luma
+    # sync, so attributing it to a source-specific origin would misrepresent
+    # it as Luma-only when it explicitly is not.
+    ENGAGEMENT_SIGNAL = "engagement_signal"
 
 
 class ActivityEvent(BaseModel):

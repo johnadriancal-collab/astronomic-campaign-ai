@@ -123,6 +123,7 @@ from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
 from app.services.client_crm_service import ClientCrmService
+from app.services.contact_engagement_signal_service import ContactEngagementSignalService
 from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.email_intake_service import EmailIntakeService
@@ -268,6 +269,18 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
     )
 
+    # Contacts CRM Stage 3B (2026-09-11) -- the ONE canonical
+    # EngagementParticipant -> Contact engagement-stage signal, shared
+    # (same instance) by ClientCrmService's own manual participant
+    # create/update paths below AND LumaEngagementParticipantSyncService
+    # further down -- never a second, independently-constructed copy of
+    # this logic. See contact_engagement_signal_service.py's own module
+    # docstring.
+    contact_engagement_signal_service = ContactEngagementSignalService(
+        crm_contact_store=crm_contact_store,
+        activity_log=activity_log_service,
+    )
+
     app.state.client_crm_service = ClientCrmService(
         client_store=client_store,
         activity_log=activity_log_service,
@@ -278,6 +291,7 @@ async def lifespan(app: FastAPI):
         engagement_participant_store=engagement_participant_store,
         luma_event_store=luma_event_store,
         client_touchpoint_store=client_touchpoint_store,
+        contact_engagement_signal_service=contact_engagement_signal_service,
     )
     crm_service = CrmService(
         contact_store=crm_contact_store,
@@ -499,6 +513,7 @@ async def lifespan(app: FastAPI):
         engagement_participant_store=engagement_participant_store,
         crm_contact_store=crm_contact_store,
         activity_log=activity_log_service,
+        contact_engagement_signal_service=contact_engagement_signal_service,
     )
     app.state.luma_sync_service = LumaSyncService(
         crm_service=crm_service,
