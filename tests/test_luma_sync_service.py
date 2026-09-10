@@ -1855,3 +1855,174 @@ def test_only_the_live_webhook_path_and_the_explicit_backfill_script_ever_call_t
         if "apply_luma_self_report(" in text or "resolve_contact_luma_fields(" in text:
             offending_files.append(str(path))
     assert offending_files == []
+
+
+# =====================================================================
+# Client CRM Stage 1H-B (2026-09-10) -- participant sync wiring
+# =====================================================================
+
+
+@pytest_asyncio.fixture
+async def participant_sync_service():
+    from app.repositories.crm_contact_store import MemoryCrmContactStore
+    from app.repositories.engagement_participant_store import MemoryEngagementParticipantStore
+    from app.repositories.engagement_store import MemoryEngagementStore
+    from app.services.luma_engagement_participant_sync_service import LumaEngagementParticipantSyncService
+
+    return LumaEngagementParticipantSyncService, MemoryEngagementStore(), MemoryEngagementParticipantStore(), MemoryCrmContactStore()
+
+
+@pytest_asyncio.fixture
+async def luma_service_with_participant_sync(crm_service, event_store, registration_store, mapping_store, participant_sync_service):
+    """Same as `luma_service`, but with Stage 1H-B's participant sync
+    actually wired in -- exposes the Engagement/EngagementParticipant/
+    CrmContact stores directly so a test can link an Engagement first."""
+    sync_cls, engagement_store, engagement_participant_store, crm_contact_store = participant_sync_service
+    sync_service = sync_cls(
+        engagement_store=engagement_store,
+        engagement_participant_store=engagement_participant_store,
+        crm_contact_store=crm_service.contact_store,  # SAME contact store the webhook path itself writes to
+        activity_log=crm_service.activity_log,
+    )
+    service = LumaSyncService(
+        crm_service=crm_service,
+        event_store=event_store,
+        registration_store=registration_store,
+        mapping_store=mapping_store,
+        activity_log=crm_service.activity_log,
+        participant_sync_service=sync_service,
+    )
+    return service, engagement_store, engagement_participant_store
+
+
+async def test_default_construction_leaves_participant_sync_unwired(luma_service):
+    """Backward-compatibility proof: every existing caller/test that builds
+    LumaSyncService without participant_sync_service (the `luma_service`
+    fixture, unchanged by this stage) gets exactly None -- the new final
+    step in _process_guest_event_locked is skipped entirely, byte-identical
+    to before Stage 1H-B existed."""
+    assert luma_service.participant_sync_service is None
+
+
+async def test_wired_participant_sync_creates_a_participant_for_a_linked_event(luma_service_with_participant_sync):
+    from datetime import datetime, timezone
+
+    from app.models.client_crm import Engagement, EngagementStatus, EngagementType
+
+    service, engagement_store, engagement_participant_store = luma_service_with_participant_sync
+    now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    await engagement_store.create(
+        Engagement(
+            engagement_id="e1", client_id="c1", title="SF Investor Dinner", engagement_type=EngagementType.DINNER,
+            luma_event_id="evt-1", status=EngagementStatus.CONFIRMED, created_at=now, updated_at=now,
+        )
+    )
+
+    result = await service.process_guest_event(make_event(event_id="evt-1"), make_guest())
+
+    participants = await engagement_participant_store.list_for_engagement("e1")
+    assert len(participants) == 1
+    assert participants[0].crm_contact_id == result.contact.crm_contact_id
+
+
+async def test_no_engagement_linked_to_this_event_still_processes_registration_normally(luma_service_with_participant_sync):
+    service, _engagement_store, engagement_participant_store = luma_service_with_participant_sync
+    result = await service.process_guest_event(make_event(event_id="evt-unlinked"), make_guest())
+    assert result.registration.luma_event_id == "evt-unlinked"
+    assert result.contact is not None
+    assert await engagement_participant_store.list_for_engagement("e1") == []
+
+
+async def test_participant_sync_exception_never_breaks_luma_registration_or_contact_processing(luma_service, monkeypatch):
+    """Forces the participant-sync step to raise, and confirms
+    process_guest_event() still returns its normal, fully-successful
+    result (registration saved, contact created) -- the exact fail-open
+    contract Stage 1H-B requires."""
+
+    class _ExplodingSyncService:
+        async def sync_luma_registration_to_engagement_participant(self, registration):
+            raise RuntimeError("simulated participant sync failure")
+
+    luma_service.participant_sync_service = _ExplodingSyncService()
+
+    result = await luma_service.process_guest_event(make_event(), make_guest())
+
+    assert result.contact is not None
+    assert result.registration.luma_guest_id == "gst-1"
+    assert result.registration_is_new is True
+
+
+async def test_no_participant_sync_exception_ever_escapes_process_guest_event(luma_service):
+    """Same forced failure as above, but the assertion is specifically
+    that NO exception propagates out of process_guest_event() at all --
+    this is what guarantees the webhook route's own HTTP 200 response is
+    never affected (see app/api/luma.py's luma_webhook route, which only
+    checks for a raised LumaSyncError, never anything from participant
+    sync)."""
+
+    class _ExplodingSyncService:
+        async def sync_luma_registration_to_engagement_participant(self, registration):
+            raise RuntimeError("simulated participant sync failure")
+
+    luma_service.participant_sync_service = _ExplodingSyncService()
+
+    try:
+        await luma_service.process_guest_event(make_event(), make_guest())
+    except Exception as e:  # noqa: BLE001 -- the test itself asserts none should ever reach here
+        pytest.fail(f"process_guest_event() must never raise from a participant-sync failure, but raised: {e!r}")
+
+
+def test_no_automatic_call_site_syncs_a_registration_to_an_engagement_participant():
+    """Structural guard, mirroring test_only_the_live_webhook_path_and_
+    the_explicit_backfill_script_ever_call_the_self_report_merge_functions
+    above: sync_luma_registration_to_engagement_participant() is called
+    from exactly ONE place in the entire app -- the live guest-processing
+    path in luma_sync_service.py (itself shared by the webhook AND the
+    operator-triggered backfill, by this app's own existing, unmodified
+    design) -- never from app startup (main.py), never from Stage 1H-A's
+    own Engagement-linking code (client_crm_service.py), never from a
+    scheduled job."""
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    allowed_files = {
+        repo_root / "app" / "services" / "luma_engagement_participant_sync_service.py",  # the function's own definition
+        repo_root / "app" / "services" / "luma_sync_service.py",  # the one caller
+    }
+    offending_files = []
+    for path in (repo_root / "app").rglob("*.py"):
+        if path in allowed_files:
+            continue
+        text = path.read_text()
+        if "sync_luma_registration_to_engagement_participant(" in text:
+            offending_files.append(str(path))
+    assert offending_files == []
+
+
+def test_app_startup_never_calls_run_backfill_or_process_guest_event_automatically():
+    """main.py's lifespan wiring must only ever CONSTRUCT LumaSyncService/
+    LumaEngagementParticipantSyncService -- it must never itself call
+    run_backfill(), run_event_backfill(), process_guest_event(), or
+    sync_luma_registration_to_engagement_participant() at startup. Those
+    are reached only via an explicit HTTP request (the webhook, or an
+    operator hitting POST /sync/luma-backfill)."""
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    main_source = (repo_root / "app" / "main.py").read_text()
+    for forbidden in ("run_backfill(", "run_event_backfill(", "process_guest_event(", "sync_luma_registration_to_engagement_participant("):
+        assert forbidden not in main_source, f"main.py must never call {forbidden} at startup"
+
+
+def test_engagement_linking_code_has_no_awareness_of_luma_registrations_or_participant_sync():
+    """Stage 1H-A's own Engagement<->Luma-event linking code
+    (client_crm_service.py) must remain completely unaware of
+    LumaRegistration/participant sync -- proving that linking an
+    Engagement (or merely validating/looking up a luma_event_id) can never,
+    by itself, trigger any historical participant creation."""
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).resolve().parent.parent
+    source = (repo_root / "app" / "services" / "client_crm_service.py").read_text()
+    for forbidden in ("LumaRegistration", "sync_luma_registration_to_engagement_participant", "LumaEngagementParticipantSyncService"):
+        assert forbidden not in source

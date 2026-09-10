@@ -129,6 +129,7 @@ from app.services.email_message_sync_service import EmailMessageSyncService
 from app.services.email_sequence_sync_service import EmailSequenceSyncService
 from app.services.itf_ingestion_service import ItfIngestionService
 from app.services.lead_service import LeadService
+from app.services.luma_engagement_participant_sync_service import LumaEngagementParticipantSyncService
 from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProspectService
 from app.services.mail_campaign_service import MailCampaignService
@@ -482,6 +483,19 @@ async def lifespan(app: FastAPI):
     # build_default_claude_client's precedent above); it only raises
     # LumaNotConfiguredError lazily, on an actual outbound call (i.e. only
     # the backfill route needs it -- the webhook path never calls Luma).
+    # Client CRM Stage 1H-B (2026-09-10) -- syncs a Luma registration to its
+    # linked Engagement's EngagementParticipant, ONLY for registrations
+    # processed through the live path from here on (no historical replay --
+    # see luma_engagement_participant_sync_service.py's own module
+    # docstring). Reuses the exact same engagement_store/
+    # engagement_participant_store/crm_contact_store/activity_log_service
+    # instances every other service in this app already shares.
+    luma_engagement_participant_sync_service = LumaEngagementParticipantSyncService(
+        engagement_store=engagement_store,
+        engagement_participant_store=engagement_participant_store,
+        crm_contact_store=crm_contact_store,
+        activity_log=activity_log_service,
+    )
     app.state.luma_sync_service = LumaSyncService(
         crm_service=crm_service,
         event_store=luma_event_store,
@@ -490,6 +504,7 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
         checkpoint_store=luma_backfill_checkpoint_store,
         luma_client=LumaClient(),
+        participant_sync_service=luma_engagement_participant_sync_service,
     )
 
     yield

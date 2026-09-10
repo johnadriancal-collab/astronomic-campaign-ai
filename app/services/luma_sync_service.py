@@ -75,6 +75,7 @@ from app.services.luma_contact_enrichment import (
     resolve_contact_luma_fields,
     resolve_tier1_website,
 )
+from app.services.luma_engagement_participant_sync_service import LumaEngagementParticipantSyncService
 
 # The only webhook event types Phase 1 processes -- event.*/calendar.*
 # lifecycle webhooks are deliberately out of scope this phase (see the
@@ -277,6 +278,7 @@ class LumaSyncService:
         activity_log: ActivityLogService,
         checkpoint_store: LumaBackfillCheckpointStore | None = None,
         luma_client: LumaClient | None = None,
+        participant_sync_service: LumaEngagementParticipantSyncService | None = None,
     ):
         self.crm_service = crm_service
         self.event_store = event_store
@@ -285,6 +287,14 @@ class LumaSyncService:
         self.activity_log = activity_log
         self.checkpoint_store = checkpoint_store
         self.luma_client = luma_client
+        # Client CRM Stage 1H-B (2026-09-10) -- optional so every existing
+        # caller/test that constructs this class without it keeps behaving
+        # BYTE-IDENTICAL to before this feature existed (same "optional,
+        # skip the block entirely when unset" convention already used for
+        # luma_client/checkpoint_store above). When set, see
+        # _process_guest_event_locked()'s own final step for the fail-open
+        # boundary this is called through.
+        self.participant_sync_service = participant_sync_service
         # Per-guest-id concurrency guard -- see process_guest_event()'s
         # docstring for the race this closes. Deliberately per-guest, not a
         # single global lock: two DIFFERENT guests' webhooks still process
@@ -633,6 +643,25 @@ class LumaSyncService:
             luma_self_report_website_review_needed=luma_self_report_website_review_needed,
         )
         await self._record_activity(luma_event, existing, result)
+
+        # Client CRM Stage 1H-B -- additive, fail-open FINAL step. Runs only
+        # after registration persistence, Contact matching/creation, and
+        # Contact enrichment have all already succeeded and been recorded
+        # above; a failure here can NEVER roll back or change the outcome
+        # of any of that, and can never change this webhook delivery's HTTP
+        # success response (see app/api/luma.py's own handle_webhook route --
+        # this method's return value/absence of exception is all it checks).
+        # Skipped entirely when unwired (self.participant_sync_service is
+        # None) -- see this class's own constructor docstring note.
+        if self.participant_sync_service is not None:
+            try:
+                await self.participant_sync_service.sync_luma_registration_to_engagement_participant(registration)
+            except Exception as e:  # noqa: BLE001 -- must never break Luma registration/Contact processing
+                logger.error(
+                    f"Luma participant sync failed for guest {guest_id} (event {luma_event.luma_event_id}): "
+                    f"{type(e).__name__}: {e}"
+                )
+
         return result
 
     async def _build_mapped_fields(self, guest: dict) -> dict[str, Any]:
