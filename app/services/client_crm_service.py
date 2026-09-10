@@ -78,11 +78,17 @@ from app.repositories.engagement_store import EngagementLumaEventAlreadyLinkedEr
 from app.repositories.luma_event_store import LumaEventStore
 from app.services.activity_log_service import ActivityLogService
 
-SORTABLE_CLIENT_FIELDS = frozenset({"name", "created_at", "updated_at", "next_action_due"})
-# Deliberately does NOT include "next_dinner"/"last_contacted" -- those are
-# derived only for the current page's items (see list_clients()'s own
-# docstring), never computed for the FULL unfiltered/unpaginated Client
-# set, so sorting/filtering by either is not supported in Stage 2C.
+SORTABLE_CLIENT_FIELDS = frozenset({"name", "created_at", "updated_at", "next_action_due", "next_dinner"})
+# Stage 2C.1 adds "next_dinner" -- unlike the other four (plain Client
+# attributes, sorted via getattr()), it's a DERIVED value, so
+# list_clients() special-cases it: sorting by it requires deriving Next
+# Dinner for the FULL filtered set BEFORE pagination (see this method's
+# own docstring for why "paginate, then derive, then sort-the-page" would
+# produce a wrong global ordering), not just the returned page.
+# "last_contacted" deliberately still isn't here -- Stage 2C.1 was only
+# asked to make Next Dinner sortable/the new default; Last Contacted stays
+# derived for the current page's items only, so sorting/filtering by it
+# remains unsupported.
 
 # Client CRM Stage 2C's chosen convention for interpreting
 # Engagement.engagement_date (a plain calendar date with no timezone of
@@ -152,6 +158,30 @@ def _group_by_client_id(rows: list[Engagement] | list[ClientTouchpoint]) -> dict
     for row in rows:
         grouped.setdefault(row.client_id, []).append(row)
     return grouped
+
+
+def _default_next_dinner_sort(
+    clients: list[Client], next_dinner_by_client: dict[str, date | None], sort_dir: str
+) -> list[Client]:
+    """Client CRM Stage 2C.1's own locked default Master Client CRM
+    ordering: Clients with a qualifying Next Dinner come first (earliest
+    date first on sort_dir="asc"), ties broken by Client name then
+    client_id (a fully deterministic final fallback); Clients with NO
+    qualifying Next Dinner always sort into their own group AFTER every
+    dated Client, by name then client_id -- regardless of sort_dir, same
+    "nothing scheduled always sorts last" rule next_action_due's own
+    sort already established (see the with_value/without_value split in
+    list_clients()'s "else" branch) -- a Client with no upcoming dinner
+    must never rank ahead of one that has one."""
+    with_dinner = [c for c in clients if next_dinner_by_client.get(c.client_id) is not None]
+    without_dinner = [c for c in clients if next_dinner_by_client.get(c.client_id) is None]
+
+    with_dinner.sort(
+        key=lambda c: (next_dinner_by_client[c.client_id], c.name, c.client_id), reverse=(sort_dir == "desc")
+    )
+    without_dinner.sort(key=lambda c: (c.name, c.client_id))
+
+    return with_dinner + without_dinner
 
 # Server-owned fields -- stripped from any incoming create/update payload
 # BEFORE it's applied, regardless of what the caller sent. The API
@@ -447,16 +477,34 @@ class ClientCrmService:
 
         Stage 2C: returns ClientListItem (a strict superset of Client)
         rather than Client, with two derived, never-persisted summary
-        columns -- next_dinner and last_contacted -- computed ONLY for
-        the Clients on the page actually being returned (after the
-        filter/sort/paginate slice above, not the full filtered set), via
-        exactly ONE bulk Engagement query and ONE bulk ClientTouchpoint
-        query total (EngagementStore.list_for_clients() /
-        ClientTouchpointStore.list_for_clients()) -- never one query per
-        Client. See _next_dinner()/_last_contacted() for the exact
-        derivation rules, and _business_today() for the timezone
-        convention used to decide whether a dinner still qualifies as
-        upcoming."""
+        columns -- next_dinner and last_contacted. Neither is a real
+        Client attribute, so BOTH are computed after filtering, never
+        read from the store.
+
+        Stage 2C.1: sort_by="next_dinner" is special -- ordering BY a
+        derived value requires that value for the FULL filtered set
+        BEFORE pagination (sorting only the already-sliced page would
+        rank Clients correctly within their own page but not globally --
+        e.g. page 2's earliest dinner could easily be earlier than page
+        1's latest). So when sort_by="next_dinner": Next Dinner is bulk-
+        derived for every filtered Client (ONE Engagement query, ids =
+        the full filtered set) BEFORE the page slice, using
+        _default_next_dinner_sort()'s own locked ordering (qualifying
+        Next Dinner ascending, ties broken by name then client_id;
+        no-qualifying-dinner Clients always last, by name then
+        client_id, regardless of sort_dir). For every OTHER sort_by,
+        behavior is unchanged from Stage 2C: Next Dinner is derived only
+        for the resulting page (a second, smaller Engagement query,
+        page-scoped). last_contacted is ALWAYS derived only for the
+        resulting page (one ClientTouchpoint query, page-scoped) --
+        Stage 2C.1 was only asked to make Next Dinner sortable, not Last
+        Contacted -- see SORTABLE_CLIENT_FIELDS's own comment. Either
+        way this is at most 2 bulk queries total per call, never one
+        query per Client -- see EngagementStore.list_for_clients()'s own
+        docstring for why this specific shape exists. See
+        _next_dinner()/_last_contacted() for the exact derivation rules,
+        and _business_today() for the timezone convention used to decide
+        whether a dinner still qualifies as upcoming."""
         if sort_by not in SORTABLE_CLIENT_FIELDS:
             raise ValueError(f"sort_by must be one of {sorted(SORTABLE_CLIENT_FIELDS)}.")
         if sort_dir not in ("asc", "desc"):
@@ -478,40 +526,50 @@ class ClientCrmService:
             return True
 
         filtered = [c for c in clients if matches(c)]
+        today = _business_today()
 
-        # None-valued sort keys (e.g. next_action_due unset) always sort
-        # LAST, regardless of asc/desc -- reversing a (is_none, value)
-        # tuple as a whole would instead put them FIRST on sort_dir="desc",
-        # which reads as "these need attention most" when it should mean
-        # "nothing scheduled at all". Splitting the two groups keeps that
-        # correct in both directions.
-        with_value = [c for c in filtered if getattr(c, sort_by) is not None]
-        without_value = [c for c in filtered if getattr(c, sort_by) is None]
-        with_value.sort(key=lambda c: getattr(c, sort_by), reverse=(sort_dir == "desc"))
-        filtered = with_value + without_value
+        next_dinner_by_client: dict[str, date | None] | None = None
+        if sort_by == "next_dinner":
+            all_filtered_ids = [c.client_id for c in filtered]
+            engagements_by_client = _group_by_client_id(await self.engagement_store.list_for_clients(all_filtered_ids))
+            next_dinner_by_client = {
+                c.client_id: _next_dinner(engagements_by_client.get(c.client_id, []), today) for c in filtered
+            }
+            filtered = _default_next_dinner_sort(filtered, next_dinner_by_client, sort_dir)
+        else:
+            # None-valued sort keys (e.g. next_action_due unset) always
+            # sort LAST, regardless of asc/desc -- reversing a
+            # (is_none, value) tuple as a whole would instead put them
+            # FIRST on sort_dir="desc", which reads as "these need
+            # attention most" when it should mean "nothing scheduled at
+            # all". Splitting the two groups keeps that correct in both
+            # directions.
+            with_value = [c for c in filtered if getattr(c, sort_by) is not None]
+            without_value = [c for c in filtered if getattr(c, sort_by) is None]
+            with_value.sort(key=lambda c: getattr(c, sort_by), reverse=(sort_dir == "desc"))
+            filtered = with_value + without_value
 
         total = len(filtered)
         page = max(page, 1)
         page_size = max(page_size, 1)
         start = (page - 1) * page_size
         page_clients = filtered[start : start + page_size]
-
-        # Stage 2C: Next Dinner/Last Contacted are computed ONLY for this
-        # page's own Clients (never the full filtered/unpaginated set --
-        # see SORTABLE_CLIENT_FIELDS's own comment on why that means these
-        # two columns aren't sortable/filterable yet), via exactly two
-        # bulk queries total (one per entity type), never one query per
-        # Client -- see EngagementStore.list_for_clients()'s own docstring
-        # for why this specific shape exists.
         page_client_ids = [c.client_id for c in page_clients]
-        engagements_by_client = _group_by_client_id(await self.engagement_store.list_for_clients(page_client_ids))
+
+        if next_dinner_by_client is None:
+            # Not sorting by Next Dinner -- derive it (page-scoped only,
+            # same original Stage 2C shape) here instead.
+            engagements_by_client = _group_by_client_id(await self.engagement_store.list_for_clients(page_client_ids))
+            next_dinner_by_client = {
+                c.client_id: _next_dinner(engagements_by_client.get(c.client_id, []), today) for c in page_clients
+            }
+
         touchpoints_by_client = _group_by_client_id(await self.client_touchpoint_store.list_for_clients(page_client_ids))
-        today = _business_today()
 
         items = [
             ClientListItem(
                 **c.model_dump(),
-                next_dinner=_next_dinner(engagements_by_client.get(c.client_id, []), today),
+                next_dinner=next_dinner_by_client.get(c.client_id),
                 last_contacted=_last_contacted(touchpoints_by_client.get(c.client_id, [])),
             )
             for c in page_clients

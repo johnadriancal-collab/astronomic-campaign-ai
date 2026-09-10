@@ -1786,7 +1786,7 @@ export interface ListClientsParams {
   relationship_classification?: ClientRelationshipClassification;
   owner?: string;
   include_archived?: boolean;
-  sort_by?: "name" | "created_at" | "updated_at" | "next_action_due";
+  sort_by?: "name" | "created_at" | "updated_at" | "next_action_due" | "next_dinner";
   sort_dir?: "asc" | "desc";
   page?: number;
   page_size?: number;

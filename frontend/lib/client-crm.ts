@@ -113,12 +113,23 @@ export interface ClientListFilters {
   relationshipClassification: ClientRelationshipClassification | "";
   owner: string;
   includeArchived: boolean;
-  sortBy: "name" | "created_at" | "updated_at" | "next_action_due";
+  sortBy: "name" | "created_at" | "updated_at" | "next_action_due" | "next_dinner";
   sortDir: "asc" | "desc";
   page: number;
   pageSize: number;
 }
 
+// Client CRM Stage 2C.1: the Master Client CRM's own default ordering is
+// nearest-upcoming-dinner-first, not alphabetical -- there is still no
+// visible sort control on that page (see app/clients/page.tsx), so this
+// default is the ONLY way a human viewing it ever sees Clients ordered;
+// "next_dinner" is a fully legal, explicit sort_by value the backend
+// already supports (see ClientCrmService.list_clients()'s own Stage 2C.1
+// docstring for the exact locked ordering: qualifying dinners ascending,
+// no-upcoming-dinner Clients always last). This is the ONE call site
+// that changed -- the backend's own bare/omitted sort_by default is
+// deliberately left as "name", unchanged, in case anything else ever
+// calls this API directly without an explicit sort_by.
 export function defaultClientListFilters(): ClientListFilters {
   return {
     q: "",
@@ -126,7 +137,7 @@ export function defaultClientListFilters(): ClientListFilters {
     relationshipClassification: "",
     owner: "",
     includeArchived: false,
-    sortBy: "name",
+    sortBy: "next_dinner",
     sortDir: "asc",
     page: 1,
     pageSize: 25,

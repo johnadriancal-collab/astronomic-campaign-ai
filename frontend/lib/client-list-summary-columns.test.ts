@@ -37,6 +37,13 @@ test("column order is Client/Status/Relationship/Owner/Next Dinner/Last Contacte
   ]);
 });
 
+test("Stage 2C.1: the Master Client CRM never re-sorts items client-side -- it renders the backend's own order directly", () => {
+  assert.doesNotMatch(CLIENT_LIST_PAGE, /page\.items\.sort/);
+  assert.doesNotMatch(CLIENT_LIST_PAGE, /\[\.\.\.page\.items\]\.sort/);
+  assert.doesNotMatch(CLIENT_LIST_PAGE, /\.sort\(/);
+  assert.match(CLIENT_LIST_PAGE, /page\.items\.map\(/);
+});
+
 test("both new columns use the existing formatClientDate formatter, not a new one", () => {
   assert.match(CLIENT_LIST_PAGE, /formatClientDate\(client\.next_dinner\)/);
   assert.match(CLIENT_LIST_PAGE, /formatClientDate\(client\.last_contacted\)/);
@@ -76,13 +83,26 @@ test("the Next Dinner/Last Contacted <th>s carry no click handler or sort afford
   assert.doesNotMatch(lastContactedTh![0], /onClick/);
 });
 
-test("no new sort/filter param was added for next_dinner/last_contacted -- ListClientsParams.sort_by is unchanged", () => {
-  // The backend's own sortable-field set is untouched -- confirmed here
-  // by checking the frontend's ListClientsParams sort_by union, which
-  // must still list only the four pre-existing sortable Client fields.
+test("no filter param was added for next_dinner/last_contacted, and last_contacted is still not sortable", () => {
+  // Stage 2C.1 makes "next_dinner" a legal sort_by value (see the next
+  // test) -- but it adds nothing else: no next_dinner/last_contacted
+  // FILTER param, and last_contacted never became sortable at all.
   const sortByMatch = API_TS.match(/sort_by\?:\s*("[^"]+"(?:\s*\|\s*"[^"]+")*)/);
   assert.ok(sortByMatch, "expected to find ListClientsParams.sort_by's type union");
-  assert.equal(sortByMatch![1], '"name" | "created_at" | "updated_at" | "next_action_due"');
+  assert.doesNotMatch(sortByMatch![1], /last_contacted/);
+  assert.doesNotMatch(API_TS, /next_dinner_filter|last_contacted_filter/);
+});
+
+test("Stage 2C.1: next_dinner is a legal sort_by value, and it's the Master Client CRM's own default", () => {
+  const sortByMatch = API_TS.match(/sort_by\?:\s*("[^"]+"(?:\s*\|\s*"[^"]+")*)/);
+  assert.ok(sortByMatch, "expected to find ListClientsParams.sort_by's type union");
+  assert.equal(sortByMatch![1], '"name" | "created_at" | "updated_at" | "next_action_due" | "next_dinner"');
+
+  const CLIENT_CRM_TS = readFileSync(new URL("../lib/client-crm.ts", import.meta.url), "utf-8");
+  const defaultsMatch = CLIENT_CRM_TS.match(/export function defaultClientListFilters\(\)[\s\S]*?\n\}/);
+  assert.ok(defaultsMatch, "expected to find defaultClientListFilters()");
+  assert.match(defaultsMatch![0], /sortBy:\s*"next_dinner"/);
+  assert.match(defaultsMatch![0], /sortDir:\s*"asc"/);
 });
 
 test("ClientListItem is a superset of Client, not a replacement -- every existing Client field name still appears in its own interface", () => {

@@ -734,6 +734,225 @@ async def test_list_clients_empty_result_still_calls_bulk_methods_safely(master_
 
 
 # =====================================================================
+# Default ordering by Next Dinner -- Client CRM Stage 2C.1
+# =====================================================================
+
+
+async def _client_with_dinner(service, engagement_store, name, engagement_date=None, **engagement_overrides):
+    """Creates a Client and, unless engagement_date/engagement_overrides
+    explicitly describe a non-qualifying Engagement, a single qualifying
+    Dinner Engagement dated `engagement_date` for it."""
+    client = await service.create_client({"name": name})
+    await engagement_store.create(
+        _svc_engagement(f"e-{client.client_id}", client.client_id, engagement_date=engagement_date, **engagement_overrides)
+    )
+    return client
+
+
+async def test_next_dinner_sort_sep17_before_sep22(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    sep22 = await _client_with_dinner(service, engagement_store, "Hive ASMBLD", TODAY + timedelta(days=12))
+    sep17 = await _client_with_dinner(service, engagement_store, "Hot Shot", TODAY + timedelta(days=7))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [sep17.client_id, sep22.client_id]
+
+
+async def test_next_dinner_sort_sep22_before_sep23(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    sep23 = await _client_with_dinner(service, engagement_store, "Applied Curiosity", TODAY + timedelta(days=13))
+    sep22 = await _client_with_dinner(service, engagement_store, "Hive ASMBLD", TODAY + timedelta(days=12))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [sep22.client_id, sep23.client_id]
+
+
+async def test_next_dinner_sort_upcoming_dinners_come_before_null(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    no_dinner = await service.create_client({"name": "No Dinner Co"})
+    has_dinner = await _client_with_dinner(service, engagement_store, "Has Dinner Co", TODAY + timedelta(days=30))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [has_dinner.client_id, no_dinner.client_id]
+
+
+async def test_next_dinner_sort_null_group_sorts_by_client_name(master_crm_service):
+    service, _, _engagement_store, _ = master_crm_service
+    await service.create_client({"name": "Zeta Co"})
+    await service.create_client({"name": "Alpha Co"})
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.name for c in page.items] == ["Alpha Co", "Zeta Co"]
+
+
+async def test_next_dinner_sort_same_date_tie_sorts_by_client_name(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    zeta = await _client_with_dinner(service, engagement_store, "Zeta Co", TODAY + timedelta(days=10))
+    alpha = await _client_with_dinner(service, engagement_store, "Alpha Co", TODAY + timedelta(days=10))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [alpha.client_id, zeta.client_id]
+
+
+async def test_next_dinner_sort_deterministic_final_fallback_is_client_id(master_crm_service):
+    """Same date AND same name -- client_id is the last, fully
+    deterministic tie-break (Stage 2C.1's own locked semantics)."""
+    service, _, engagement_store, _ = master_crm_service
+    client_a = await service.create_client({"name": "Twin Co"})
+    client_b = await service.create_client({"name": "Twin Co"})
+    same_date = TODAY + timedelta(days=10)
+    await engagement_store.create(_svc_engagement(f"e-{client_a.client_id}", client_a.client_id, engagement_date=same_date))
+    await engagement_store.create(_svc_engagement(f"e-{client_b.client_id}", client_b.client_id, engagement_date=same_date))
+
+    expected_first = min(client_a.client_id, client_b.client_id)
+    page = await service.list_clients(sort_by="next_dinner")
+    assert page.items[0].client_id == expected_first
+
+
+async def test_next_dinner_sort_past_dinner_behaves_as_null(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    past = await _client_with_dinner(service, engagement_store, "Past Co", TODAY - timedelta(days=1))
+    future = await _client_with_dinner(service, engagement_store, "Future Co", TODAY + timedelta(days=1))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [future.client_id, past.client_id]
+    assert page.items[1].next_dinner is None
+
+
+async def test_next_dinner_sort_cancelled_dinner_behaves_as_null(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    cancelled = await _client_with_dinner(
+        service, engagement_store, "Cancelled Co", TODAY + timedelta(days=5), status=EngagementStatus.CANCELLED
+    )
+    future = await _client_with_dinner(service, engagement_store, "Future Co", TODAY + timedelta(days=1))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [future.client_id, cancelled.client_id]
+    assert page.items[1].next_dinner is None
+
+
+async def test_next_dinner_sort_archived_dinner_behaves_as_null(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    archived = await _client_with_dinner(service, engagement_store, "Archived Co", TODAY + timedelta(days=5), archived=True)
+    future = await _client_with_dinner(service, engagement_store, "Future Co", TODAY + timedelta(days=1))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [future.client_id, archived.client_id]
+    assert page.items[1].next_dinner is None
+
+
+async def test_next_dinner_sort_non_dinner_engagement_behaves_as_null(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    sponsorship = await _client_with_dinner(
+        service, engagement_store, "Sponsorship Co", TODAY + timedelta(days=5), engagement_type=EngagementType.SPONSORSHIP
+    )
+    future = await _client_with_dinner(service, engagement_store, "Future Co", TODAY + timedelta(days=1))
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [future.client_id, sponsorship.client_id]
+    assert page.items[1].next_dinner is None
+
+
+async def test_next_dinner_sort_america_chicago_today_semantics_remain_intact(master_crm_service):
+    """Integration-level confirmation that sort_by="next_dinner" uses the
+    same _business_today() (America/Chicago) as plain next_dinner
+    derivation -- a dinner dated exactly today still qualifies (and thus
+    sorts ahead of a null-group Client)."""
+    service, _, engagement_store, _ = master_crm_service
+    real_business_today = _business_today()
+    today_dinner = await _client_with_dinner(service, engagement_store, "Today Co", real_business_today)
+    no_dinner = await service.create_client({"name": "No Dinner Co"})
+
+    page = await service.list_clients(sort_by="next_dinner")
+    assert [c.client_id for c in page.items] == [today_dinner.client_id, no_dinner.client_id]
+    assert page.items[0].next_dinner == real_business_today
+
+
+async def test_next_dinner_sort_happens_before_pagination_page1_has_globally_nearest_dinners(master_crm_service):
+    """The exact regression this stage exists to prevent: deriving Next
+    Dinner only for an arbitrary pre-sliced page (rather than the full
+    filtered set) would put whatever happened to land on page 1 first,
+    not the globally nearest dinners."""
+    service, _, engagement_store, _ = master_crm_service
+    # Create 5 Clients whose NAMES sort in the opposite order of their
+    # dinner dates, so a name-based pre-slice would get page 1 wrong.
+    names_and_offsets = [("E Co", 5), ("D Co", 4), ("C Co", 3), ("B Co", 2), ("A Co", 1)]
+    created = {}
+    for name, offset in names_and_offsets:
+        created[name] = await _client_with_dinner(service, engagement_store, name, TODAY + timedelta(days=offset))
+
+    page1 = await service.list_clients(sort_by="next_dinner", page=1, page_size=2)
+    assert [c.name for c in page1.items] == ["A Co", "B Co"]
+    assert page1.total == 5
+
+    page2 = await service.list_clients(sort_by="next_dinner", page=2, page_size=2)
+    assert [c.name for c in page2.items] == ["C Co", "D Co"]
+
+    page3 = await service.list_clients(sort_by="next_dinner", page=3, page_size=2)
+    assert [c.name for c in page3.items] == ["E Co"]
+
+
+async def test_next_dinner_sort_filters_are_applied_before_sorting(master_crm_service):
+    service, _, engagement_store, _ = master_crm_service
+    active = await _client_with_dinner(service, engagement_store, "Active Co", TODAY + timedelta(days=10))
+    inactive = await _client_with_dinner(service, engagement_store, "Inactive Co", TODAY + timedelta(days=1))
+    await service.update_client(inactive.client_id, {"status": ClientStatus.INACTIVE})
+
+    page = await service.list_clients(sort_by="next_dinner", status=ClientStatus.ACTIVE)
+    assert [c.client_id for c in page.items] == [active.client_id]
+
+
+async def test_existing_explicit_sort_by_name_unaffected_by_next_dinner_dates(master_crm_service):
+    """Regression: explicit sort_by="name" must ignore dinner dates
+    entirely, exactly as before Stage 2C.1."""
+    service, _, engagement_store, _ = master_crm_service
+    await _client_with_dinner(service, engagement_store, "Zeta Co", TODAY + timedelta(days=1))
+    await _client_with_dinner(service, engagement_store, "Alpha Co", TODAY + timedelta(days=30))
+
+    page = await service.list_clients(sort_by="name")
+    assert [c.name for c in page.items] == ["Alpha Co", "Zeta Co"]
+
+
+async def test_existing_explicit_sort_by_next_action_due_still_behaves_as_before(master_crm_service):
+    service, _, _engagement_store, _ = master_crm_service
+    await service.create_client({"name": "No due date"})
+    await service.create_client({"name": "Later", "next_action_due": date(2027, 6, 1)})
+    await service.create_client({"name": "Sooner", "next_action_due": date(2027, 1, 1)})
+
+    page = await service.list_clients(sort_by="next_action_due", sort_dir="asc")
+    assert [c.name for c in page.items] == ["Sooner", "Later", "No due date"]
+
+
+async def test_next_dinner_sort_does_not_introduce_per_client_engagement_queries(master_crm_service):
+    """Structural regression guard for the sort_by="next_dinner" path
+    specifically: bulk list_for_clients() must be called exactly once
+    (across the FULL filtered set), never list_for_client() per Client."""
+    service, _, engagement_store, client_touchpoint_store = master_crm_service
+
+    async def _forbidden(*_args, **_kwargs):
+        raise AssertionError("list_for_client() must never be called by list_clients().")
+
+    engagement_store.list_for_client = _forbidden
+    client_touchpoint_store.list_for_client = _forbidden
+
+    call_counts = {"engagements": 0}
+    original_engagements = engagement_store.list_for_clients
+
+    async def _counted_engagements(client_ids):
+        call_counts["engagements"] += 1
+        return await original_engagements(client_ids)
+
+    engagement_store.list_for_clients = _counted_engagements
+
+    for i in range(6):
+        await _client_with_dinner(service, engagement_store, f"Client {i}", TODAY + timedelta(days=i))
+
+    page = await service.list_clients(sort_by="next_dinner", page=1, page_size=3)
+    assert len(page.items) == 3
+    assert call_counts["engagements"] == 1
+
+
+# =====================================================================
 # Update -- partial patch, immutability, updated_at, archive/restore
 # =====================================================================
 
