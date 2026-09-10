@@ -37,6 +37,20 @@ for engagement_stage. It follows the exact same
 merge back into custom_fields" pattern already established by
 luma_contact_enrichment.py's own Luma-self-report merge function -- see
 FIELD_PROVENANCE_KEY there.
+
+Stage 3C addendum (2026-09-11): is_qualifying_participant() and
+positive_signal_type() are exposed as public, stateless staticmethods
+specifically so the historical reconciliation driver
+(app/services/contact_engagement_stage_backfill.py) can select WHICH of a
+Contact's several qualifying participants should be the provenance
+trigger, and can filter a large historical participant set down to
+"would reconcile_from_participant() even consider this one," WITHOUT
+reimplementing the archived/role/signal-type rules a second time.
+reconcile_from_participant() itself is refactored to call these same two
+methods internally (not a parallel, differently-behaved copy) -- see each
+method's own docstring. _ADVANCEABLE_CURRENT_STAGES and
+INTERESTED_STAGE_VALUE are likewise imported directly by that driver
+rather than redefined there.
 """
 
 from dataclasses import dataclass
@@ -119,12 +133,12 @@ class ContactEngagementSignalService:
             return ContactEngagementSignalResult(ContactEngagementSignalOutcome.SKIPPED_ARCHIVED_PARTICIPANT, "participant is archived")
         if participant.crm_contact_id is None:
             return ContactEngagementSignalResult(ContactEngagementSignalOutcome.SKIPPED_NO_CONTACT_LINK, "participant has no crm_contact_id")
-        if participant.role not in _ELIGIBLE_ROLES:
+        if not self._is_eligible_role(participant.role):
             return ContactEngagementSignalResult(
                 ContactEngagementSignalOutcome.SKIPPED_INELIGIBLE_ROLE, f"role {participant.role.value} is not eligible"
             )
 
-        signal_type = self._positive_signal_type(participant)
+        signal_type = self.positive_signal_type(participant)
         if signal_type is None:
             return ContactEngagementSignalResult(ContactEngagementSignalOutcome.SKIPPED_NO_POSITIVE_SIGNAL, "no positive RSVP/attendance signal")
 
@@ -144,17 +158,45 @@ class ContactEngagementSignalService:
         return ContactEngagementSignalResult(ContactEngagementSignalOutcome.ADVANCED, f"advanced via {signal_type}")
 
     @staticmethod
-    def _positive_signal_type(participant: EngagementParticipant) -> str | None:
-        """Deterministic when both are true -- attendance_attended wins
-        over rsvp_confirmed (locked product decision: someone who actually
-        showed up is a stronger signal than someone who merely confirmed).
-        Neither present -- invited, declined, no_show, cancelled, or
-        entirely null -- returns None (not a positive signal)."""
+    def _is_eligible_role(role: ParticipantRole) -> bool:
+        return role in _ELIGIBLE_ROLES
+
+    @staticmethod
+    def positive_signal_type(participant: EngagementParticipant) -> str | None:
+        """Public, stateless -- pure function of the participant's own
+        rsvp_status/attendance_status, reused directly by
+        contact_engagement_stage_backfill.py for its own deterministic
+        trigger-participant precedence (ATTENDED-signal participants
+        outrank CONFIRMED-only ones there too, using this exact same
+        string values). Deterministic when both are true --
+        attendance_attended wins over rsvp_confirmed (locked product
+        decision: someone who actually showed up is a stronger signal
+        than someone who merely confirmed). Neither present -- invited,
+        declined, no_show, cancelled, or entirely null -- returns None
+        (not a positive signal)."""
         if participant.attendance_status == ParticipantAttendanceStatus.ATTENDED:
             return "attendance_attended"
         if participant.rsvp_status == ParticipantRsvpStatus.CONFIRMED:
             return "rsvp_confirmed"
         return None
+
+    @staticmethod
+    def is_qualifying_participant(participant: EngagementParticipant) -> bool:
+        """Public, stateless -- "would reconcile_from_participant()
+        consider this participant at all" (archived + crm_contact_id +
+        role + positive-signal, i.e. everything EXCEPT the Contact's own
+        current stage, which this can't know without a store read).
+        Exists so contact_engagement_stage_backfill.py can filter a whole
+        historical participant set down to qualifying candidates without
+        re-deriving any of these rules itself -- see this module's own
+        Stage 3C addendum above."""
+        if participant.archived:
+            return False
+        if participant.crm_contact_id is None:
+            return False
+        if not ContactEngagementSignalService._is_eligible_role(participant.role):
+            return False
+        return ContactEngagementSignalService.positive_signal_type(participant) is not None
 
     async def _advance(
         self, contact: CrmContact, participant: EngagementParticipant, signal_type: str, from_stage: Any
