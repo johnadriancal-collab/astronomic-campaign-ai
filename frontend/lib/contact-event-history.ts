@@ -10,7 +10,16 @@
 // below still has an entry for it so a display bug is a wrong string, never
 // a crash, if that ever changes.
 
-import type { CrmContactLumaRegistration } from "@/lib/api";
+import type { ContactEventHistoryEntry as ApiContactEventHistoryEntry, CrmContactLumaRegistration } from "@/lib/api";
+import {
+  dinnerTypeLabel,
+  engagementTypeLabel,
+  formatClientDate,
+  participantAttendanceStatusLabel,
+  participantRoleLabel,
+  participantRsvpStatusLabel,
+  participantSourceLabel,
+} from "./client-crm.ts";
 
 export interface ContactEventHistoryEntry {
   eventName: string;
@@ -59,4 +68,52 @@ export function buildEventHistoryEntry(registration: CrmContactLumaRegistration)
 // here can never silently reorder what the backend decided.
 export function buildEventHistory(registrations: CrmContactLumaRegistration[]): ContactEventHistoryEntry[] {
   return registrations.map(buildEventHistoryEntry);
+}
+
+// --- Contacts CRM Stage 3A -- canonical, EngagementParticipant-derived ---
+// The contact detail page's Event History section reads from THIS below,
+// not the LumaRegistration-derived functions above (those stay in place,
+// still exported/tested, purely for /luma-registrations compatibility).
+// Every label here reuses the SAME helpers Client CRM's own Engagement
+// Participant UI already built (lib/client-crm.ts) -- never a second,
+// independently-maintained copy of the same enum-label mapping. Ordering
+// is entirely the backend's responsibility (see
+// ClientCrmService.list_contact_event_history()) -- this only maps, never
+// re-sorts, same "trust the backend's own order" convention as
+// buildEventHistory above.
+
+export interface ParticipantEventHistoryEntry {
+  engagementId: string;
+  participantId: string;
+  eventName: string;
+  clientName: string;
+  dateLabel: string; // formatClientDate's own "—" for a null date
+  typeLabel: string; // e.g. "Dinner · Donor Dinner", or just "Sponsorship" for a non-dinner
+  roleLabel: string;
+  rsvpLabel: string; // "—" for null (participantRsvpStatusLabel's own null handling)
+  attendanceLabel: string; // "—" for null
+  sourceLabel: string; // "Manual" or "Luma"
+}
+
+export function buildParticipantEventHistoryEntry(entry: ApiContactEventHistoryEntry): ParticipantEventHistoryEntry {
+  const typeLabel = entry.dinner_type
+    ? `${engagementTypeLabel(entry.engagement_type)} · ${dinnerTypeLabel(entry.dinner_type)}`
+    : engagementTypeLabel(entry.engagement_type);
+
+  return {
+    engagementId: entry.engagement_id,
+    participantId: entry.participant_id,
+    eventName: entry.event_name,
+    clientName: entry.client_name,
+    dateLabel: formatClientDate(entry.engagement_date),
+    typeLabel,
+    roleLabel: participantRoleLabel(entry.role),
+    rsvpLabel: participantRsvpStatusLabel(entry.rsvp_status),
+    attendanceLabel: participantAttendanceStatusLabel(entry.attendance_status),
+    sourceLabel: participantSourceLabel(entry.source),
+  };
+}
+
+export function buildParticipantEventHistory(entries: ApiContactEventHistoryEntry[]): ParticipantEventHistoryEntry[] {
+  return entries.map(buildParticipantEventHistoryEntry);
 }

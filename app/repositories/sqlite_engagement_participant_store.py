@@ -57,6 +57,16 @@ ON engagement_participants(engagement_id, crm_contact_id)
 WHERE crm_contact_id IS NOT NULL
 """
 
+# Stage 3A (Contacts CRM Event History): a plain, non-unique index on the
+# SAME already-existing crm_contact_id column above, leading with
+# crm_contact_id (unlike the composite unique index above, whose leading
+# column is engagement_id, so it can't efficiently serve an "all
+# Engagements for this Contact" scan) -- this is what makes
+# list_for_contact() an indexed lookup rather than a full table scan.
+CREATE_CONTACT_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_engagement_participants_contact ON engagement_participants(crm_contact_id)
+"""
+
 
 def _row_to_participant(row: aiosqlite.Row) -> EngagementParticipant:
     return EngagementParticipant.model_validate_json(row["data"])
@@ -72,6 +82,7 @@ class SQLiteEngagementParticipantStore(EngagementParticipantStore):
         await self._conn.execute(CREATE_TABLE_SQL)
         await self._conn.execute(CREATE_ENGAGEMENT_INDEX_SQL)
         await self._conn.execute(CREATE_UNIQUE_CONTACT_PER_ENGAGEMENT_INDEX_SQL)
+        await self._conn.execute(CREATE_CONTACT_INDEX_SQL)
         await self._conn.commit()
 
     async def close(self) -> None:
@@ -134,6 +145,14 @@ class SQLiteEngagementParticipantStore(EngagementParticipantStore):
     async def list_for_engagement(self, engagement_id: str) -> list[EngagementParticipant]:
         cursor = await self._connection.execute(
             "SELECT * FROM engagement_participants WHERE engagement_id = ? ORDER BY created_at", (engagement_id,)
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [_row_to_participant(row) for row in rows]
+
+    async def list_for_contact(self, crm_contact_id: str) -> list[EngagementParticipant]:
+        cursor = await self._connection.execute(
+            "SELECT * FROM engagement_participants WHERE crm_contact_id = ?", (crm_contact_id,)
         )
         rows = await cursor.fetchall()
         await cursor.close()

@@ -85,6 +85,21 @@ class EngagementStore(ABC):
         decides what's shown" convention as list_for_client(). Returns an
         empty list for an empty `client_ids` (never a malformed query)."""
 
+    @abstractmethod
+    async def list_by_ids(self, engagement_ids: list[str]) -> list[Engagement]:
+        """Every Engagement (archived or not, any status) whose
+        engagement_id is in `engagement_ids`, in one bulk call --
+        Contacts CRM Stage 3A's own Event History derivation, added so
+        ClientCrmService.list_contact_event_history() can resolve every
+        Engagement a Contact's EngagementParticipant rows reference with
+        exactly one query, never one get() call per participant. An id
+        with no matching Engagement is simply absent from the result
+        (never an error) -- the caller treats that as a missing/malformed
+        reference and skips it, same "fail safely, never crash the whole
+        read" convention as this stage's own approved design. Returns an
+        empty list for an empty `engagement_ids` (never a malformed
+        query)."""
+
 
 class MemoryEngagementStore(EngagementStore):
     """Dict-backed, keyed by engagement_id -- not persistent, for tests/local dev."""
@@ -129,3 +144,8 @@ class MemoryEngagementStore(EngagementStore):
             return []
         ids = set(client_ids)
         return [e for e in self._rows.values() if e.client_id in ids]
+
+    async def list_by_ids(self, engagement_ids: list[str]) -> list[Engagement]:
+        if not engagement_ids:
+            return []
+        return [self._rows[eid] for eid in set(engagement_ids) if eid in self._rows]

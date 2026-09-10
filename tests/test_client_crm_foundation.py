@@ -1203,6 +1203,115 @@ async def test_sqlite_store_archiving_a_participant_does_not_free_the_unique_slo
 
 
 # =====================================================================
+# EngagementParticipant.list_for_contact -- Contacts CRM Stage 3A
+# =====================================================================
+
+
+async def test_memory_engagement_participant_list_for_contact_groups_correctly_and_excludes_unrelated():
+    store = MemoryEngagementParticipantStore()
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="kevin-1"))
+    await store.create(_participant("p2", "e2", "c1", crm_contact_id="kevin-1"))
+    await store.create(_participant("p3", "e1", "c1", crm_contact_id="other-contact"))  # unrelated
+
+    found = await store.list_for_contact("kevin-1")
+    assert {p.participant_id for p in found} == {"p1", "p2"}
+    assert await store.list_for_contact("no-such-contact") == []
+
+
+async def test_sqlite_engagement_participant_list_for_contact_groups_correctly_and_excludes_unrelated(
+    sqlite_engagement_participant_store,
+):
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="kevin-1"))
+    await store.create(_participant("p2", "e2", "c1", crm_contact_id="kevin-1"))
+    await store.create(_participant("p3", "e1", "c1", crm_contact_id="other-contact"))
+
+    found = await store.list_for_contact("kevin-1")
+    assert {p.participant_id for p in found} == {"p1", "p2"}
+    assert await store.list_for_contact("no-such-contact") == []
+
+
+async def test_memory_engagement_participant_list_for_contact_includes_archived():
+    """The store returns everything -- filtering archived out is the
+    caller's (service layer's) job, same convention as every other Client
+    CRM list_for_x()."""
+    store = MemoryEngagementParticipantStore()
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="kevin-1"))
+    archived = (await store.get("p1")).model_copy(update={"archived": True})
+    await store.save(archived)
+
+    found = await store.list_for_contact("kevin-1")
+    assert [p.participant_id for p in found] == ["p1"]
+    assert found[0].archived is True
+
+
+async def test_sqlite_engagement_participant_list_for_contact_includes_archived(sqlite_engagement_participant_store):
+    store = sqlite_engagement_participant_store
+    await store.create(_participant("p1", "e1", "c1", crm_contact_id="kevin-1"))
+    archived = (await store.get("p1")).model_copy(update={"archived": True})
+    await store.save(archived)
+
+    found = await store.list_for_contact("kevin-1")
+    assert [p.participant_id for p in found] == ["p1"]
+    assert found[0].archived is True
+
+
+async def test_sqlite_engagement_participant_contact_index_exists_after_connect(sqlite_engagement_participant_store):
+    store = sqlite_engagement_participant_store
+    cursor = await store._connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='engagement_participants'"
+    )
+    rows = await cursor.fetchall()
+    await cursor.close()
+    index_names = {r["name"] for r in rows}
+    assert "idx_engagement_participants_contact" in index_names
+
+
+# =====================================================================
+# Engagement.list_by_ids -- Contacts CRM Stage 3A
+# =====================================================================
+
+
+async def test_memory_engagement_list_by_ids_returns_only_the_requested_engagements():
+    store = MemoryEngagementStore()
+    await store.create(_engagement("e1", "c1"))
+    await store.create(_engagement("e2", "c1"))
+    await store.create(_engagement("e3", "c1"))  # not requested
+
+    found = await store.list_by_ids(["e1", "e2"])
+    assert {e.engagement_id for e in found} == {"e1", "e2"}
+
+
+async def test_sqlite_engagement_list_by_ids_returns_only_the_requested_engagements(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    await store.create(_engagement("e2", "c1"))
+    await store.create(_engagement("e3", "c1"))
+
+    found = await store.list_by_ids(["e1", "e2"])
+    assert {e.engagement_id for e in found} == {"e1", "e2"}
+
+
+async def test_memory_engagement_list_by_ids_empty_list_returns_empty():
+    store = MemoryEngagementStore()
+    await store.create(_engagement("e1", "c1"))
+    assert await store.list_by_ids([]) == []
+
+
+async def test_sqlite_engagement_list_by_ids_empty_list_returns_empty(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    assert await store.list_by_ids([]) == []
+
+
+async def test_sqlite_engagement_list_by_ids_unmatched_id_is_simply_absent(sqlite_engagement_store):
+    store = sqlite_engagement_store
+    await store.create(_engagement("e1", "c1"))
+    found = await store.list_by_ids(["e1", "e-does-not-exist"])
+    assert [e.engagement_id for e in found] == ["e1"]
+
+
+# =====================================================================
 # ClientNote store -- Memory + SQLite parity
 # =====================================================================
 

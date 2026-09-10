@@ -11,7 +11,13 @@ from fastapi import APIRouter, Body, Depends, File, HTTPException, Request, Uplo
 from loguru import logger
 from pydantic import BaseModel
 
-from app.dependencies import get_crm_import_service, get_crm_service, get_luma_sync_service, get_profile_photo_service
+from app.dependencies import (
+    get_client_crm_service,
+    get_crm_import_service,
+    get_crm_service,
+    get_luma_sync_service,
+    get_profile_photo_service,
+)
 from app.models.crm import (
     CrmContact,
     CrmContactExportField,
@@ -27,6 +33,7 @@ from app.models.crm import (
     FilterQuery,
     get_contact_export_fields,
 )
+from app.models.client_crm import ContactEventHistoryEntry
 from app.models.luma import CrmContactLumaRegistration
 from app.services.crm_filter_service import FilterValidationError
 from app.services.crm_import_service import CrmImportBatchNotFound, CrmImportService
@@ -35,6 +42,7 @@ from app.services.crm_migration import (
     repair_all_contacts_comma_delimited_fields,
     translate_legacy_import_batch,
 )
+from app.services.client_crm_service import ClientCrmService
 from app.services.crm_service import (
     CrmContactListNotFound,
     CrmContactNotFound,
@@ -193,6 +201,26 @@ async def get_contact_luma_registrations(
     except CrmContactNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     return await luma_service.list_contact_event_history(crm_contact_id)
+
+
+@router.get("/contacts/{crm_contact_id}/events", response_model=list[ContactEventHistoryEntry])
+async def get_contact_event_history(
+    crm_contact_id: str,
+    crm_service: CrmService = Depends(get_crm_service),
+    client_crm_service: ClientCrmService = Depends(get_client_crm_service),
+):
+    """Contacts CRM Stage 3A -- the CANONICAL Contact Event History,
+    derived from EngagementParticipant (never LumaRegistration -- see
+    ContactEventHistoryEntry's own model docstring). The older
+    /luma-registrations route above stays in place unchanged for
+    compatibility, but the Contact detail page's own Event History
+    section is expected to read from THIS route going forward. Purely a
+    read: no enrichment, no Activity Log event, no data mutation."""
+    try:
+        await crm_service.get_contact(crm_contact_id)
+    except CrmContactNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return await client_crm_service.list_contact_event_history(crm_contact_id)
 
 
 @router.patch("/contacts/{crm_contact_id}", response_model=CrmContact)

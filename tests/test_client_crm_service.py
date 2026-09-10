@@ -18,6 +18,7 @@ from app.models.client_crm import (
     ClientTouchpoint,
     ContactType,
     Engagement,
+    EngagementParticipant,
     EngagementStatus,
     EngagementType,
 )
@@ -2555,6 +2556,282 @@ async def test_creating_participants_never_mutates_the_engagement_closeout(parti
     assert refreshed_closeout.confirmed_guest_count == 24
     assert refreshed_closeout.attended_count == 24
     assert refreshed_closeout.updated_at == closeout.updated_at
+
+
+# =====================================================================
+# Contact Event History -- Contacts CRM Stage 3A (2026-09-11)
+# =====================================================================
+
+
+def _seed_participant(participant_id="p1", engagement_id="e1", client_id="c1", crm_contact_id=None, **overrides) -> EngagementParticipant:
+    now = datetime.now(timezone.utc)
+    overrides.setdefault("first_name", "Jane")
+    overrides.setdefault("created_at", now)
+    overrides.setdefault("updated_at", now)
+    return EngagementParticipant(
+        participant_id=participant_id, engagement_id=engagement_id, client_id=client_id,
+        crm_contact_id=crm_contact_id, **overrides,
+    )
+
+
+async def test_manual_participant_appears_with_no_luma_registration(participant_service):
+    service, _activity_log, _store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "rsvp_status": "confirmed"}
+    )
+
+    history = await service.list_contact_event_history("ethan-1")
+    assert len(history) == 1
+    assert history[0].source == "manual"
+    assert history[0].rsvp_status == "confirmed"
+    assert history[0].engagement_id == engagement.engagement_id
+
+
+async def test_luma_participant_appears(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(
+        _seed_participant("p1", engagement.engagement_id, client.client_id, crm_contact_id="contact-1", source="luma", rsvp_status="confirmed")
+    )
+
+    history = await service.list_contact_event_history("contact-1")
+    assert len(history) == 1
+    assert history[0].source == "luma"
+
+
+async def test_manual_and_luma_sources_produce_identical_row_structure(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement_a = await _make_client_and_engagement(service, title="Dinner A")
+    _client_b, engagement_b = await _make_client_and_engagement(service, title="Dinner B")
+    await store.create(_seed_participant("p1", engagement_a.engagement_id, client.client_id, crm_contact_id="contact-1", source="manual", role="guest", rsvp_status="confirmed"))
+    await store.create(_seed_participant("p2", engagement_b.engagement_id, client.client_id, crm_contact_id="contact-1", source="luma", role="guest", rsvp_status="confirmed"))
+
+    history = await service.list_contact_event_history("contact-1")
+    assert len(history) == 2
+    manual_entry = next(e for e in history if e.source == "manual")
+    luma_entry = next(e for e in history if e.source == "luma")
+    assert type(manual_entry) is type(luma_entry)
+    assert manual_entry.role == luma_entry.role == "guest"
+    assert manual_entry.rsvp_status == luma_entry.rsvp_status == "confirmed"
+    # Identical field set on both -- differing only in the fields that are
+    # genuinely different facts (engagement_id/participant_id/event_name/source).
+    assert set(manual_entry.model_dump().keys()) == set(luma_entry.model_dump().keys())
+
+
+async def test_exactly_one_row_per_contact_engagement_pair(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_participant("p1", engagement.engagement_id, client.client_id, crm_contact_id="contact-1"))
+
+    history = await service.list_contact_event_history("contact-1")
+    assert len(history) == 1
+
+
+def test_list_contact_event_history_never_references_luma_registration_source():
+    """Structural regression guard: the projection must derive SOLELY from
+    EngagementParticipant -- never read LumaRegistration, even if a stale
+    or duplicate Luma registration exists for the same Contact+Engagement.
+    Checks the method's own docstring is stripped first -- it legitimately
+    NAMES LumaRegistration in prose to explain why it's NOT read; this
+    guards the actual code body only."""
+    import inspect
+
+    source = inspect.getsource(ClientCrmService.list_contact_event_history)
+    body = source.split('"""', 2)[-1]  # everything after the closing docstring quotes
+    assert "LumaRegistration" not in body
+    assert "registration_store" not in body
+
+
+async def test_archived_participant_excluded(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement_a = await _make_client_and_engagement(service, title="Active Dinner")
+    _client_b, engagement_b = await _make_client_and_engagement(service, title="Archived Dinner")
+    await store.create(_seed_participant("p1", engagement_a.engagement_id, client.client_id, crm_contact_id="contact-1"))
+    await store.create(_seed_participant("p2", engagement_b.engagement_id, client.client_id, crm_contact_id="contact-1", archived=True))
+
+    history = await service.list_contact_event_history("contact-1")
+    assert [e.event_name for e in history] == ["Active Dinner"]
+
+
+@pytest.mark.parametrize(
+    "rsvp_status,attendance_status",
+    [
+        ("invited", None),
+        ("declined", None),
+        ("confirmed", None),
+        (None, "attended"),
+        (None, "no_show"),
+        (None, "cancelled"),
+        (None, None),
+    ],
+)
+async def test_every_rsvp_and_attendance_combination_displays_correctly(participant_service, rsvp_status, attendance_status):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(
+        _seed_participant(
+            "p1", engagement.engagement_id, client.client_id, crm_contact_id="contact-1",
+            rsvp_status=rsvp_status, attendance_status=attendance_status,
+        )
+    )
+
+    history = await service.list_contact_event_history("contact-1")
+    assert history[0].rsvp_status == rsvp_status
+    assert history[0].attendance_status == attendance_status
+
+
+@pytest.mark.parametrize("role", ["guest", "client", "host", "speaker_panelist", "astronomic_team", "other"])
+async def test_every_role_may_appear_unfiltered(participant_service, role):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_participant("p1", engagement.engagement_id, client.client_id, crm_contact_id="contact-1", role=role))
+
+    history = await service.list_contact_event_history("contact-1")
+    assert history[0].role == role
+
+
+async def test_engagement_and_client_fields_resolve_correctly(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(
+        service, title="Austin Donor Dinner", engagement_type="dinner", dinner_type="donor_dinner", engagement_date=date(2026, 10, 8)
+    )
+    await store.create(_seed_participant("p1", engagement.engagement_id, client.client_id, crm_contact_id="contact-1"))
+
+    entry = (await service.list_contact_event_history("contact-1"))[0]
+    assert entry.event_name == "Austin Donor Dinner"
+    assert entry.client_name == "Hive ASMBLD"
+    assert entry.engagement_date == date(2026, 10, 8)
+    assert entry.engagement_type == "dinner"
+    assert entry.dinner_type == "donor_dinner"
+
+
+async def test_ordering_newest_first_nulls_last_deterministic_tie_break(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    c1, e_sept = await _make_client_and_engagement(service, title="September Dinner", engagement_date=date(2026, 9, 1))
+    c2, e_oct = await _make_client_and_engagement(service, title="October Dinner", engagement_date=date(2026, 10, 1))
+    c3, e_null = await _make_client_and_engagement(service, title="No Date Dinner", engagement_date=None)
+    c4, e_tie_b = await _make_client_and_engagement(service, title="Tie B", engagement_date=date(2026, 9, 1))
+
+    # Two Engagements share the same date (Sept 1) -- tie-break must be
+    # deterministic by participant_id ascending.
+    await store.create(_seed_participant("p-zzz", e_sept.engagement_id, c1.client_id, crm_contact_id="contact-1"))
+    await store.create(_seed_participant("p-aaa", e_tie_b.engagement_id, c4.client_id, crm_contact_id="contact-1"))
+    await store.create(_seed_participant("p-oct", e_oct.engagement_id, c2.client_id, crm_contact_id="contact-1"))
+    await store.create(_seed_participant("p-null", e_null.engagement_id, c3.client_id, crm_contact_id="contact-1"))
+
+    history = await service.list_contact_event_history("contact-1")
+    assert [e.event_name for e in history] == ["October Dinner", "Tie B", "September Dinner", "No Date Dinner"]
+
+
+async def test_cross_contact_isolation(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement_a = await _make_client_and_engagement(service, title="Contact A's Dinner")
+    _client_b, engagement_b = await _make_client_and_engagement(service, title="Contact B's Dinner")
+    await store.create(_seed_participant("p1", engagement_a.engagement_id, client.client_id, crm_contact_id="contact-a"))
+    await store.create(_seed_participant("p2", engagement_b.engagement_id, client.client_id, crm_contact_id="contact-b"))
+
+    history_a = await service.list_contact_event_history("contact-a")
+    history_b = await service.list_contact_event_history("contact-b")
+    assert [e.event_name for e in history_a] == ["Contact A's Dinner"]
+    assert [e.event_name for e in history_b] == ["Contact B's Dinner"]
+
+
+async def test_participant_with_no_matching_engagement_is_skipped_not_crashed(participant_service):
+    """Fail-safe malformed-reference behavior: a participant row whose
+    engagement_id doesn't resolve to a real Engagement is silently
+    omitted, never raised -- one bad historical row must not break an
+    entire Contact's Event History."""
+    service, _activity_log, store, _crm_contact_store = participant_service
+    await store.create(_seed_participant("p1", "engagement-does-not-exist", "client-does-not-exist", crm_contact_id="contact-1"))
+
+    history = await service.list_contact_event_history("contact-1")
+    assert history == []
+
+
+async def test_participant_whose_engagement_client_is_missing_is_skipped_not_crashed(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    engagement_store = service.engagement_store
+    now = datetime.now(timezone.utc)
+    orphaned_engagement = Engagement(
+        engagement_id="e-orphan", client_id="client-does-not-exist", title="Orphaned Dinner",
+        engagement_type=EngagementType.DINNER, created_at=now, updated_at=now,
+    )
+    await engagement_store.create(orphaned_engagement)
+    await store.create(_seed_participant("p1", "e-orphan", "client-does-not-exist", crm_contact_id="contact-1"))
+
+    history = await service.list_contact_event_history("contact-1")
+    assert history == []
+
+
+async def test_no_per_participant_engagement_query_pattern(participant_service):
+    """Structural regression guard: exactly one list_by_ids() call and one
+    client_store.list() call regardless of how many participations a
+    Contact has -- never one query per participant/Engagement."""
+    service, _activity_log, store, _crm_contact_store = participant_service
+    engagement_store = service.engagement_store
+    client_store = service.client_store
+
+    engagement_ids = []
+    for i in range(5):
+        client, engagement = await _make_client_and_engagement(service, title=f"Dinner {i}")
+        await store.create(_seed_participant(f"p{i}", engagement.engagement_id, client.client_id, crm_contact_id="contact-1"))
+        engagement_ids.append(engagement.engagement_id)
+
+    call_counts = {"list_by_ids": 0, "client_list": 0, "engagement_get": 0}
+    original_list_by_ids = engagement_store.list_by_ids
+    original_client_list = client_store.list
+    original_engagement_get = engagement_store.get
+
+    async def _counted_list_by_ids(ids):
+        call_counts["list_by_ids"] += 1
+        return await original_list_by_ids(ids)
+
+    async def _counted_client_list():
+        call_counts["client_list"] += 1
+        return await original_client_list()
+
+    async def _counted_engagement_get(engagement_id):
+        call_counts["engagement_get"] += 1
+        return await original_engagement_get(engagement_id)
+
+    engagement_store.list_by_ids = _counted_list_by_ids
+    client_store.list = _counted_client_list
+    engagement_store.get = _counted_engagement_get
+
+    history = await service.list_contact_event_history("contact-1")
+    assert len(history) == 5
+    assert call_counts == {"list_by_ids": 1, "client_list": 1, "engagement_get": 0}
+
+
+async def test_kevin_przybocki_synthetic_regression(participant_service):
+    """The primary Stage 3A acceptance case: a Contact manually added to
+    a Miracle-Foundation-like Engagement as Guest/Confirmed via Manual
+    source, with NO LumaRegistration anywhere, must appear in their own
+    Event History with exactly these fields."""
+    service, activity_log, _store, crm_contact_store = participant_service
+    kevin = await _seed_crm_contact(
+        crm_contact_store, crm_contact_id="kevin-przybocki", first_name="Kevin", last_name="Przybocki", email="kevin@example.com"
+    )
+    client, engagement = await _make_client_and_engagement(
+        service, title="Austin Donor Dinner", engagement_type="dinner", dinner_type="donor_dinner", engagement_date=date(2026, 10, 8)
+    )
+    client = await service.update_client(client.client_id, {"name": "Miracle Foundation"})
+
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"crm_contact_id": kevin.crm_contact_id, "role": "guest", "rsvp_status": "confirmed"}
+    )
+    assert participant.source == "manual"  # server-owned, confirms no Luma involvement was even possible here
+
+    history = await service.list_contact_event_history(kevin.crm_contact_id)
+    assert len(history) == 1
+    entry = history[0]
+    assert entry.event_name == "Austin Donor Dinner"
+    assert entry.client_name == "Miracle Foundation"
+    assert entry.role == "guest"
+    assert entry.rsvp_status == "confirmed"
+    assert entry.source == "manual"
 
 
 # =====================================================================

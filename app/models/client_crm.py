@@ -584,6 +584,41 @@ class EngagementParticipant(BaseModel):
     archived: bool = False
 
 
+class ContactEventHistoryEntry(BaseModel):
+    """Contacts CRM Stage 3A -- one row of a canonical CrmContact's Event
+    History, derived entirely from a single non-archived
+    EngagementParticipant (see ClientCrmService.list_contact_event_history()
+    for the exact derivation). EngagementParticipant is the canonical
+    source of "this Contact is associated with this event" -- Luma is only
+    ONE ingestion source that creates/updates EngagementParticipant rows;
+    manual/email RSVP is another. LumaRegistration itself is deliberately
+    NEVER read here -- merging both would risk a duplicate history row for
+    the same Contact+Engagement; this is guaranteed to be exactly one row
+    per (engagement_id, crm_contact_id) because that's already the
+    EngagementParticipant store's own enforced uniqueness invariant.
+
+    Every field here is copied straight from the underlying
+    EngagementParticipant/Engagement/Client rows -- no new business logic,
+    no filtering by role/RSVP/attendance/source (that's Stage 3B's
+    concern, not this projection's). `role`/`rsvp_status`/
+    `attendance_status`/`source` reuse the EXACT existing enums already
+    defined above -- a manually-created Guest/Confirmed participant and a
+    Luma-created one are indistinguishable in shape, differing only in
+    `source`."""
+
+    engagement_id: str
+    participant_id: str
+    event_name: str  # Engagement.title
+    client_name: str  # Client.name
+    engagement_date: date | None
+    engagement_type: EngagementType
+    dinner_type: DinnerType | None
+    role: ParticipantRole
+    rsvp_status: ParticipantRsvpStatus | None
+    attendance_status: ParticipantAttendanceStatus | None
+    source: ParticipantSource
+
+
 class ContactType(str, Enum):
     """Client CRM Stage 2A. The channel a ClientTouchpoint happened
     through -- V1's fixed, approved set; no other values are accepted."""

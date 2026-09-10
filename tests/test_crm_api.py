@@ -548,6 +548,176 @@ def test_get_contact_route_itself_is_unaffected_by_luma_route_addition(luma_test
     assert before == after
 
 
+# --- GET /crm/contacts/{id}/events (Contacts CRM Stage 3A -- canonical Event
+# History, derived from EngagementParticipant, never LumaRegistration) ------
+
+from app.dependencies import get_client_crm_service  # noqa: E402
+from app.models.client_crm import Engagement, EngagementParticipant  # noqa: E402
+from app.repositories.activity_event_store import MemoryActivityEventStore  # noqa: E402
+from app.repositories.client_contact_store import MemoryClientContactStore  # noqa: E402
+from app.repositories.client_store import MemoryClientStore  # noqa: E402
+from app.repositories.client_touchpoint_store import MemoryClientTouchpointStore  # noqa: E402
+from app.repositories.engagement_closeout_store import MemoryEngagementCloseoutStore  # noqa: E402
+from app.repositories.engagement_participant_store import MemoryEngagementParticipantStore  # noqa: E402
+from app.repositories.engagement_store import MemoryEngagementStore  # noqa: E402
+from app.services.activity_log_service import ActivityLogService as _ActivityLogServiceForEventHistory  # noqa: E402
+from app.services.client_crm_service import ClientCrmService  # noqa: E402
+
+
+@pytest.fixture
+def event_history_test_setup():
+    crm_contact_store = MemoryCrmContactStore()
+    crm_service = CrmService(contact_store=crm_contact_store)
+
+    client_store = MemoryClientStore()
+    engagement_store = MemoryEngagementStore()
+    engagement_participant_store = MemoryEngagementParticipantStore()
+    client_crm_service = ClientCrmService(
+        client_store=client_store,
+        activity_log=_ActivityLogServiceForEventHistory(MemoryActivityEventStore()),
+        client_contact_store=MemoryClientContactStore(),
+        crm_contact_store=crm_contact_store,
+        engagement_store=engagement_store,
+        engagement_closeout_store=MemoryEngagementCloseoutStore(),
+        engagement_participant_store=engagement_participant_store,
+        luma_event_store=MemoryLumaEventStore(),
+        client_touchpoint_store=MemoryClientTouchpointStore(),
+    )
+
+    app = FastAPI()
+    app.include_router(crm_router)
+    app.dependency_overrides[get_crm_service] = lambda: crm_service
+    app.dependency_overrides[get_client_crm_service] = lambda: client_crm_service
+
+    with TestClient(app) as client:
+        yield client, crm_service, client_store, engagement_store, engagement_participant_store
+
+
+def _make_client_and_engagement_sync(client_store, engagement_store, **engagement_overrides):
+    import uuid
+
+    from app.models.client_crm import Client as _Client
+
+    now = _now()
+    client_id = str(uuid.uuid4())
+    client_obj = _Client(client_id=client_id, name=engagement_overrides.pop("client_name", "Miracle Foundation"), created_at=now, updated_at=now)
+    asyncio.run(client_store.create(client_obj))
+
+    fields = {
+        "engagement_id": str(uuid.uuid4()),
+        "client_id": client_id,
+        "title": "Austin Donor Dinner",
+        "engagement_type": "dinner",
+        "created_at": now,
+        "updated_at": now,
+    }
+    fields.update(engagement_overrides)
+    engagement_obj = Engagement(**fields)
+    asyncio.run(engagement_store.create(engagement_obj))
+    return client_obj, engagement_obj
+
+
+def test_events_route_returns_404_for_unknown_contact(event_history_test_setup):
+    client, _, _, _, _ = event_history_test_setup
+    resp = client.get("/crm/contacts/does-not-exist/events")
+    assert resp.status_code == 404
+
+
+def test_events_route_returns_empty_list_for_contact_with_none(event_history_test_setup):
+    client, crm_service, _, _, _ = event_history_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    resp = client.get(f"/crm/contacts/{contact_id}/events")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+
+def test_events_route_shows_manual_participant_with_no_luma_registration(event_history_test_setup):
+    """The Kevin scenario, exercised through the real HTTP route -- no
+    LumaRegistration store is even wired into this fixture, proving the
+    route cannot depend on one."""
+    client, crm_service, client_store, engagement_store, participant_store = event_history_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service, first_name="Kevin", last_name="Przybocki"))
+    _client_obj, engagement_obj = _make_client_and_engagement_sync(
+        client_store, engagement_store, client_name="Miracle Foundation", title="Austin Donor Dinner", dinner_type="donor_dinner"
+    )
+    asyncio.run(
+        participant_store.create(
+            EngagementParticipant(
+                participant_id="p1", engagement_id=engagement_obj.engagement_id, client_id=engagement_obj.client_id,
+                crm_contact_id=contact_id, role="guest", rsvp_status="confirmed", source="manual",
+                created_at=_now(), updated_at=_now(),
+            )
+        )
+    )
+
+    resp = client.get(f"/crm/contacts/{contact_id}/events")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body) == 1
+    assert body[0]["event_name"] == "Austin Donor Dinner"
+    assert body[0]["client_name"] == "Miracle Foundation"
+    assert body[0]["role"] == "guest"
+    assert body[0]["rsvp_status"] == "confirmed"
+    assert body[0]["source"] == "manual"
+
+
+def test_events_route_never_uses_luma_registration_store(event_history_test_setup):
+    """Structural: this fixture wires NO LumaRegistrationStore at all --
+    if the route somehow depended on one, this fixture would fail to
+    construct or the request would error. A clean 200 with correct data
+    (see the manual-participant test above) is itself the proof."""
+    client, crm_service, _, _, _ = event_history_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    resp = client.get(f"/crm/contacts/{contact_id}/events")
+    assert resp.status_code == 200
+
+
+def test_events_route_orders_newest_first(event_history_test_setup):
+    client, crm_service, client_store, engagement_store, participant_store = event_history_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    _c1, e_old = _make_client_and_engagement_sync(client_store, engagement_store, title="Older Dinner", engagement_date="2026-01-01")
+    _c2, e_new = _make_client_and_engagement_sync(client_store, engagement_store, title="Newer Dinner", engagement_date="2026-08-01")
+    for pid, engagement_obj in (("p-old", e_old), ("p-new", e_new)):
+        asyncio.run(
+            participant_store.create(
+                EngagementParticipant(
+                    participant_id=pid, engagement_id=engagement_obj.engagement_id, client_id=engagement_obj.client_id,
+                    crm_contact_id=contact_id, created_at=_now(), updated_at=_now(),
+                )
+            )
+        )
+
+    body = client.get(f"/crm/contacts/{contact_id}/events").json()
+    assert [e["event_name"] for e in body] == ["Newer Dinner", "Older Dinner"]
+
+
+def test_events_route_excludes_archived_participant(event_history_test_setup):
+    client, crm_service, client_store, engagement_store, participant_store = event_history_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    _c1, engagement_obj = _make_client_and_engagement_sync(client_store, engagement_store, title="Archived Dinner")
+    asyncio.run(
+        participant_store.create(
+            EngagementParticipant(
+                participant_id="p1", engagement_id=engagement_obj.engagement_id, client_id=engagement_obj.client_id,
+                crm_contact_id=contact_id, archived=True, created_at=_now(), updated_at=_now(),
+            )
+        )
+    )
+
+    body = client.get(f"/crm/contacts/{contact_id}/events").json()
+    assert body == []
+
+
+def test_events_route_does_not_mutate_the_contact(event_history_test_setup):
+    """Same read-only guarantee as the existing luma-registrations route."""
+    client, crm_service, _, _, _ = event_history_test_setup
+    contact_id = asyncio.run(_create_contact(crm_service))
+    before = client.get(f"/crm/contacts/{contact_id}").json()
+    client.get(f"/crm/contacts/{contact_id}/events")
+    after = client.get(f"/crm/contacts/{contact_id}").json()
+    assert before == after
+
+
 # --- Profile photo upload (Stage 1) -----------------------------------------
 
 

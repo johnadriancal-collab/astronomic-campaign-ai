@@ -17,18 +17,18 @@ import {
   ApiError,
   archiveCrmContact,
   getCrmContact,
-  getCrmContactLumaRegistrations,
+  getCrmContactEvents,
   getMailSuppressionStatus,
   listCrmCustomFields,
   suppressMailEmail,
   unsuppressMailEmail,
   updateCrmContact,
+  type ContactEventHistoryEntry,
   type CrmContact,
-  type CrmContactLumaRegistration,
   type CrmCustomFieldDefinition,
   type MailContactSuppressionStatus,
 } from "@/lib/api";
-import { buildEventHistory } from "@/lib/contact-event-history";
+import { buildParticipantEventHistory } from "@/lib/contact-event-history";
 import { buildContactSummary } from "@/lib/contact-summary";
 import {
   CRM_CONTACT_DETAIL_CONTAINER_CLASS,
@@ -289,10 +289,13 @@ export default function CrmContactDetailPage() {
   const [suppressionBusy, setSuppressionBusy] = useState(false);
   const [suppressionError, setSuppressionError] = useState<string | null>(null);
 
-  // Event History -- read-only, best-effort, loaded independently of the
-  // main contact fetch (same pattern as Mail suppression above) so a
-  // failure here never blocks the rest of the page.
-  const [lumaRegistrations, setLumaRegistrations] = useState<CrmContactLumaRegistration[] | null>(null);
+  // Event History -- Contacts CRM Stage 3A: canonical, derived from
+  // EngagementParticipant (GET /crm/contacts/{id}/events), never from a
+  // Luma registration record -- see ClientCrmService.
+  // list_contact_event_history()'s own docstring. Read-only, best-effort,
+  // loaded independently of the main contact fetch (same pattern as Mail
+  // suppression above) so a failure here never blocks the rest of the page.
+  const [contactEvents, setContactEvents] = useState<ContactEventHistoryEntry[] | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -318,9 +321,9 @@ export default function CrmContactDetailPage() {
 
   useEffect(() => {
     if (!contact?.crm_contact_id) return;
-    getCrmContactLumaRegistrations(contact.crm_contact_id)
-      .then(setLumaRegistrations)
-      .catch(() => setLumaRegistrations([]));
+    getCrmContactEvents(contact.crm_contact_id)
+      .then(setContactEvents)
+      .catch(() => setContactEvents([]));
   }, [contact?.crm_contact_id]);
 
   async function handleSuppress() {
@@ -440,7 +443,7 @@ export default function CrmContactDetailPage() {
   // already on this page -- no LLM call, no extra network round trip for
   // the summary itself (see lib/contact-summary.ts's module docstring).
   const contactSummary = buildContactSummary(contact);
-  const eventHistory = lumaRegistrations ? buildEventHistory(lumaRegistrations) : null;
+  const eventHistory = contactEvents ? buildParticipantEventHistory(contactEvents) : null;
 
   return (
     <div className={CRM_CONTACT_DETAIL_CONTAINER_CLASS}>
@@ -558,11 +561,14 @@ export default function CrmContactDetailPage() {
             ) : (
               <ul className="space-y-3">
                 {eventHistory.map((entry) => (
-                  <li key={entry.lumaEventId} className="border-b border-border pb-3 last:border-0 last:pb-0">
+                  <li key={`${entry.engagementId}-${entry.participantId}`} className="border-b border-border pb-3 last:border-0 last:pb-0">
                     <p className="text-sm font-medium text-foreground">{entry.eventName}</p>
                     <p className="text-xs text-muted-foreground">
-                      {entry.statusLabel}
-                      {entry.dateLabel ? ` · ${entry.dateLabel}` : ""}
+                      {entry.clientName} · {entry.typeLabel}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {entry.dateLabel} · {entry.roleLabel} · RSVP: {entry.rsvpLabel} · Attendance: {entry.attendanceLabel} ·{" "}
+                      {entry.sourceLabel}
                     </p>
                   </li>
                 ))}

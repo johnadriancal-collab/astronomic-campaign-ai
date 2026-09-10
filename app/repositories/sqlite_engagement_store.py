@@ -177,3 +177,14 @@ class SQLiteEngagementStore(EngagementStore):
         rows = await cursor.fetchall()
         await cursor.close()
         return [_row_to_engagement(row) for row in rows]
+
+    async def list_by_ids(self, engagement_ids: list[str]) -> list[Engagement]:
+        if not engagement_ids:
+            return []
+        placeholders = ",".join("?" for _ in engagement_ids)
+        cursor = await self._connection.execute(
+            f"SELECT * FROM engagements WHERE engagement_id IN ({placeholders})", tuple(engagement_ids)
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [_row_to_engagement(row) for row in rows]

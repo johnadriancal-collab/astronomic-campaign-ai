@@ -67,6 +67,17 @@ class EngagementParticipantStore(ABC):
         not), ordered by created_at ascending -- the Engagement detail
         page's own Participants section load."""
 
+    @abstractmethod
+    async def list_for_contact(self, crm_contact_id: str) -> list[EngagementParticipant]:
+        """Every EngagementParticipant (archived or not, any role/RSVP/
+        attendance/source) linked to this canonical CrmContact, across
+        EVERY Engagement -- Stage 3A's own Contact Event History read.
+        Order is unspecified -- filtering archived rows out and applying
+        the canonical newest-first ordering is the caller's job, same
+        "store returns everything, caller/service decides what's shown"
+        convention as list_for_engagement()/every other Client CRM
+        list_for_x()."""
+
 
 class MemoryEngagementParticipantStore(EngagementParticipantStore):
     """Dict-backed, keyed by participant_id -- not persistent, for tests/local dev."""
@@ -104,3 +115,6 @@ class MemoryEngagementParticipantStore(EngagementParticipantStore):
     async def list_for_engagement(self, engagement_id: str) -> list[EngagementParticipant]:
         rows = [p for p in self._rows.values() if p.engagement_id == engagement_id]
         return sorted(rows, key=lambda p: p.created_at)
+
+    async def list_for_contact(self, crm_contact_id: str) -> list[EngagementParticipant]:
+        return [p for p in self._rows.values() if p.crm_contact_id == crm_contact_id]

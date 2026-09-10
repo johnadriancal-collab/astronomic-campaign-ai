@@ -36,6 +36,7 @@ import type {
   ParticipantAttendanceStatus,
   ParticipantRole,
   ParticipantRsvpStatus,
+  ParticipantSource,
 } from "@/lib/api";
 
 export const CLIENT_STATUS_OPTIONS: { value: ClientStatus; label: string }[] = [
@@ -750,6 +751,20 @@ export const PARTICIPANT_ATTENDANCE_STATUS_OPTIONS: { value: ParticipantAttendan
 export function participantAttendanceStatusLabel(value: ParticipantAttendanceStatus | null): string {
   if (value === null) return "—";
   return PARTICIPANT_ATTENDANCE_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+// Contacts CRM Stage 3A's own Event History reuses this -- a manually-
+// created participant and a Luma-created one differ only in `source`,
+// and this is the one friendly-label lookup for it, kept here (not
+// duplicated in lib/contact-event-history.ts) alongside the other three
+// EngagementParticipant label helpers above.
+export const PARTICIPANT_SOURCE_OPTIONS: { value: ParticipantSource; label: string }[] = [
+  { value: "manual", label: "Manual" },
+  { value: "luma", label: "Luma" },
+];
+
+export function participantSourceLabel(value: ParticipantSource): string {
+  return PARTICIPANT_SOURCE_OPTIONS.find((o) => o.value === value)?.label ?? value;
 }
 
 export function participantDisplayName(participant: Pick<EngagementParticipant, "first_name" | "last_name">): string {

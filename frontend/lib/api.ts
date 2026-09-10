@@ -610,6 +610,33 @@ export function getCrmContactLumaRegistrations(crmContactId: string): Promise<Cr
   return request<CrmContactLumaRegistration[]>(`/crm/contacts/${crmContactId}/luma-registrations`);
 }
 
+// Contacts CRM Stage 3A -- the CANONICAL Contact Event History, derived
+// from EngagementParticipant (never from a Luma registration record --
+// see the backend's own ContactEventHistoryEntry model docstring). The
+// contact detail page's Event History section reads from THIS endpoint;
+// getCrmContactLumaRegistrations above stays in place for compatibility
+// but is no longer used by that section. Every field here is a real
+// EngagementParticipant/Engagement/Client field -- a manually-created
+// Guest/Confirmed row and a Luma-created one are the exact same shape,
+// differing only in `source`. Read-only: never mutates anything.
+export interface ContactEventHistoryEntry {
+  engagement_id: string;
+  participant_id: string;
+  event_name: string;
+  client_name: string;
+  engagement_date: string | null; // "YYYY-MM-DD"
+  engagement_type: EngagementType;
+  dinner_type: DinnerType | null;
+  role: ParticipantRole;
+  rsvp_status: ParticipantRsvpStatus | null;
+  attendance_status: ParticipantAttendanceStatus | null;
+  source: ParticipantSource;
+}
+
+export function getCrmContactEvents(crmContactId: string): Promise<ContactEventHistoryEntry[]> {
+  return request<ContactEventHistoryEntry[]>(`/crm/contacts/${crmContactId}/events`);
+}
+
 export type CrmContactExportFieldKind = "scalar" | "list" | "boolean";
 
 export interface CrmContactExportField {

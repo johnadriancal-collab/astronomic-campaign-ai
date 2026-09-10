@@ -56,6 +56,7 @@ from app.models.client_crm import (
     ClientRelationshipClassification,
     ClientStatus,
     ClientTouchpoint,
+    ContactEventHistoryEntry,
     ContactType,
     Engagement,
     EngagementCloseout,
@@ -1222,6 +1223,77 @@ class ClientCrmService:
             entity_name=display_name,
             metadata={"client_id": after.client_id, "engagement_id": after.engagement_id},
         )
+
+    async def list_contact_event_history(self, crm_contact_id: str) -> list[ContactEventHistoryEntry]:
+        """Contacts CRM Stage 3A. A canonical CrmContact's Event History,
+        derived ENTIRELY from their non-archived EngagementParticipant
+        rows -- never from any raw Luma registration record (that's an
+        ingestion source, not the canonical "this Contact is associated
+        with this event" record; see ContactEventHistoryEntry's own
+        model docstring).
+        Includes EVERY non-archived participation regardless of role/
+        RSVP/attendance/source -- historical truth and positive-interest
+        signaling (a future stage) are deliberately separate concerns.
+        Callers checking whether crm_contact_id refers to a real Contact
+        do so themselves before calling this (see the API route) -- this
+        method doesn't re-check, matching list_contact_event_history()'s
+        own precedent on LumaSyncService.
+
+        Bulk-resolves every referenced Engagement (ONE list_by_ids() call)
+        and every referenced Client (via client_store.list(), the same
+        full-scan-is-fine-at-this-scale convention list_clients() itself
+        already uses) -- never one query per participant. A participant
+        whose engagement_id doesn't resolve to a real Engagement, or whose
+        Engagement's client_id doesn't resolve to a real Client, is
+        silently SKIPPED (never raised) -- a malformed historical
+        reference must not crash an entire Contact's page; see this
+        stage's own approved design for why omission, not an error, is
+        the least-surprising behavior here.
+
+        Ordering is entirely this method's responsibility (never the
+        caller's): engagement_date descending, Clients/participants with
+        no engagement_date sorting last regardless, tie-broken by
+        participant_id ascending for full determinism."""
+        participants = await self.engagement_participant_store.list_for_contact(crm_contact_id)
+        active = [p for p in participants if not p.archived]
+        if not active:
+            return []
+
+        engagement_ids = list({p.engagement_id for p in active})
+        engagements_by_id = {e.engagement_id: e for e in await self.engagement_store.list_by_ids(engagement_ids)}
+        clients_by_id = {c.client_id: c for c in await self.client_store.list()}
+
+        entries: list[ContactEventHistoryEntry] = []
+        for p in active:
+            engagement = engagements_by_id.get(p.engagement_id)
+            if engagement is None:
+                continue
+            client = clients_by_id.get(engagement.client_id)
+            if client is None:
+                continue
+            entries.append(
+                ContactEventHistoryEntry(
+                    engagement_id=engagement.engagement_id,
+                    participant_id=p.participant_id,
+                    event_name=engagement.title,
+                    client_name=client.name,
+                    engagement_date=engagement.engagement_date,
+                    engagement_type=engagement.engagement_type,
+                    dinner_type=engagement.dinner_type,
+                    role=p.role,
+                    rsvp_status=p.rsvp_status,
+                    attendance_status=p.attendance_status,
+                    source=p.source,
+                )
+            )
+
+        # Two stable passes: tie-break (participant_id ascending) first,
+        # then the primary key (engagement_date descending, missing dates
+        # substituted with date.min so they naturally sort last under
+        # reverse=True) -- sort() is stable, so the tie-break survives.
+        entries.sort(key=lambda e: e.participant_id)
+        entries.sort(key=lambda e: e.engagement_date or date.min, reverse=True)
+        return entries
 
     # =====================================================================
     # ClientTouchpoint -- Client CRM Stage 2A (2026-09-11). A persistent,
