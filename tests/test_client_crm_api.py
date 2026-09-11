@@ -16,9 +16,9 @@ from fastapi.testclient import TestClient
 
 from app.api.client_crm import router as client_crm_router
 from app.dependencies import get_client_crm_service
-from app.models.client_crm import ClientTouchpoint, ContactType, Engagement, EngagementType
+from app.models.client_crm import ClientTouchpoint, ContactType, DeclineOrigin, Engagement, EngagementType
 from app.models.crm import CrmContact
-from app.models.luma import LumaEvent
+from app.models.luma import LumaApprovalStatus, LumaEvent, LumaMatchStatus, LumaRegistration
 from app.repositories.activity_event_store import MemoryActivityEventStore
 from app.repositories.client_contact_store import MemoryClientContactStore
 from app.repositories.client_store import MemoryClientStore
@@ -31,6 +31,7 @@ from app.repositories.luma_event_store import MemoryLumaEventStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.client_crm_service import ClientCrmService
 from app.services.contact_engagement_signal_service import ContactEngagementSignalService
+from app.services.luma_engagement_participant_sync_service import LumaEngagementParticipantSyncService
 
 
 @pytest.fixture
@@ -1355,6 +1356,211 @@ def test_participant_creation_never_mutates_closeout(test_client):
     resp = client.get(closeout_url)
     assert resp.json()["confirmed_guest_count"] == 24
     assert resp.json()["attended_count"] == 24
+
+
+# =========================================================================
+# Client CRM Stage 5B production-acceptance bug fix -- decline_origin was
+# silently dropped by the API request schema (EngagementParticipantCreateRequest/
+# UpdateRequest never had the field). Root cause: an integration/wiring gap
+# ABOVE ClientCrmService, not a Stage 5A architecture defect -- every
+# Stage 5A test called the service directly, bypassing this exact boundary.
+# These tests exercise the REAL HTTP request body, through the REAL Pydantic
+# request models, end to end -- the layer that was actually broken.
+# =========================================================================
+
+
+def test_manual_patch_declined_host_persists_and_becomes_manual(test_client):
+    """The exact reported John Adrian Cal production scenario: an existing
+    declined participant with no known origin, PATCHed to Host via the
+    real HTTP request body."""
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "John", "last_name": "Cal", "rsvp_status": "declined"},
+    ).json()
+    assert created["decline_origin"] == "unknown"  # omitted-on-create default
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"decline_origin": "host"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["rsvp_status"] == "declined"
+    assert body["decline_origin"] == "host"
+    assert body["decline_origin_is_manual"] is True
+
+    # Re-fetch (a fresh GET, not just the PATCH response) -- proves it
+    # actually persisted, not just that the response echoed the request.
+    refetched = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"])).json()
+    [refetched_participant] = [p for p in refetched if p["participant_id"] == created["participant_id"]]
+    assert refetched_participant["rsvp_status"] == "declined"
+    assert refetched_participant["decline_origin"] == "host"
+    assert refetched_participant["decline_origin_is_manual"] is True
+
+
+def test_manual_patch_declined_host_survives_a_later_luma_declined_sync(test_client):
+    """The human-authoritative Host origin set above must NOT be
+    overwritten by a later Luma sync for the same registration while the
+    participant remains declined -- simulated by driving
+    LumaEngagementParticipantSyncService against the SAME underlying
+    stores the API route itself uses."""
+    client, service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "John", "last_name": "Cal", "rsvp_status": "declined"},
+    ).json()
+    client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"decline_origin": "host"},
+    )
+
+    # Link the Engagement to a Luma event directly via the store (test
+    # setup only -- not exercising Stage 1H-A's own validated linking
+    # route, which isn't what this regression is about).
+    stored_engagement = asyncio.run(service.engagement_store.get(engagement["engagement_id"]))
+    asyncio.run(service.engagement_store.save(stored_engagement.model_copy(update={"luma_event_id": "evt-1"})))
+
+    # The Luma sync path only ever touches a participant already linked to
+    # a canonical Contact -- seed one directly in the route's own contact
+    # store, then link this participant to it.
+    now = datetime.now(timezone.utc)
+    asyncio.run(
+        service.crm_contact_store.create(CrmContact(crm_contact_id="john-1", first_name="John", last_name="Cal", created_at=now, updated_at=now))
+    )
+    client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"crm_contact_id": "john-1"},
+    )
+
+    sync_service = LumaEngagementParticipantSyncService(
+        engagement_store=service.engagement_store,
+        engagement_participant_store=service.engagement_participant_store,
+        crm_contact_store=service.crm_contact_store,
+        activity_log=service.activity_log,
+        contact_engagement_signal_service=service.contact_engagement_signal_service,
+    )
+    registration = LumaRegistration(
+        luma_guest_id="gst-1",
+        luma_event_id="evt-1",
+        crm_contact_id="john-1",
+        match_status=LumaMatchStatus.MATCHED,
+        approval_status=LumaApprovalStatus.DECLINED,
+        synced_at=now,
+        updated_at=now,
+    )
+    result = asyncio.run(sync_service.sync_luma_registration_to_engagement_participant(registration, derived_decline_origin=DeclineOrigin.GUEST))
+
+    assert result.participant.decline_origin == DeclineOrigin.HOST  # untouched
+    assert result.participant.decline_origin_is_manual is True
+
+    refetched = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"])).json()
+    [refetched_participant] = [p for p in refetched if p["participant_id"] == created["participant_id"]]
+    assert refetched_participant["decline_origin"] == "host"
+    assert refetched_participant["decline_origin_is_manual"] is True
+
+
+def test_manual_patch_declined_guest_persists_and_becomes_manual(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Scott", "rsvp_status": "declined"},
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"decline_origin": "guest"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["decline_origin"] == "guest"
+    assert resp.json()["decline_origin_is_manual"] is True
+
+    refetched = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"])).json()
+    assert refetched[0]["decline_origin"] == "guest"
+    assert refetched[0]["decline_origin_is_manual"] is True
+
+
+def test_manual_patch_declined_unknown_persists_and_becomes_manual(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "rsvp_status": "declined"},
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"decline_origin": "unknown"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["decline_origin"] == "unknown"
+    assert resp.json()["decline_origin_is_manual"] is True
+
+    refetched = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"])).json()
+    assert refetched[0]["decline_origin"] == "unknown"
+
+
+def test_manual_patch_rsvp_away_from_declined_clears_decline_origin_via_http(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "rsvp_status": "declined", "decline_origin": "host"},
+    ).json()
+    assert created["decline_origin"] == "host"
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"rsvp_status": "confirmed"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["decline_origin"] is None
+    assert resp.json()["decline_origin_is_manual"] is False
+
+    refetched = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"])).json()
+    assert refetched[0]["decline_origin"] is None
+    assert refetched[0]["decline_origin_is_manual"] is False
+
+
+def test_manual_patch_back_to_declined_without_origin_defaults_unknown_via_http(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "rsvp_status": "confirmed"},
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"rsvp_status": "declined"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["decline_origin"] == "unknown"
+    assert resp.json()["decline_origin_is_manual"] is True
+
+
+def test_manual_patch_decline_origin_does_not_change_unrelated_fields(test_client):
+    client, _service = test_client
+    created_client, engagement = _create_client_and_engagement(client)
+    created = client.post(
+        _participants_url(created_client["client_id"], engagement["engagement_id"]),
+        json={"first_name": "Jane", "last_name": "Doe", "role": "host", "rsvp_status": "declined", "is_walk_in": True},
+    ).json()
+
+    resp = client.patch(
+        _participant_url(created_client["client_id"], engagement["engagement_id"], created["participant_id"]),
+        json={"decline_origin": "guest"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["first_name"] == "Jane"
+    assert body["last_name"] == "Doe"
+    assert body["role"] == "host"
+    assert body["is_walk_in"] is True
+    assert body["updated_at"] != created["updated_at"]
 
 
 # =========================================================================

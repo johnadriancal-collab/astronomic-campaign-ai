@@ -41,6 +41,7 @@ from app.models.client_crm import (
     ClientStatus,
     ClientTouchpoint,
     ContactType,
+    DeclineOrigin,
     DinnerType,
     Engagement,
     EngagementCloseout,
@@ -242,7 +243,14 @@ class EngagementParticipantCreateRequest(BaseModel):
     it's a cross-field rule). When `crm_contact_id` IS provided, any of
     those fields sent here are ignored -- the canonical Contact's own
     data always wins. `source` has no field here at all -- Stage 1G
-    creates ONLY MANUAL records, server-owned, never caller-settable."""
+    creates ONLY MANUAL records, server-owned, never caller-settable.
+
+    `decline_origin` (Client CRM Stage 5A/5B) -- only meaningful alongside
+    rsvp_status == declined; ClientCrmService normalizes/forces it to null
+    for any other rsvp_status regardless of what's sent here. No
+    `decline_origin_is_manual` field here at all -- that's backend-owned
+    provenance, never caller-settable (the service always marks anything
+    submitted through this create path as human-authoritative)."""
 
     crm_contact_id: str | None = None
     first_name: str | None = None
@@ -252,6 +260,7 @@ class EngagementParticipantCreateRequest(BaseModel):
     company: str | None = None
     role: ParticipantRole = ParticipantRole.GUEST
     rsvp_status: ParticipantRsvpStatus | None = None
+    decline_origin: DeclineOrigin | None = None
     attendance_status: ParticipantAttendanceStatus | None = None
     is_walk_in: bool = False
 
@@ -266,7 +275,16 @@ class EngagementParticipantUpdateRequest(BaseModel):
     Clearing `crm_contact_id` back to null on an already-linked
     participant is explicitly rejected (400) -- resolved -> unresolved is
     not an allowed transition. No `source` field here either -- still
-    entirely server-owned."""
+    entirely server-owned.
+
+    `decline_origin` (Client CRM Stage 5A/5B) -- omitted entirely means
+    "leave it as it currently is" (genuine partial-PATCH semantics, same
+    as every other field here); explicitly sent (including `null`) is a
+    direct human assertion and becomes authoritative -- see
+    ClientCrmService._normalize_decline_origin_for_update()'s own
+    docstring for the exact precedence/clearing rules. No
+    `decline_origin_is_manual` field here either -- backend-owned
+    provenance, never caller-settable."""
 
     crm_contact_id: str | None = None
     first_name: str | None = None
@@ -276,6 +294,7 @@ class EngagementParticipantUpdateRequest(BaseModel):
     company: str | None = None
     role: ParticipantRole | None = None
     rsvp_status: ParticipantRsvpStatus | None = None
+    decline_origin: DeclineOrigin | None = None
     attendance_status: ParticipantAttendanceStatus | None = None
     is_walk_in: bool | None = None
     archived: bool | None = None  # archive (true) / restore (false) -- see module docstring
