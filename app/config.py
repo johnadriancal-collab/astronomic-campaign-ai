@@ -227,6 +227,21 @@ class Settings(BaseSettings):
     # explicitly approved to start writing live.
     luma_contact_enrichment_enabled: bool = False
 
+    # Luma Event structured geo -> CrmContact city/state/country fill-only
+    # enrichment (Stage 6B.2, see app/services/luma_contact_location_enrichment.py).
+    # Deliberately a SEPARATE setting from luma_contact_enrichment_enabled
+    # above, never reused: Company/Job Title is a self-reported,
+    # replace-if-different signal; this is an inferred, lower-confidence,
+    # fill-only-if-blank signal (derived from which dinner someone
+    # registered for, not anything they told us about themselves) --
+    # independently controllable so either can be enabled/disabled without
+    # affecting the other. Defaults False (fails CLOSED), same precedent
+    # as luma_contact_enrichment_enabled above: while False,
+    # LumaSyncService.process_guest_event() performs zero Contact
+    # city/state/country writes, zero field_provenance mutation for those
+    # fields, and behaves BYTE-IDENTICAL to before this feature existed.
+    luma_contact_location_enrichment_enabled: bool = False
+
     # Astronomic Mail Phase A (durable execution model) -- see
     # app/services/mail_sending_service.py's module docstring. Defaults to
     # False (fails CLOSED, matching cookie_secure's precedent above, not

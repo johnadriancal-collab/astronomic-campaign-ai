@@ -63,6 +63,7 @@ from app.models.luma import (
     LumaRegistrationAnswer,
     LumaSyncCounts,
 )
+from app.repositories.engagement_store import EngagementStore
 from app.repositories.luma_backfill_checkpoint_store import LumaBackfillCheckpointStore
 from app.repositories.luma_event_store import LumaEventStore
 from app.repositories.luma_question_mapping_store import LumaQuestionMappingStore
@@ -76,6 +77,7 @@ from app.services.luma_contact_enrichment import (
     resolve_contact_luma_fields,
     resolve_tier1_website,
 )
+from app.services.luma_contact_location_enrichment import apply_luma_event_location_enrichment
 from app.services.luma_decline_origin import derive_from_first_seen_declined, derive_from_observed_transition
 from app.services.luma_engagement_participant_sync_service import LumaEngagementParticipantSyncService
 
@@ -159,6 +161,33 @@ def _derive_location_summary(event_payload: dict) -> str | None:
     if event_payload.get("meeting_url"):
         return "Online"
     return None
+
+
+def _clean_geo_str(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def _derive_structured_geo(event_payload: dict) -> tuple[str | None, str | None, str | None]:
+    """Client CRM Stage 6B.1. Raw, UNNORMALIZED structured geo fields from
+    Luma's own `geo_address_json` -- city/region/country exactly as Luma
+    provides them (`region` is Luma's own name for state/province;
+    `country` is an ISO-3166-1 alpha-2 code, e.g. "US"). Deliberately does
+    NOT normalize country to AstroHub's own Contact.country vocabulary
+    here -- that is an enrichment-time concern (see
+    app/services/luma_contact_location_enrichment.py), not a
+    faithful-capture concern. `city` falls back to `address` (the same
+    convention _derive_location_summary above already uses) when Luma's
+    own `city` key is absent. Never raises on an unexpected shape."""
+    geo = event_payload.get("geo_address_json")
+    if not isinstance(geo, dict):
+        return None, None, None
+    city = _clean_geo_str(geo.get("city")) or _clean_geo_str(geo.get("address"))
+    region = _clean_geo_str(geo.get("region"))
+    country = _clean_geo_str(geo.get("country"))
+    return city, region, country
 
 
 def _derive_checked_in_at(tickets: list[dict]) -> str | None:
@@ -281,6 +310,7 @@ class LumaSyncService:
         checkpoint_store: LumaBackfillCheckpointStore | None = None,
         luma_client: LumaClient | None = None,
         participant_sync_service: LumaEngagementParticipantSyncService | None = None,
+        engagement_store: EngagementStore | None = None,
     ):
         self.crm_service = crm_service
         self.event_store = event_store
@@ -297,6 +327,17 @@ class LumaSyncService:
         # _process_guest_event_locked()'s own final step for the fail-open
         # boundary this is called through.
         self.participant_sync_service = participant_sync_service
+        # Client CRM Stage 6B.2 (2026-09-11) -- optional, same "skip
+        # entirely when unset" convention as participant_sync_service
+        # above, and deliberately INDEPENDENT of it (never read via
+        # self.participant_sync_service.engagement_store) -- the location
+        # enrichment below must keep working (minus the optional
+        # engagement_id in its provenance) even when participant sync is
+        # disabled/unwired, since it has no dependency on any
+        # EngagementParticipant existing. Used ONLY as a best-effort
+        # Engagement lookup for provenance; never required for the
+        # enrichment itself to run. See _apply_luma_location_enrichment.
+        self.engagement_store = engagement_store
         # Per-guest-id concurrency guard -- see process_guest_event()'s
         # docstring for the race this closes. Deliberately per-guest, not a
         # single global lock: two DIFFERENT guests' webhooks still process
@@ -502,8 +543,45 @@ class LumaSyncService:
             await self.crm_service.contact_store.save(outcome.contact)
         return outcome.contact, outcome.changed_field_keys, outcome.ambiguous_fields, outcome.website_review_needed
 
+    async def _apply_luma_location_enrichment(
+        self, contact: CrmContact, luma_event: LumaEvent, registration: LumaRegistration
+    ) -> tuple[CrmContact, list[str]]:
+        """Client CRM Stage 6B.2. Fill-only city/state/country from THIS
+        registration's own linked LumaEvent's structured geo fields --
+        deliberately scoped to a single registration/event pair, never a
+        cross-registration batch resolution like the self-report method
+        above (eligibility itself already requires an actively-registered
+        signal for this specific event, so there is no "most recent
+        registration wins" question to resolve here). Must be called
+        AFTER `registration` has already been saved and AFTER contact
+        matching/creation has already resolved `contact`, same ordering
+        precondition as _apply_luma_contact_self_report.
+
+        `engagement_store` is optional (see this class's own constructor
+        docstring) -- when set, this looks up whether `luma_event` is
+        linked to a Client CRM Engagement purely to attach `engagement_id`
+        to provenance; when unset, or when no Engagement is linked, the
+        enrichment still runs identically, just without that one extra
+        provenance field. This method never creates, reads, or depends on
+        any EngagementParticipant."""
+        engagement_id: str | None = None
+        if self.engagement_store is not None:
+            engagement = await self.engagement_store.get_by_luma_event_id(luma_event.luma_event_id)
+            if engagement is not None:
+                engagement_id = engagement.engagement_id
+
+        outcome = apply_luma_event_location_enrichment(contact, luma_event, registration, engagement_id=engagement_id)
+        if outcome.changed_field_keys:
+            await self.crm_service.contact_store.save(outcome.contact)
+        return outcome.contact, outcome.changed_field_keys
+
     async def process_guest_event(
-        self, event_payload: dict, guest_payload: dict, webhook_delivery_id: str | None = None
+        self,
+        event_payload: dict,
+        guest_payload: dict,
+        webhook_delivery_id: str | None = None,
+        *,
+        allow_location_enrichment: bool = False,
     ) -> LumaProcessResult:
         """
         Concurrency-safe entry point. Luma can and does deliver multiple
@@ -529,15 +607,38 @@ class LumaSyncService:
         and the webhook handler both call this same method, so both get
         this guarantee identically -- no separate, differently-behaved
         backfill code path.
-        """
+
+        `allow_location_enrichment` (Client CRM Stage 6B, 2026-09-11) --
+        the execution-context safeguard for Stage 6B's fill-only
+        location enrichment ONLY (see _apply_luma_location_enrichment).
+        Defaults to False -- a SAFE, fail-closed default: any caller
+        that doesn't explicitly reason about this (today's callers, or a
+        future one added later) gets Stage 6B's live-only behavior for
+        free, never accidentally opting a historical/backfill/replay
+        flow into inferred-location writes. Only handle_webhook() (the
+        one real live-webhook entry point) passes True. This flag
+        affects NOTHING else in this method -- registration persistence,
+        Contact matching/creation, the generic mapped-field merge, the
+        Luma self-report Company/Title enrichment (gated purely by its
+        own OWN settings.luma_contact_enrichment_enabled, unaffected by
+        this parameter, exactly as it already behaved before Stage 6B
+        existed), Activity Log recording, and the EngagementParticipant
+        sync all run identically regardless of this flag's value."""
         guest_id = guest_payload.get("id")
         if not guest_id:
             raise LumaSyncError("Guest payload is missing an id.")
         async with self._lock_for_guest(guest_id):
-            return await self._process_guest_event_locked(guest_id, event_payload, guest_payload, webhook_delivery_id)
+            return await self._process_guest_event_locked(
+                guest_id, event_payload, guest_payload, webhook_delivery_id, allow_location_enrichment
+            )
 
     async def _process_guest_event_locked(
-        self, guest_id: str, event_payload: dict, guest_payload: dict, webhook_delivery_id: str | None
+        self,
+        guest_id: str,
+        event_payload: dict,
+        guest_payload: dict,
+        webhook_delivery_id: str | None,
+        allow_location_enrichment: bool = False,
     ) -> LumaProcessResult:
         now = datetime.now(timezone.utc)
         luma_event = self._parse_event(event_payload, now)
@@ -633,6 +734,27 @@ class LumaSyncService:
         # While luma_contact_enrichment_enabled is False (the default),
         # this entire block is skipped -- process_guest_event() behaves
         # BYTE-IDENTICAL to before this feature existed.
+
+        if contact is not None and settings.luma_contact_location_enrichment_enabled and allow_location_enrichment:
+            contact, location_changed_keys = await self._apply_luma_location_enrichment(contact, luma_event, registration)
+            if location_changed_keys:
+                changed_field_keys = sorted(set(changed_field_keys) | set(location_changed_keys))
+                if contact_outcome == "unchanged":
+                    contact_outcome = "enriched"
+        # Two INDEPENDENT gates, both required: the global settings flag
+        # (off by default in every environment) AND this specific call's
+        # own allow_location_enrichment (False by default -- see
+        # process_guest_event()'s own docstring). Either one being off is
+        # a complete, silent no-op for this block alone -- registration
+        # persistence, contact matching, the generic mapped-field merge,
+        # and the Luma self-report Company/Title enrichment above are
+        # governed entirely by their OWN pre-existing gates and run
+        # identically either way. This is what makes a historical
+        # backfill/replay call (which always passes
+        # allow_location_enrichment=False, see run_backfill/
+        # run_event_backfill below) structurally incapable of triggering
+        # Stage 6B enrichment even if the settings flag were ever
+        # mistakenly left on during such a run.
 
         result = LumaProcessResult(
             registration=registration,
@@ -738,6 +860,7 @@ class LumaSyncService:
         event_id = event_payload.get("id")
         if not event_id:
             raise LumaSyncError("Event payload is missing an id.")
+        location_city, location_region, location_country = _derive_structured_geo(event_payload)
         return LumaEvent(
             luma_event_id=event_id,
             calendar_id=event_payload.get("calendar_id"),
@@ -746,6 +869,9 @@ class LumaSyncService:
             end_at=event_payload.get("end_at"),
             status=event_payload.get("status"),
             location_summary=_derive_location_summary(event_payload),
+            location_city=location_city,
+            location_region=location_region,
+            location_country=location_country,
             url=event_payload.get("url"),
             synced_at=now,
             updated_at=now,
@@ -910,7 +1036,14 @@ class LumaSyncService:
 
     async def handle_webhook(self, event_type: str, data: dict, webhook_delivery_id: str) -> LumaProcessResult | None:
         """Returns None for a webhook type outside Phase 1 scope (ignored,
-        not an error) -- e.g. event.created/calendar.person.subscribed."""
+        not an error) -- e.g. event.created/calendar.person.subscribed.
+
+        The ONE real live-webhook entry point in this class -- the only
+        call site anywhere that passes allow_location_enrichment=True to
+        process_guest_event(), since this is the only place a genuinely
+        LIVE Luma delivery (not a historical replay) enters this
+        service. See process_guest_event()'s own docstring for the full
+        safeguard contract."""
         if event_type not in SUPPORTED_WEBHOOK_TYPES:
             return None
 
@@ -938,7 +1071,9 @@ class LumaSyncService:
                 "Webhook payload has no embedded event and no prior registration to recover one from."
             )
 
-        return await self.process_guest_event(event_payload, data, webhook_delivery_id=webhook_delivery_id)
+        return await self.process_guest_event(
+            event_payload, data, webhook_delivery_id=webhook_delivery_id, allow_location_enrichment=True
+        )
 
     # --- historical backfill ----------------------------------------------
 
@@ -1049,7 +1184,16 @@ class LumaSyncService:
                 # not nested under a "guest" key.
                 guest_payload = guest_entry
                 try:
-                    result = await self.process_guest_event(event_payload, guest_payload, webhook_delivery_id=None)
+                    # Historical/replay call -- allow_location_enrichment
+                    # explicitly False (Client CRM Stage 6B). This full-
+                    # calendar backfill is exactly the flow Stage 6B must
+                    # never silently apply inferred-location writes
+                    # through; any historical location reconciliation is
+                    # Stage 6C's own separate, explicit, not-yet-built
+                    # scope.
+                    result = await self.process_guest_event(
+                        event_payload, guest_payload, webhook_delivery_id=None, allow_location_enrichment=False
+                    )
                     _accumulate_counts(checkpoint.counts, result)
                 except Exception as e:  # noqa: BLE001 -- one bad guest must never abort the whole backfill
                     checkpoint.counts.errors += 1
@@ -1137,7 +1281,14 @@ class LumaSyncService:
                     continue
                 guests_matched += 1
                 try:
-                    result = await self.process_guest_event(event_payload, guest_payload, webhook_delivery_id=None)
+                    # Historical/replay call -- allow_location_enrichment
+                    # explicitly False (Client CRM Stage 6B), same
+                    # reasoning as _backfill_one_event above: a targeted,
+                    # single-event backfill is still a historical replay,
+                    # never a live delivery.
+                    result = await self.process_guest_event(
+                        event_payload, guest_payload, webhook_delivery_id=None, allow_location_enrichment=False
+                    )
                     _accumulate_counts(counts, result)
                 except Exception as e:  # noqa: BLE001 -- one bad guest must never abort the rest of this event
                     counts.errors += 1

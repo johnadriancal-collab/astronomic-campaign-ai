@@ -1827,6 +1827,385 @@ async def test_investor_mapping_still_applies_when_enrichment_flag_is_off(luma_s
     assert result.contact.title is None
 
 
+# --- Client CRM Stage 6B.1/6B.2: structured Luma Event geo capture + -------
+# fill-only Contact location enrichment --------------------------------------
+
+
+@pytest.fixture
+def luma_contact_location_enrichment_enabled(monkeypatch):
+    """Deliberately NOT autouse -- most tests in this file must keep
+    testing this feature's OFF-by-default, byte-identical-to-before
+    behavior. Mirrors luma_contact_enrichment_enabled's own convention,
+    as a genuinely separate, independently-controllable setting."""
+    monkeypatch.setattr(luma_sync_service_module.settings, "luma_contact_location_enrichment_enabled", True)
+
+
+def make_geo_event(city="Austin", region="Texas", country="US", **overrides):
+    return make_event(geo_address_json={"address": city, "city": city, "region": region, "country": country}, **overrides)
+
+
+async def test_stage6b1_structured_geo_is_captured_on_the_stored_luma_event(luma_service, event_store):
+    guest = make_guest()
+    await luma_service.process_guest_event(make_geo_event(), guest)
+
+    event = await event_store.get("evt-1")
+    assert event.location_city == "Austin"
+    assert event.location_region == "Texas"
+    assert event.location_country == "US"  # raw, unnormalized on LumaEvent itself
+    assert event.location_summary == "Austin"  # unchanged existing behavior
+
+
+async def test_stage6b1_historical_event_without_geo_data_stores_all_three_as_none(luma_service, event_store):
+    guest = make_guest()
+    await luma_service.process_guest_event(make_event(), guest)  # no geo_address_json at all
+
+    event = await event_store.get("evt-1")
+    assert event.location_city is None
+    assert event.location_region is None
+    assert event.location_country is None
+
+
+async def test_stage6b2_registered_and_all_blank_fills_all_available_fields(luma_service, luma_contact_location_enrichment_enabled):
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city == "Austin"
+    assert result.contact.state == "Texas"
+    assert result.contact.country == "United States"  # normalized from Luma's "US"
+    assert "city" in result.changed_field_keys
+    assert "state" in result.changed_field_keys
+    assert "country" in result.changed_field_keys
+    assert result.contact.custom_fields["field_provenance"]["city"]["source"] == "luma_event_location"
+
+
+async def test_stage6b2_city_already_populated_is_preserved_state_and_country_still_fill(
+    luma_service, crm_service, luma_contact_location_enrichment_enabled
+):
+    existing = make_contact(email="alice@example.com", city="San Francisco")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city == "San Francisco"  # preserved
+    assert result.contact.state == "Texas"
+    assert result.contact.country == "United States"
+    assert "city" not in result.changed_field_keys
+
+
+async def test_stage6b2_all_fields_already_populated_is_a_complete_no_op(
+    luma_service, crm_service, luma_contact_location_enrichment_enabled
+):
+    existing = make_contact(email="alice@example.com", city="San Francisco", state="California", country="United States")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city == "San Francisco"
+    assert result.contact.state == "California"
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
+async def test_stage6b2_invited_only_never_registered_is_a_no_op(luma_service, luma_contact_location_enrichment_enabled):
+    guest = make_guest(approval_status="invited", registered_at=None, invited_at="2026-08-01T00:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
+async def test_stage6b2_registered_then_host_declined_is_still_eligible(luma_service, luma_contact_location_enrichment_enabled):
+    """Final RSVP status is never the deciding factor -- registered_at
+    being set is what matters, even for a person who ends up declined."""
+    guest = make_guest(approval_status="declined", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city == "Austin"
+    assert "city" in result.changed_field_keys
+
+
+async def test_stage6b2_invited_then_guest_declined_without_ever_registering_is_a_no_op(
+    luma_service, luma_contact_location_enrichment_enabled
+):
+    guest = make_guest(approval_status="declined", registered_at=None, invited_at="2026-08-01T00:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
+async def test_stage6b2_partial_event_geo_fills_only_available_fields(luma_service, luma_contact_location_enrichment_enabled):
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(country=None), guest, allow_location_enrichment=True)
+
+    assert result.contact.city == "Austin"
+    assert result.contact.state == "Texas"
+    assert result.contact.country is None
+    assert "country" not in result.changed_field_keys
+
+
+async def test_stage6b2_event_with_no_geo_data_at_all_is_a_clean_no_op(luma_service, luma_contact_location_enrichment_enabled):
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_event(), guest, allow_location_enrichment=True)  # no geo_address_json
+
+    assert result.contact.city is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
+async def test_stage6b2_repeated_processing_after_fill_is_idempotent(luma_service, crm_service, luma_contact_location_enrichment_enabled):
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    first = await luma_service.process_guest_event(make_geo_event(), guest, webhook_delivery_id="d1", allow_location_enrichment=True)
+    assert first.contact.city == "Austin"
+    persisted_after_first = await crm_service.contact_store.get(first.contact.crm_contact_id)
+    updated_at_after_first = persisted_after_first.updated_at
+
+    # A second, genuinely distinct delivery (different delivery id, so this
+    # is NOT the exact-redelivery short-circuit) for the same guest/event.
+    second = await luma_service.process_guest_event(make_geo_event(), guest, webhook_delivery_id="d2", allow_location_enrichment=True)
+
+    assert second.contact.city == "Austin"
+    assert not any(k in ("city", "state", "country", "custom:field_provenance") for k in second.changed_field_keys)
+    # Checked against what's actually PERSISTED, not the transient
+    # in-memory result object -- apply_import_mapping's own model_copy
+    # always produces a fresh (unsaved) object with a new updated_at even
+    # when it changes nothing else, but no zero-diff enrichment step ever
+    # calls contact_store.save() over it, so the real stored row never
+    # moves. Same "check the store, not the transient result" precedent
+    # as the self-report tests' own zero-save assertions above.
+    persisted_after_second = await crm_service.contact_store.get(second.contact.crm_contact_id)
+    assert persisted_after_second.updated_at == updated_at_after_first  # zero persisted mutation
+
+
+async def test_stage6b2_feature_flag_disabled_by_default_leaves_the_feature_completely_inert(luma_service, crm_service):
+    """No luma_contact_location_enrichment_enabled fixture requested here
+    -- settings.luma_contact_location_enrichment_enabled is False (its
+    real production default). allow_location_enrichment=True is passed
+    anyway, to isolate that it's specifically the SETTINGS flag doing the
+    blocking here, not the execution-context flag defaulting to False --
+    see test_stage6b_backfill_safety section below for that half."""
+    assert luma_sync_service_module.settings.luma_contact_location_enrichment_enabled is False
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city is None
+    assert result.contact.state is None
+    assert result.contact.country is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+    page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
+    enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
+    assert enriched_events == []
+
+
+async def test_stage6b2_activity_only_fires_on_a_real_enrichment(luma_service, crm_service, luma_contact_location_enrichment_enabled):
+    """contact_outcome stays "created" for a brand-new contact (never
+    demoted/relabeled to "enriched" -- same convention already proven by
+    the self-report enrichment's own
+    test_enriched_activity_event_includes_self_report_field_keys), but the
+    location fill's OWN change still fires its own luma.contact.enriched
+    event, independently of that outcome label."""
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+    assert result.contact_outcome == "created"
+
+    page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
+    enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
+    assert len(enriched_events) == 1
+    fields_updated = enriched_events[0].metadata["fields_updated"]
+    assert "city" in fields_updated and "state" in fields_updated and "country" in fields_updated
+    # Structural only -- never the location values themselves.
+    assert "Austin" not in str(enriched_events[0].metadata)
+    assert "Texas" not in str(enriched_events[0].metadata)
+
+
+async def test_stage6b2_no_op_case_fires_zero_activity(luma_service, crm_service, luma_contact_location_enrichment_enabled):
+    guest = make_guest(approval_status="invited", registered_at=None)
+    await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
+    enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
+    assert enriched_events == []
+
+
+async def test_stage6b2_location_enrichment_does_not_regress_company_title_enrichment(
+    luma_service, luma_contact_location_enrichment_enabled
+):
+    """Enabling ONLY the location flag (Company/Title's own flag stays at
+    its real False default) must leave Company/Title completely inert --
+    proving the two features are independently controllable, not
+    accidentally coupled."""
+    guest = make_guest(
+        email="alice@example.com",
+        registered_at="2026-08-20T10:00:00Z",
+        registration_answers=[{"label": "Company", "question_id": "q1", "question_type": "company", "value": {"company": "Acme", "job_title": "CEO"}}],
+    )
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city == "Austin"  # location enrichment ran
+    assert result.contact.company is None  # Company/Title enrichment stayed off
+    assert result.contact.title is None
+    assert luma_sync_service_module.settings.luma_contact_enrichment_enabled is False
+
+
+async def test_stage6b2_does_not_affect_registration_or_decline_origin_fields(luma_service, luma_contact_location_enrichment_enabled):
+    """Location enrichment is purely additive to the Contact -- the
+    registration record itself, and the decline-origin derivation that
+    depends on it, must be completely unaffected by this feature being
+    on."""
+    guest = make_guest(email="alice@example.com", approval_status="declined", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.registration.approval_status == LumaApprovalStatus.DECLINED
+    assert result.registration.registered_at is not None
+    assert result.contact.city == "Austin"  # both effects present, independently
+
+
+async def test_stage6b2_no_engagement_store_wired_still_enriches_without_engagement_id(
+    luma_service, luma_contact_location_enrichment_enabled
+):
+    """The default `luma_service` fixture never wires engagement_store --
+    proving the enrichment does not depend on any Engagement link/lookup
+    to do its basic job."""
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.city == "Austin"
+    assert "engagement_id" not in result.contact.custom_fields["field_provenance"]["city"]
+
+
+async def test_stage6b2_engagement_id_is_attached_to_provenance_when_linked(
+    crm_service, event_store, registration_store, mapping_store, luma_contact_location_enrichment_enabled
+):
+    from app.models.client_crm import Engagement, EngagementStatus, EngagementType
+    from app.repositories.engagement_store import MemoryEngagementStore
+
+    engagement_store = MemoryEngagementStore()
+    await engagement_store.create(
+        Engagement(
+            engagement_id="eng-1", client_id="client-1", title="Austin Investor Dinner",
+            engagement_type=EngagementType.DINNER, luma_event_id="evt-1",
+            status=EngagementStatus.CONFIRMED, archived=False, created_at=_now(), updated_at=_now(),
+        )
+    )
+    service = LumaSyncService(
+        crm_service=crm_service, event_store=event_store, registration_store=registration_store,
+        mapping_store=mapping_store, activity_log=crm_service.activity_log, engagement_store=engagement_store,
+    )
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=True)
+
+    assert result.contact.custom_fields["field_provenance"]["city"]["engagement_id"] == "eng-1"
+
+
+async def test_stage6b2_never_falls_back_to_engagement_location_free_text(
+    crm_service, event_store, registration_store, mapping_store, luma_contact_location_enrichment_enabled
+):
+    """Even when a linked Engagement carries a free-text `location` (e.g.
+    "Austin, Texas"), and the LumaEvent itself has NO structured geo data,
+    this feature must stay a clean no-op -- never parse Engagement.location
+    as a fallback source, per the explicit V1 product rule."""
+    from app.models.client_crm import Engagement, EngagementStatus, EngagementType
+    from app.repositories.engagement_store import MemoryEngagementStore
+
+    engagement_store = MemoryEngagementStore()
+    await engagement_store.create(
+        Engagement(
+            engagement_id="eng-1", client_id="client-1", title="Austin Investor Dinner",
+            engagement_type=EngagementType.DINNER, luma_event_id="evt-1", location="Austin, Texas",
+            status=EngagementStatus.CONFIRMED, archived=False, created_at=_now(), updated_at=_now(),
+        )
+    )
+    service = LumaSyncService(
+        crm_service=crm_service, event_store=event_store, registration_store=registration_store,
+        mapping_store=mapping_store, activity_log=crm_service.activity_log, engagement_store=engagement_store,
+    )
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await service.process_guest_event(make_event(), guest, allow_location_enrichment=True)  # no geo_address_json at all
+
+    assert result.contact.city is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
+def test_settings_luma_contact_location_enrichment_enabled_defaults_false():
+    from app.config import Settings
+
+    assert Settings.model_fields["luma_contact_location_enrichment_enabled"].default is False
+
+
+# --- Client CRM Stage 6B backfill safety: allow_location_enrichment --------
+# execution-context safeguard (2026-09-11 review) -------------------------
+#
+# The risk this section proves closed: run_backfill()/run_event_backfill()
+# reuse the exact same process_guest_event() path the live webhook does.
+# Without an execution-context signal, enabling
+# LUMA_CONTACT_LOCATION_ENRICHMENT_ENABLED in production would make ANY
+# historical/backfill run silently apply Stage 6B's inferred-location
+# writes to old registrations -- exactly what Stage 6B's own locked design
+# (future/live registrations only; historical reconciliation is Stage 6C's
+# own separate, explicit, not-yet-built scope) forbids. See
+# tests/test_luma_backfill.py and tests/test_luma_event_backfill.py for the
+# two actual backfill-driver-level proofs (items 2/3/5/6 of the review);
+# the items below (1/4, plus a direct parameter-level proof) are exercised
+# here since this file already owns the live webhook + flag fixtures.
+
+
+async def test_stage6b_live_webhook_with_flag_on_and_eligible_registration_enriches_location(
+    luma_service, luma_contact_location_enrichment_enabled
+):
+    """Item 1: feature flag ON + live webhook + eligible registration ->
+    location enrichment runs. Routed through the REAL handle_webhook()
+    entry point (not process_guest_event() directly), since that's the
+    one call site that actually decides allow_location_enrichment=True --
+    proving the real live wiring, not just the parameter's own default."""
+    data = {**make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z"), "event": make_geo_event()}
+    result = await luma_service.handle_webhook("guest.registered", data, webhook_delivery_id="wh-1")
+
+    assert result.contact.city == "Austin"
+    assert result.contact.state == "Texas"
+    assert result.contact.country == "United States"
+    assert "city" in result.changed_field_keys
+
+
+async def test_stage6b_live_webhook_with_flag_off_does_not_enrich_location(luma_service):
+    """Item 4: feature flag OFF (real production default) + live webhook
+    -> no location enrichment, even though handle_webhook() itself always
+    passes allow_location_enrichment=True for a live delivery."""
+    assert luma_sync_service_module.settings.luma_contact_location_enrichment_enabled is False
+    data = {**make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z"), "event": make_geo_event()}
+    result = await luma_service.handle_webhook("guest.registered", data, webhook_delivery_id="wh-1")
+
+    assert result.contact.city is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
+async def test_stage6b_process_guest_event_default_is_allow_location_enrichment_false(
+    luma_service, luma_contact_location_enrichment_enabled
+):
+    """Direct proof of the parameter's own safe default: calling
+    process_guest_event() WITHOUT explicitly passing
+    allow_location_enrichment (the shape every historical/backfill call
+    site in luma_sync_service.py itself now always uses explicitly, but
+    this proves the default alone is already safe even for a
+    hypothetical future caller that forgets to)."""
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest)  # allow_location_enrichment omitted
+
+    assert result.contact.city is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
+async def test_stage6b_explicit_allow_location_enrichment_false_blocks_it_even_with_eligible_data(
+    luma_service, luma_contact_location_enrichment_enabled
+):
+    """The other half of the AND-gate: flag ON, fully eligible registration
+    and full event geo, but the CALLER explicitly disallows it -- exactly
+    the shape run_backfill/run_event_backfill now use."""
+    guest = make_guest(email="alice@example.com", registered_at="2026-08-20T10:00:00Z")
+    result = await luma_service.process_guest_event(make_geo_event(), guest, allow_location_enrichment=False)
+
+    assert result.contact.city is None
+    assert not any(k in ("city", "state", "country") for k in result.changed_field_keys)
+
+
 def test_only_the_live_webhook_path_and_the_explicit_backfill_script_ever_call_the_self_report_merge_functions():
     """Structural guard: proves enabling LUMA_CONTACT_ENRICHMENT_ENABLED
     cannot, by itself, trigger any kind of historical replay. The self-

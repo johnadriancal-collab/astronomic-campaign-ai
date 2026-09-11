@@ -572,3 +572,47 @@ async def test_no_summary_event_when_the_run_fails_before_completion(crm_service
     page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
     completed_events = [e for e in page.items if e.event_type == "luma.event_backfill.completed"]
     assert completed_events == []  # a failed lookup must never emit a misleading "completed" event
+
+
+# --- Client CRM Stage 6B backfill safety (2026-09-11 review) ---------------
+#
+# Items 3/5/6 of the review: run_event_backfill() must NEVER trigger Stage
+# 6B's fill-only location enrichment either, even when
+# LUMA_CONTACT_LOCATION_ENRICHMENT_ENABLED is on and the targeted event's
+# guest data is fully eligible -- see luma_sync_service.py's own
+# run_event_backfill(), which now always passes
+# allow_location_enrichment=False to process_guest_event().
+
+
+async def test_run_event_backfill_never_triggers_stage6b_location_enrichment_even_with_flag_on_and_eligible_data(
+    crm_service, monkeypatch
+):
+    """Items 3, 5, 6: flag ON + run_event_backfill() + an eligible guest
+    (registered_at set, approval_status=approved) whose targeted event
+    carries full structured geo -> zero Contact city/state/country
+    mutation, zero field_provenance entry, and zero luma.contact.enriched
+    Activity event from location."""
+    from app.services import luma_sync_service as luma_sync_service_module
+
+    monkeypatch.setattr(luma_sync_service_module.settings, "luma_contact_location_enrichment_enabled", True)
+
+    geo_event = {**_event_entry("evt-1"), "geo_address_json": {"address": "Austin", "city": "Austin", "region": "Texas", "country": "US"}}
+    event_pages = [{"entries": [geo_event], "has_more": False, "next_cursor": None}]
+    guest_pages = {"evt-1": [{"entries": [_guest("gst-1", "a@example.com", approval_status="approved")], "has_more": False, "next_cursor": None}]}
+    client = FakeLumaClient(event_pages, guest_pages)
+    service = build_service(crm_service, client)
+
+    result = await service.run_event_backfill("evt-1")
+
+    assert result.guests_matching_filter == 1
+    all_contacts = await crm_service.contact_store.list()
+    assert len(all_contacts) == 1
+    contact = all_contacts[0]
+    assert contact.city is None
+    assert contact.state is None
+    assert contact.country is None
+    assert "field_provenance" not in contact.custom_fields
+
+    page = await crm_service.activity_log.list_events(category=ActivityCategory.LUMA)
+    enriched_events = [e for e in page.items if e.event_type == "luma.contact.enriched"]
+    assert enriched_events == []

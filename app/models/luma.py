@@ -77,6 +77,26 @@ class LumaEvent(BaseModel):
     end_at: datetime | None = None
     status: str | None = None  # best-effort/optional -- see module docstring
     location_summary: str | None = None
+    # Client CRM Stage 6B.1 (2026-09-11) -- structured geo capture from
+    # Luma's own `geo_address_json`, additive alongside (never replacing)
+    # location_summary above. Deliberately RAW/unnormalized -- faithful
+    # capture of what Luma itself sent, not adapted to any downstream
+    # consumer's vocabulary: `location_country` is Luma's own
+    # ISO-3166-1 alpha-2 code (e.g. "US"), NOT normalized to AstroHub's
+    # CrmContact.country convention (full English names) here -- that
+    # normalization is an enrichment-time concern, see
+    # app/services/luma_contact_location_enrichment.py. `location_region`
+    # is Luma's own name for what AstroHub elsewhere calls "state"
+    # (kept as `region` here to mirror Luma's own field name exactly,
+    # since it also covers non-US provinces/regions). All three are None
+    # for any LumaEvent synced before this stage, or for an event whose
+    # payload simply carries no geo_address_json -- always a safe,
+    # backward-compatible default on deserialization (see
+    # SQLiteLumaEventStore's JSON-blob storage: a legacy row missing these
+    # keys entirely loads with all three as None, no migration needed).
+    location_city: str | None = None
+    location_region: str | None = None
+    location_country: str | None = None
     url: str | None = None
     synced_at: datetime
     updated_at: datetime

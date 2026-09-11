@@ -524,6 +524,7 @@ async def lifespan(app: FastAPI):
         checkpoint_store=luma_backfill_checkpoint_store,
         luma_client=LumaClient(),
         participant_sync_service=luma_engagement_participant_sync_service,
+        engagement_store=engagement_store,
     )
 
     yield
