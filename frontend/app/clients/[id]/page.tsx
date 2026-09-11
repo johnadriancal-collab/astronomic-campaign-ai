@@ -41,6 +41,7 @@ import {
   formatEngagementDate,
   latestActiveTouchpoint,
 } from "@/lib/client-crm";
+import { CLIENT_CRM_DETAIL_CONTAINER_CLASS, CLIENT_OVERVIEW_CONTACTS_GRID_CLASS } from "@/lib/client-crm-detail-layout";
 import { cn } from "@/lib/utils";
 
 // Stage 1C shipped Overview only; Stage 1D added a real Contacts section;
@@ -238,7 +239,7 @@ export default function ClientDetailPage() {
 
   if (notFound) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
+      <div className={CLIENT_CRM_DETAIL_CONTAINER_CLASS}>
         <Alert>
           <AlertTriangle />
           <AlertTitle>Client not found</AlertTitle>
@@ -256,7 +257,7 @@ export default function ClientDetailPage() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
+      <div className={CLIENT_CRM_DETAIL_CONTAINER_CLASS}>
         <Alert variant="destructive">
           <AlertTriangle />
           <AlertTitle>Couldn&apos;t load this Client</AlertTitle>
@@ -267,7 +268,7 @@ export default function ClientDetailPage() {
   }
 
   if (!client) {
-    return <div className={cn("mx-auto max-w-3xl px-6 py-10 text-sm text-muted-foreground")}>Loading…</div>;
+    return <div className={cn(CLIENT_CRM_DETAIL_CONTAINER_CLASS, "text-sm text-muted-foreground")}>Loading…</div>;
   }
 
   // Derived, not stored -- see this stage's own approved design ("Do NOT
@@ -276,7 +277,7 @@ export default function ClientDetailPage() {
   const activeClientContacts = contacts !== null ? contacts.filter((c) => !c.archived) : [];
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
+    <div className={CLIENT_CRM_DETAIL_CONTAINER_CLASS}>
       <Link href="/clients" className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground">
         <ArrowLeft className="h-4 w-4" />
         All Clients
@@ -341,133 +342,137 @@ export default function ClientDetailPage() {
       </div>
 
       <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Overview</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
-            <OverviewField label="Relationship" value={clientRelationshipClassificationLabel(client.relationship_classification)} />
-            <OverviewField label="Owner" value={client.owner || "—"} />
-            <OverviewField label="Industry" value={client.industry || "—"} />
-            <OverviewField label="Next Action" value={client.next_action || "—"} />
-            <OverviewField label="Next Action Due" value={formatClientDate(client.next_action_due)} />
-          </CardContent>
-        </Card>
+        <div className={CLIENT_OVERVIEW_CONTACTS_GRID_CLASS}>
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Overview</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-4 sm:grid-cols-2">
+                <OverviewField label="Relationship" value={clientRelationshipClassificationLabel(client.relationship_classification)} />
+                <OverviewField label="Owner" value={client.owner || "—"} />
+                <OverviewField label="Industry" value={client.industry || "—"} />
+                <OverviewField label="Next Action" value={client.next_action || "—"} />
+                <OverviewField label="Next Action Due" value={formatClientDate(client.next_action_due)} />
+              </CardContent>
+            </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Client Information</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
-            <OverviewField label="Created" value={formatClientDate(client.created_at)} />
-            <OverviewField label="Last Updated" value={formatClientDate(client.updated_at)} />
-          </CardContent>
-        </Card>
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-sm">Client Information</CardTitle>
+              </CardHeader>
+              <CardContent className="grid gap-4 sm:grid-cols-2">
+                <OverviewField label="Created" value={formatClientDate(client.created_at)} />
+                <OverviewField label="Last Updated" value={formatClientDate(client.updated_at)} />
+              </CardContent>
+            </Card>
+          </div>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
-            <CardTitle className="text-sm">Contacts</CardTitle>
-            <Button
-              size="sm"
-              variant="outline"
-              className="gap-1.5"
-              onClick={() => {
-                setEditingContact(null);
-                setContactModalOpen(true);
-              }}
-            >
-              <Plus className="h-3.5 w-3.5" />
-              Add Contact
-            </Button>
-          </CardHeader>
-          <CardContent>
-            {contactsError && (
-              <Alert variant="destructive" className="mb-3">
-                <AlertDescription>{contactsError}</AlertDescription>
-              </Alert>
-            )}
-            {contactActionError && (
-              <Alert variant="destructive" className="mb-3">
-                <AlertDescription>{contactActionError}</AlertDescription>
-              </Alert>
-            )}
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0">
+              <CardTitle className="text-sm">Contacts</CardTitle>
+              <Button
+                size="sm"
+                variant="outline"
+                className="gap-1.5"
+                onClick={() => {
+                  setEditingContact(null);
+                  setContactModalOpen(true);
+                }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Add Contact
+              </Button>
+            </CardHeader>
+            <CardContent>
+              {contactsError && (
+                <Alert variant="destructive" className="mb-3">
+                  <AlertDescription>{contactsError}</AlertDescription>
+                </Alert>
+              )}
+              {contactActionError && (
+                <Alert variant="destructive" className="mb-3">
+                  <AlertDescription>{contactActionError}</AlertDescription>
+                </Alert>
+              )}
 
-            {contacts === null && !contactsError && <p className="text-sm text-muted-foreground">Loading…</p>}
+              {contacts === null && !contactsError && <p className="text-sm text-muted-foreground">Loading…</p>}
 
-            {contacts !== null && contacts.length === 0 && (
-              <p className="text-sm text-muted-foreground">No Contacts linked yet.</p>
-            )}
+              {contacts !== null && contacts.length === 0 && (
+                <p className="text-sm text-muted-foreground">No Contacts linked yet.</p>
+              )}
 
-            {contacts !== null && contacts.length > 0 && (
-              <ul className="space-y-3">
-                {contacts.map((contact) => (
-                  <li key={contact.client_contact_id} className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
-                    <div>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {contact.crm_contact_id ? (
-                          <Link href={`/crm/${contact.crm_contact_id}`} className="font-medium hover:underline">
-                            {clientContactDisplayName(contact)}
-                          </Link>
-                        ) : (
-                          <span className="font-medium">{clientContactDisplayName(contact)}</span>
-                        )}
-                        {contact.is_primary_contact && (
-                          <Badge variant="secondary" className="bg-emerald-100 text-emerald-800">
-                            Primary
-                          </Badge>
-                        )}
-                        {contact.is_decision_maker && (
-                          <Badge variant="secondary" className="bg-violet-100 text-violet-800">
-                            Decision Maker
-                          </Badge>
-                        )}
-                        {contact.archived && (
-                          <Badge variant="secondary" className="bg-secondary text-muted-foreground">
-                            Archived
-                          </Badge>
-                        )}
+              {contacts !== null && contacts.length > 0 && (
+                <ul className="space-y-3">
+                  {contacts.map((contact) => (
+                    <li key={contact.client_contact_id} className="flex flex-wrap items-start justify-between gap-3 rounded-lg border border-border/60 p-3">
+                      <div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {contact.crm_contact_id ? (
+                            <Link href={`/crm/${contact.crm_contact_id}`} className="font-medium hover:underline">
+                              {clientContactDisplayName(contact)}
+                            </Link>
+                          ) : (
+                            <span className="font-medium">{clientContactDisplayName(contact)}</span>
+                          )}
+                          {contact.is_primary_contact && (
+                            <Badge variant="secondary" className="bg-emerald-100 text-emerald-800">
+                              Primary
+                            </Badge>
+                          )}
+                          {contact.is_decision_maker && (
+                            <Badge variant="secondary" className="bg-violet-100 text-violet-800">
+                              Decision Maker
+                            </Badge>
+                          )}
+                          {contact.archived && (
+                            <Badge variant="secondary" className="bg-secondary text-muted-foreground">
+                              Archived
+                            </Badge>
+                          )}
+                        </div>
+                        <p className="text-xs text-muted-foreground">{contact.title || "—"}</p>
+                        {contact.email && <p className="text-xs text-muted-foreground">{contact.email}</p>}
                       </div>
-                      <p className="text-xs text-muted-foreground">{contact.title || "—"}</p>
-                      {contact.email && <p className="text-xs text-muted-foreground">{contact.email}</p>}
-                    </div>
-                    <div className="flex shrink-0 flex-wrap gap-2">
-                      {!contact.archived && !contact.is_primary_contact && (
+                      <div className="flex shrink-0 flex-wrap gap-2">
+                        {!contact.archived && !contact.is_primary_contact && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={busyContactId === contact.client_contact_id}
+                            onClick={() => handleSetPrimary(contact)}
+                          >
+                            Set Primary
+                          </Button>
+                        )}
                         <Button
                           size="sm"
                           variant="outline"
                           disabled={busyContactId === contact.client_contact_id}
-                          onClick={() => handleSetPrimary(contact)}
+                          onClick={() => {
+                            setEditingContact(contact);
+                            setContactModalOpen(true);
+                          }}
                         >
-                          Set Primary
+                          Edit
                         </Button>
-                      )}
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busyContactId === contact.client_contact_id}
-                        onClick={() => {
-                          setEditingContact(contact);
-                          setContactModalOpen(true);
-                        }}
-                      >
-                        Edit
-                      </Button>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={busyContactId === contact.client_contact_id}
-                        className={contact.archived ? undefined : "text-muted-foreground hover:text-destructive"}
-                        onClick={() => handleArchiveContactToggle(contact)}
-                      >
-                        {contact.archived ? "Restore" : "Remove"}
-                      </Button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-        </Card>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busyContactId === contact.client_contact_id}
+                          className={contact.archived ? undefined : "text-muted-foreground hover:text-destructive"}
+                          onClick={() => handleArchiveContactToggle(contact)}
+                        >
+                          {contact.archived ? "Restore" : "Remove"}
+                        </Button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </CardContent>
+          </Card>
+        </div>
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0">

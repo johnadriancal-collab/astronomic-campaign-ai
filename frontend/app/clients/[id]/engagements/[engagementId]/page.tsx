@@ -43,6 +43,7 @@ import {
   participantRoleLabel,
   participantRsvpStatusLabel,
 } from "@/lib/client-crm";
+import { CLIENT_CRM_DETAIL_CONTAINER_CLASS, ENGAGEMENT_OVERVIEW_LUMA_GRID_CLASS } from "@/lib/client-crm-detail-layout";
 import { cn } from "@/lib/utils";
 
 // Stage 1E: Overview + Commercial; Stage 1F adds a real Closeout section
@@ -285,7 +286,7 @@ export default function EngagementDetailPage() {
 
   if (notFound) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
+      <div className={CLIENT_CRM_DETAIL_CONTAINER_CLASS}>
         <Alert>
           <AlertTriangle />
           <AlertTitle>Engagement not found</AlertTitle>
@@ -303,7 +304,7 @@ export default function EngagementDetailPage() {
 
   if (error) {
     return (
-      <div className="mx-auto max-w-3xl px-6 py-10">
+      <div className={CLIENT_CRM_DETAIL_CONTAINER_CLASS}>
         <Alert variant="destructive">
           <AlertTriangle />
           <AlertTitle>Couldn&apos;t load this Engagement</AlertTitle>
@@ -314,11 +315,11 @@ export default function EngagementDetailPage() {
   }
 
   if (!client || !engagement) {
-    return <div className={cn("mx-auto max-w-3xl px-6 py-10 text-sm text-muted-foreground")}>Loading…</div>;
+    return <div className={cn(CLIENT_CRM_DETAIL_CONTAINER_CLASS, "text-sm text-muted-foreground")}>Loading…</div>;
   }
 
   return (
-    <div className="mx-auto max-w-3xl px-6 py-10">
+    <div className={CLIENT_CRM_DETAIL_CONTAINER_CLASS}>
       <Link
         href={`/clients/${client.client_id}`}
         className="mb-4 inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground"
@@ -375,68 +376,70 @@ export default function EngagementDetailPage() {
       </div>
 
       <div className="space-y-6">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Overview</CardTitle>
-          </CardHeader>
-          <CardContent className="grid gap-4 sm:grid-cols-2">
-            <OverviewField label="Engagement Type" value={engagementTypeLabel(engagement.engagement_type)} />
-            <OverviewField label="Dinner Type" value={dinnerTypeLabel(engagement.dinner_type)} />
-            <OverviewField label="Date" value={formatEngagementDate(engagement.engagement_date)} />
-            <OverviewField label="Location" value={engagement.location || "—"} />
-            <OverviewField label="Owner" value={engagement.owner || "—"} />
-          </CardContent>
-        </Card>
+        <div className={ENGAGEMENT_OVERVIEW_LUMA_GRID_CLASS}>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Overview</CardTitle>
+            </CardHeader>
+            <CardContent className="grid gap-4 sm:grid-cols-2">
+              <OverviewField label="Engagement Type" value={engagementTypeLabel(engagement.engagement_type)} />
+              <OverviewField label="Dinner Type" value={dinnerTypeLabel(engagement.dinner_type)} />
+              <OverviewField label="Date" value={formatEngagementDate(engagement.engagement_date)} />
+              <OverviewField label="Location" value={engagement.location || "—"} />
+              <OverviewField label="Owner" value={engagement.owner || "—"} />
+            </CardContent>
+          </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-sm">Linked Luma Event</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {lumaEventError && (
-              <Alert variant="destructive" className="mb-3">
-                <AlertDescription>{lumaEventError}</AlertDescription>
-              </Alert>
-            )}
-            {lumaLinkError && (
-              <Alert variant="destructive" className="mb-3">
-                <AlertDescription>{lumaLinkError}</AlertDescription>
-              </Alert>
-            )}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm">Linked Luma Event</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {lumaEventError && (
+                <Alert variant="destructive" className="mb-3">
+                  <AlertDescription>{lumaEventError}</AlertDescription>
+                </Alert>
+              )}
+              {lumaLinkError && (
+                <Alert variant="destructive" className="mb-3">
+                  <AlertDescription>{lumaLinkError}</AlertDescription>
+                </Alert>
+              )}
 
-            {lumaEvent === undefined && !lumaEventError && <p className="text-sm text-muted-foreground">Loading…</p>}
+              {lumaEvent === undefined && !lumaEventError && <p className="text-sm text-muted-foreground">Loading…</p>}
 
-            {lumaEvent === null && (
-              <LumaEventPicker selected={null} onSelect={(event) => event && handleLinkLumaEvent(event)} />
-            )}
+              {lumaEvent === null && (
+                <LumaEventPicker selected={null} onSelect={(event) => event && handleLinkLumaEvent(event)} />
+              )}
 
-            {lumaEvent && (
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="font-medium">{lumaEvent.name}</p>
-                  <p className="text-xs text-muted-foreground">
-                    {formatEngagementDate(lumaEvent.start_at)}
-                    {lumaEvent.location_summary ? ` · ${lumaEvent.location_summary}` : ""}
-                  </p>
-                  {lumaEvent.url && (
-                    <a
-                      href={lumaEvent.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="mt-1 inline-flex items-center gap-1 text-xs text-foreground hover:underline"
-                    >
-                      Open in Luma
-                      <ExternalLink className="h-3 w-3" />
-                    </a>
-                  )}
+              {lumaEvent && (
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium">{lumaEvent.name}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {formatEngagementDate(lumaEvent.start_at)}
+                      {lumaEvent.location_summary ? ` · ${lumaEvent.location_summary}` : ""}
+                    </p>
+                    {lumaEvent.url && (
+                      <a
+                        href={lumaEvent.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mt-1 inline-flex items-center gap-1 text-xs text-foreground hover:underline"
+                      >
+                        Open in Luma
+                        <ExternalLink className="h-3 w-3" />
+                      </a>
+                    )}
+                  </div>
+                  <Button size="sm" variant="outline" disabled={savingLumaLink} onClick={handleUnlinkLumaEvent}>
+                    {savingLumaLink ? "Saving..." : "Unlink"}
+                  </Button>
                 </div>
-                <Button size="sm" variant="outline" disabled={savingLumaLink} onClick={handleUnlinkLumaEvent}>
-                  {savingLumaLink ? "Saving..." : "Unlink"}
-                </Button>
-              </div>
-            )}
-          </CardContent>
-        </Card>
+              )}
+            </CardContent>
+          </Card>
+        </div>
 
         <Card>
           <CardHeader>

@@ -212,3 +212,25 @@ test("Participant form Edit/Archive-adjacent structure is otherwise unaffected -
   assert.match(modal, /Save/);
   assert.match(modal, /Cancel/);
 });
+
+// --- Layout widening -- desktop horizontal space use ------------------------
+
+test("the page uses the shared, widened Client CRM detail container -- no leftover narrow max-w-3xl literal", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /CLIENT_CRM_DETAIL_CONTAINER_CLASS/);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, /max-w-3xl/);
+});
+
+test("Overview and Linked Luma Event use the shared two-column desktop grid", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /ENGAGEMENT_OVERVIEW_LUMA_GRID_CLASS/);
+});
+
+test("Commercial, Closeout, and Participants stay outside the two-column grid -- full width, unaffected by the layout change", () => {
+  const gridStart = ENGAGEMENT_DETAIL_PAGE.indexOf("ENGAGEMENT_OVERVIEW_LUMA_GRID_CLASS");
+  const commercialIndex = ENGAGEMENT_DETAIL_PAGE.indexOf(">Commercial<");
+  const closeoutIndex = ENGAGEMENT_DETAIL_PAGE.indexOf(">Closeout<");
+  const participantsIndex = ENGAGEMENT_DETAIL_PAGE.indexOf(">Participants<");
+  assert.ok(gridStart > -1);
+  assert.ok(commercialIndex > gridStart);
+  assert.ok(closeoutIndex > commercialIndex);
+  assert.ok(participantsIndex > closeoutIndex);
+});

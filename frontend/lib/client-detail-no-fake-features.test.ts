@@ -82,3 +82,21 @@ test("no hard-delete control exists for a Touchpoint either", () => {
   assert.doesNotMatch(CLIENT_DETAIL_PAGE, /Delete Touchpoint/);
   assert.doesNotMatch(CLIENT_DETAIL_PAGE, /deleteClientTouchpoint/);
 });
+
+// --- Layout widening -- desktop horizontal space use ------------------------
+
+test("the page uses the shared, widened Client CRM detail container -- no leftover narrow max-w-3xl literal", () => {
+  assert.match(CLIENT_DETAIL_PAGE, /CLIENT_CRM_DETAIL_CONTAINER_CLASS/);
+  assert.doesNotMatch(CLIENT_DETAIL_PAGE, /max-w-3xl/);
+});
+
+test("Overview/Client Information and Contacts use the shared two-column desktop grid", () => {
+  assert.match(CLIENT_DETAIL_PAGE, /CLIENT_OVERVIEW_CONTACTS_GRID_CLASS/);
+});
+
+test("Touchpoints and Engagements stay outside the two-column grid -- full width, unaffected by the layout change", () => {
+  const gridStart = CLIENT_DETAIL_PAGE.indexOf("CLIENT_OVERVIEW_CONTACTS_GRID_CLASS");
+  const touchpointsIndex = CLIENT_DETAIL_PAGE.indexOf(">Touchpoints<");
+  const engagementsIndex = CLIENT_DETAIL_PAGE.indexOf(">Engagements<");
+  assert.ok(gridStart > -1 && touchpointsIndex > gridStart && engagementsIndex > touchpointsIndex);
+});
