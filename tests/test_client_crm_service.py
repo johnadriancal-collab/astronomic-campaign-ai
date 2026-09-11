@@ -2234,6 +2234,136 @@ async def test_create_participant_defaults_to_guest_role(participant_service):
     assert participant.role == "guest"
 
 
+# --- Client CRM Stage 5A (2026-09-11) -- decline_origin, manual create/update ---
+
+
+async def test_create_declined_participant_with_guest_origin(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "declined", "decline_origin": "guest"}
+    )
+    assert participant.decline_origin == "guest"
+    assert participant.decline_origin_is_manual is True
+
+
+async def test_create_declined_participant_with_host_origin(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "declined", "decline_origin": "host"}
+    )
+    assert participant.decline_origin == "host"
+    assert participant.decline_origin_is_manual is True
+
+
+async def test_create_declined_participant_with_unknown_origin(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "declined", "decline_origin": "unknown"}
+    )
+    assert participant.decline_origin == "unknown"
+    assert participant.decline_origin_is_manual is True
+
+
+async def test_create_declined_participant_omitting_decline_origin_defaults_to_unknown(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "declined"}
+    )
+    assert participant.decline_origin == "unknown"
+    assert participant.decline_origin_is_manual is True
+
+
+async def test_create_non_declined_participant_normalizes_decline_origin_to_null(participant_service):
+    service, _activity_log, _store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "confirmed", "decline_origin": "guest"}
+    )
+    assert participant.decline_origin is None
+    assert participant.decline_origin_is_manual is False
+
+
+async def test_update_decline_origin_becomes_human_authoritative(participant_service):
+    """Explicitly PATCHing decline_origin while already declined is a
+    direct human assertion, even if the participant was previously
+    Luma-derived."""
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "declined", "decline_origin": "unknown"}
+    )
+    updated = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, participant.participant_id, {"decline_origin": "host"}
+    )
+    assert updated.decline_origin == "host"
+    assert updated.decline_origin_is_manual is True
+
+
+async def test_update_declined_omitting_decline_origin_preserves_existing_value(participant_service):
+    """Standard PATCH 'omitted field is left untouched' semantics -- a
+    patch that doesn't mention decline_origin, while the participant was
+    ALREADY declined, must not reset it."""
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "declined", "decline_origin": "guest"}
+    )
+    updated = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, participant.participant_id, {"role": "host"}
+    )
+    assert updated.decline_origin == "guest"
+    assert updated.decline_origin_is_manual is True
+
+
+async def test_update_transition_into_declined_without_origin_defaults_unknown_and_manual(participant_service):
+    """No prior declined-state value exists to preserve when this PATCH
+    itself is what causes the transition into declined -- normalizes to
+    Unknown, and counts as human-authoritative since an operator caused it."""
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "confirmed"}
+    )
+    updated = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, participant.participant_id, {"rsvp_status": "declined"}
+    )
+    assert updated.decline_origin == "unknown"
+    assert updated.decline_origin_is_manual is True
+
+
+async def test_update_clears_decline_origin_when_rsvp_moves_away_from_declined(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "declined", "decline_origin": "host"}
+    )
+    updated = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, participant.participant_id, {"rsvp_status": "confirmed"}
+    )
+    assert updated.decline_origin is None
+    assert updated.decline_origin_is_manual is False
+
+
+async def test_update_submitting_decline_origin_while_non_declined_is_ignored(participant_service):
+    """Core invariant enforced even if the operator submits a
+    decline_origin alongside a non-declined rsvp_status -- always null."""
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    participant = await service.create_engagement_participant(
+        client.client_id, engagement.engagement_id, {"first_name": "Jane", "rsvp_status": "confirmed"}
+    )
+    updated = await service.update_engagement_participant(
+        client.client_id, engagement.engagement_id, participant.participant_id,
+        {"rsvp_status": "invited", "decline_origin": "guest"},
+    )
+    assert updated.decline_origin is None
+    assert updated.decline_origin_is_manual is False
+
+
 # --- Duplicate prevention (resolved) ---------------------------------------
 
 

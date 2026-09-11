@@ -16,6 +16,7 @@ import pytest_asyncio
 
 from app.models.activity import ActivityCategory
 from app.models.client_crm import (
+    DeclineOrigin,
     Engagement,
     EngagementParticipant,
     EngagementStatus,
@@ -641,3 +642,176 @@ async def test_existing_manual_confirmed_participant_plus_luma_sync_does_not_dup
 
     page = await activity_log.list_events(category=ActivityCategory.CONTACTS)
     assert len([e for e in page.items if e.event_type == "contact.engagement_stage.advanced"]) == 1  # not 2
+
+
+# =====================================================================
+# Client CRM Stage 5A (2026-09-11) -- decline_origin
+# =====================================================================
+
+
+async def test_new_declined_luma_participant_stores_derived_decline_origin(service, stores):
+    await _seed(stores, engagement=_engagement(), contact=_contact())
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.DECLINED), derived_decline_origin=DeclineOrigin.GUEST
+    )
+    assert result.outcome == LumaParticipantSyncOutcome.CREATED
+    assert result.participant.rsvp_status == ParticipantRsvpStatus.DECLINED
+    assert result.participant.decline_origin == DeclineOrigin.GUEST
+    assert result.participant.decline_origin_is_manual is False
+
+
+async def test_new_non_declined_luma_participant_has_no_decline_origin(service, stores):
+    await _seed(stores, engagement=_engagement(), contact=_contact())
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.APPROVED), derived_decline_origin=None
+    )
+    assert result.participant.decline_origin is None
+    assert result.participant.decline_origin_is_manual is False
+
+
+async def test_declined_to_confirmed_clears_decline_origin(service, stores):
+    _e, participant_store, crm_contact_store, _al = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    existing = _participant(
+        rsvp_status=ParticipantRsvpStatus.DECLINED, decline_origin=DeclineOrigin.GUEST, decline_origin_is_manual=False
+    )
+    await participant_store.create(existing)
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.APPROVED), derived_decline_origin=None
+    )
+    assert result.participant.rsvp_status == ParticipantRsvpStatus.CONFIRMED
+    assert result.participant.decline_origin is None
+    assert result.participant.decline_origin_is_manual is False
+
+
+async def test_declined_to_invited_clears_decline_origin(service, stores):
+    _e, participant_store, crm_contact_store, _al = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    existing = _participant(
+        rsvp_status=ParticipantRsvpStatus.DECLINED, decline_origin=DeclineOrigin.HOST, decline_origin_is_manual=True
+    )
+    await participant_store.create(existing)
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.INVITED), derived_decline_origin=None
+    )
+    assert result.participant.rsvp_status == ParticipantRsvpStatus.INVITED
+    assert result.participant.decline_origin is None
+    assert result.participant.decline_origin_is_manual is False
+
+
+async def test_luma_sync_does_not_overwrite_human_authoritative_decline_origin_while_still_declined(service, stores):
+    """LOCKED: a human-asserted decline_origin (decline_origin_is_manual)
+    must survive an automatic Luma re-derivation as long as rsvp_status
+    stays DECLINED."""
+    _e, participant_store, crm_contact_store, _al = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    existing = _participant(
+        rsvp_status=ParticipantRsvpStatus.DECLINED, decline_origin=DeclineOrigin.HOST, decline_origin_is_manual=True
+    )
+    await participant_store.create(existing)
+
+    # A fresh Luma-observed transition landed on "still declined" (the rsvp
+    # itself isn't changing) but would, on its own, derive GUEST -- must be
+    # ignored because the existing origin is human-authoritative.
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.DECLINED), derived_decline_origin=DeclineOrigin.GUEST
+    )
+    assert result.outcome == LumaParticipantSyncOutcome.UNCHANGED
+    assert result.participant.decline_origin == DeclineOrigin.HOST
+    assert result.participant.decline_origin_is_manual is True
+
+
+async def test_luma_derived_origin_may_be_updated_by_a_later_luma_transition(service, stores):
+    """A Luma-derived (not manual) decline_origin CAN be re-derived by a
+    later, genuinely fresh Luma transition, even while rsvp_status stays
+    DECLINED throughout."""
+    _e, participant_store, crm_contact_store, _al = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    existing = _participant(
+        rsvp_status=ParticipantRsvpStatus.DECLINED, decline_origin=DeclineOrigin.UNKNOWN, decline_origin_is_manual=False
+    )
+    await participant_store.create(existing)
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.DECLINED), derived_decline_origin=DeclineOrigin.GUEST
+    )
+    assert result.outcome == LumaParticipantSyncOutcome.UPDATED
+    assert result.participant.decline_origin == DeclineOrigin.GUEST
+    assert result.participant.decline_origin_is_manual is False
+
+
+async def test_manual_participant_human_decline_origin_preserved_through_luma_sync(service, stores):
+    """Existing manual-participant-preservation architecture, extended to
+    decline_origin: a manually-created (and manually-declined) participant
+    must never have its human-asserted decline_origin silently overwritten
+    by an unrelated later Luma sync for the same registration."""
+    _e, participant_store, crm_contact_store, _al = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    manual_participant = EngagementParticipant(
+        participant_id="manual-1", engagement_id="e1", client_id="c1", crm_contact_id="contact-1",
+        first_name="Jane", role=ParticipantRole.HOST, rsvp_status=ParticipantRsvpStatus.DECLINED,
+        decline_origin=DeclineOrigin.HOST, decline_origin_is_manual=True,
+        source=ParticipantSource.MANUAL, created_at=NOW, updated_at=NOW,
+    )
+    await participant_store.create(manual_participant)
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.DECLINED), derived_decline_origin=DeclineOrigin.GUEST
+    )
+
+    all_participants = await participant_store.list_for_engagement("e1")
+    assert len(all_participants) == 1  # never duplicated
+    assert all_participants[0].source == ParticipantSource.MANUAL
+    assert all_participants[0].role == ParticipantRole.HOST  # never overwritten to guest
+    assert all_participants[0].decline_origin == DeclineOrigin.HOST  # human assertion preserved
+    assert all_participants[0].decline_origin_is_manual is True
+
+
+async def test_no_op_luma_sync_makes_no_save_or_activity(service, stores):
+    """A duplicate/no-op delivery (nothing actually changed) must never
+    save or log -- decline_origin logic must not manufacture a spurious
+    patch on its own."""
+    _e, participant_store, crm_contact_store, activity_log = stores
+    await crm_contact_store.create(_contact())
+    await service.engagement_store.create(_engagement())
+    existing = _participant(
+        rsvp_status=ParticipantRsvpStatus.DECLINED, decline_origin=DeclineOrigin.GUEST, decline_origin_is_manual=False,
+        title="Co-CEO", company="Hive ASMBLD",
+    )
+    await participant_store.create(existing)
+    before_updated_at = existing.updated_at
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.DECLINED), derived_decline_origin=None
+    )
+    assert result.outcome == LumaParticipantSyncOutcome.UNCHANGED
+    stored = await participant_store.get(existing.participant_id)
+    assert stored.updated_at == before_updated_at
+
+    page = await activity_log.list_events(category=ActivityCategory.LUMA)
+    assert [e for e in page.items if e.event_type == "luma.engagement_participant.updated"] == []
+
+
+@pytest.mark.parametrize("origin", [DeclineOrigin.GUEST, DeclineOrigin.HOST, DeclineOrigin.UNKNOWN])
+async def test_stage_3b_treats_every_decline_origin_as_non_positive(service, stores, origin):
+    """Stage 3B's positive-interest signal must remain entirely unaware of
+    decline_origin -- DECLINED is non-positive regardless of guest/host/
+    unknown, exactly as before this stage existed."""
+    _e, participant_store, crm_contact_store, _al = stores
+    await crm_contact_store.create(_contact(custom_fields={}))
+    await service.engagement_store.create(_engagement())
+
+    result = await service.sync_luma_registration_to_engagement_participant(
+        _registration(approval_status=LumaApprovalStatus.DECLINED), derived_decline_origin=origin
+    )
+    assert result.participant.decline_origin == origin
+
+    refreshed_contact = await crm_contact_store.get("contact-1")
+    assert (refreshed_contact.custom_fields or {}).get("engagement_stage") != "Interested"

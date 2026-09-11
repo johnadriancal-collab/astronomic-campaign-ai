@@ -1945,7 +1945,7 @@ async def test_participant_sync_exception_never_breaks_luma_registration_or_cont
     contract Stage 1H-B requires."""
 
     class _ExplodingSyncService:
-        async def sync_luma_registration_to_engagement_participant(self, registration):
+        async def sync_luma_registration_to_engagement_participant(self, registration, *, derived_decline_origin=None):
             raise RuntimeError("simulated participant sync failure")
 
     luma_service.participant_sync_service = _ExplodingSyncService()
@@ -1957,6 +1957,69 @@ async def test_participant_sync_exception_never_breaks_luma_registration_or_cont
     assert result.registration_is_new is True
 
 
+# =====================================================================
+# Client CRM Stage 5A (2026-09-11) -- decline_origin, wired end-to-end
+# =====================================================================
+
+
+async def test_observed_pending_approval_to_declined_transition_derives_host(luma_service_with_participant_sync):
+    """The real John Cal production case: registered (pending_approval),
+    then later declined -- must derive HOST via the actual stored
+    LumaRegistration transition, wired all the way through to the
+    resulting EngagementParticipant."""
+    from datetime import datetime, timezone
+
+    from app.models.client_crm import DeclineOrigin, Engagement, EngagementStatus, EngagementType
+
+    service, engagement_store, engagement_participant_store = luma_service_with_participant_sync
+    now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    await engagement_store.create(
+        Engagement(
+            engagement_id="e1", client_id="c1", title="Austin Donor Dinner", engagement_type=EngagementType.DINNER,
+            luma_event_id="evt-1", status=EngagementStatus.CONFIRMED, created_at=now, updated_at=now,
+        )
+    )
+
+    await service.process_guest_event(make_event(event_id="evt-1"), make_guest(approval_status="pending_approval"))
+    await service.process_guest_event(make_event(event_id="evt-1"), make_guest(approval_status="declined"))
+
+    participants = await engagement_participant_store.list_for_engagement("e1")
+    assert len(participants) == 1
+    assert participants[0].rsvp_status == "declined"
+    assert participants[0].decline_origin == DeclineOrigin.HOST
+    assert participants[0].decline_origin_is_manual is False
+
+
+async def test_first_seen_already_declined_with_invited_at_only_derives_guest(luma_service_with_participant_sync):
+    """The real Scott Brinkman production case: the very FIRST webhook
+    delivery AstroHub ever sees for this guest already reports
+    approval_status=declined, with invited_at set and registered_at null
+    -- must derive GUEST via the conservative first-seen rule."""
+    from datetime import datetime, timezone
+
+    from app.models.client_crm import DeclineOrigin, Engagement, EngagementStatus, EngagementType
+
+    service, engagement_store, engagement_participant_store = luma_service_with_participant_sync
+    now = datetime(2026, 9, 10, tzinfo=timezone.utc)
+    await engagement_store.create(
+        Engagement(
+            engagement_id="e1", client_id="c1", title="Austin Donor Dinner", engagement_type=EngagementType.DINNER,
+            luma_event_id="evt-1", status=EngagementStatus.CONFIRMED, created_at=now, updated_at=now,
+        )
+    )
+
+    await service.process_guest_event(
+        make_event(event_id="evt-1"),
+        make_guest(guest_id="gst-scott", approval_status="declined", invited_at="2026-09-04T18:15:57Z", registered_at=None),
+    )
+
+    participants = await engagement_participant_store.list_for_engagement("e1")
+    assert len(participants) == 1
+    assert participants[0].rsvp_status == "declined"
+    assert participants[0].decline_origin == DeclineOrigin.GUEST
+    assert participants[0].decline_origin_is_manual is False
+
+
 async def test_no_participant_sync_exception_ever_escapes_process_guest_event(luma_service):
     """Same forced failure as above, but the assertion is specifically
     that NO exception propagates out of process_guest_event() at all --
@@ -1966,7 +2029,7 @@ async def test_no_participant_sync_exception_ever_escapes_process_guest_event(lu
     sync)."""
 
     class _ExplodingSyncService:
-        async def sync_luma_registration_to_engagement_participant(self, registration):
+        async def sync_luma_registration_to_engagement_participant(self, registration, *, derived_decline_origin=None):
             raise RuntimeError("simulated participant sync failure")
 
     luma_service.participant_sync_service = _ExplodingSyncService()

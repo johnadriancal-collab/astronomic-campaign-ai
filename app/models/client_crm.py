@@ -487,6 +487,32 @@ class ParticipantRsvpStatus(str, Enum):
     DECLINED = "declined"
 
 
+class DeclineOrigin(str, Enum):
+    """Client CRM Stage 5A (2026-09-11). Deliberately provider-agnostic --
+    never named after Luma, on the field or the enum -- because a
+    Contacts-CRM-wide RSVP model must not be coupled to any one
+    registration provider; a manual/future-provider decline can set this
+    the exact same way.
+
+    Meaningful ONLY alongside EngagementParticipant.rsvp_status ==
+    ParticipantRsvpStatus.DECLINED -- see that field's own docstring for
+    the exact clearing/precedence rules. This does NOT change what
+    DECLINED itself means for any existing consumer (Stage 3B's
+    positive-interest signal, attendance counts, etc.) -- it only answers
+    a NEW, separate question ("who caused the decline"), never whether
+    someone is declined at all.
+
+    GUEST: the guest themselves declined/withdrew.
+    HOST: Astronomic/the event host declined or rejected the guest.
+    UNKNOWN: genuinely declined, but the available evidence (a Luma
+    transition or an operator's own PATCH) does not reliably establish
+    who caused it -- never guessed, never defaulted to GUEST or HOST."""
+
+    GUEST = "guest"
+    HOST = "host"
+    UNKNOWN = "unknown"
+
+
 class ParticipantAttendanceStatus(str, Enum):
     """CANCELLED here mirrors EngagementCloseout.cancelled_count's own
     concept: told us in advance they wouldn't attend. A pure walk-in is
@@ -573,7 +599,35 @@ class EngagementParticipant(BaseModel):
     Stage 1G never automatically updates EngagementCloseout's own
     manually-entered turnout counts based on participant records --
     participant-derived counts and the Closeout snapshot remain two
-    separate facts (see this stage's own investigation report)."""
+    separate facts (see this stage's own investigation report).
+
+    Stage 5A (2026-09-11) addendum -- `decline_origin` answers "who caused
+    this decline" (guest/host/unknown), completely separate from whether
+    someone is declined at all. INVARIANT: `decline_origin` is non-null
+    ONLY when `rsvp_status == ParticipantRsvpStatus.DECLINED` -- every
+    write path here (manual create/update in ClientCrmService, and Luma
+    sync in LumaEngagementParticipantSyncService) MUST clear it back to
+    None the moment rsvp_status becomes anything else (INVITED, CONFIRMED,
+    or null). `rsvp_status` itself keeps its exact current meaning for
+    every existing consumer (Stage 3B's positive-interest signal,
+    attendance/turnout counts, etc.) -- DECLINED is non-positive regardless
+    of guest/host/unknown, and this stage changes NONE of that.
+
+    `decline_origin_is_manual` is the smallest possible provenance marker
+    for this ONE field -- deliberately NOT the general
+    custom_fields["field_provenance"] dict CrmContact/luma_contact_enrichment.py
+    use (this model has no evolving custom_fields shape to hang that off
+    of, and a whole provenance system would be overkill for one field).
+    True means a human explicitly asserted the current decline_origin
+    (via ClientCrmService's manual create/update) -- Luma sync (see
+    LumaEngagementParticipantSyncService._build_update_patch) MUST NOT
+    overwrite decline_origin while this is True and rsvp_status is still
+    DECLINED. False means the current decline_origin (if any) is Luma-
+    derived and MAY be updated by a later Luma-observed transition. Both
+    fields reset together to (None, False) whenever rsvp_status leaves
+    DECLINED -- there is nothing left to "own" once the fact itself is
+    gone, so a future re-decline starts from a clean slate rather than
+    inheriting stale manual authority from an unrelated earlier decline."""
 
     participant_id: str
     engagement_id: str
@@ -589,6 +643,8 @@ class EngagementParticipant(BaseModel):
 
     role: ParticipantRole = ParticipantRole.GUEST
     rsvp_status: ParticipantRsvpStatus | None = None
+    decline_origin: DeclineOrigin | None = None
+    decline_origin_is_manual: bool = False
     attendance_status: ParticipantAttendanceStatus | None = None
     is_walk_in: bool = False
 

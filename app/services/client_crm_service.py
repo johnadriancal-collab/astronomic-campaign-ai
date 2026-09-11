@@ -60,12 +60,14 @@ from app.models.client_crm import (
     ClientTouchpoint,
     ContactEventHistoryEntry,
     ContactType,
+    DeclineOrigin,
     Engagement,
     EngagementCloseout,
     EngagementParticipant,
     EngagementParticipantView,
     EngagementStatus,
     EngagementType,
+    ParticipantRsvpStatus,
     ParticipantSource,
 )
 from app.models.crm import CrmContact
@@ -1063,6 +1065,69 @@ class ClientCrmService:
         return bool(first_name or last_name or email)
 
     @staticmethod
+    def _normalize_decline_origin_for_create(rsvp_status: Any, raw_decline_origin: Any) -> DeclineOrigin | None:
+        """Client CRM Stage 5A -- CREATE-time normalization only (see
+        _normalize_decline_origin_for_update for the PATCH-specific
+        preservation rule, which needs the participant's own prior state).
+        Core invariant enforced here: rsvp_status != declined always forces
+        None, regardless of what was submitted. When rsvp_status IS
+        declined, an operator-submitted value is used as-is; if omitted,
+        this defaults to UNKNOWN -- a brand-new participant has no prior
+        declined-state value to fall back to, so UNKNOWN is the only
+        sensible default (never guessed as GUEST or HOST)."""
+        if rsvp_status != ParticipantRsvpStatus.DECLINED.value:
+            return None
+        return DeclineOrigin(raw_decline_origin) if raw_decline_origin else DeclineOrigin.UNKNOWN
+
+    @staticmethod
+    def _normalize_decline_origin_for_update(
+        participant: EngagementParticipant, patch: dict[str, Any], new_rsvp_status: Any
+    ) -> tuple[DeclineOrigin | None, bool]:
+        """Client CRM Stage 5A PATCH semantics. Returns the
+        (decline_origin, decline_origin_is_manual) pair to merge into this
+        update -- always computed and always applied, so the invariant and
+        precedence rules hold on every single PATCH call, not just ones
+        that happen to mention decline_origin or rsvp_status.
+
+        - `new_rsvp_status` (the value AFTER this patch is applied) isn't
+          DECLINED: always (None, False) -- the core invariant, enforced
+          regardless of what the operator submitted or what was
+          previously stored.
+        - "decline_origin" key is explicitly present in `patch` (the raw,
+          un-merged patch dict -- even an explicit null counts as
+          present): the operator is directly asserting a value, which
+          always becomes human-authoritative (decline_origin_is_manual =
+          True). An explicit null while staying DECLINED is treated as an
+          explicit UNKNOWN assertion, not a silent no-op -- an operator
+          clearing the origin back to "we don't know" is still a real,
+          deliberate action.
+        - "decline_origin" key is ABSENT from `patch`, but `new_rsvp_status`
+          IS DECLINED -- two sub-cases, chosen to match this method's own
+          general "an omitted field is left untouched" PATCH convention
+          (see crm_contact_id/every snapshot field above) as closely as
+          the core invariant allows:
+            - `participant.rsvp_status` (the value BEFORE this patch) was
+              ALREADY DECLINED: there's a real existing value to preserve
+              -- leave (decline_origin, decline_origin_is_manual) exactly
+              as they already were, standard PATCH semantics.
+            - `participant.rsvp_status` was NOT already DECLINED (this
+              patch is what causes the transition INTO declined): there is
+              no prior declined-state value to preserve, so this
+              normalizes to UNKNOWN -- and because a human operator is the
+              one causing this transition via a manual PATCH, it counts as
+              human-authoritative (True), the same as if they'd typed
+              "Unknown" themselves; this protects it from being silently
+              re-derived by an unrelated, later Luma sync."""
+        if new_rsvp_status != ParticipantRsvpStatus.DECLINED.value:
+            return None, False
+        if "decline_origin" in patch:
+            raw = patch["decline_origin"]
+            return (DeclineOrigin(raw) if raw else DeclineOrigin.UNKNOWN), True
+        if participant.rsvp_status == ParticipantRsvpStatus.DECLINED:
+            return participant.decline_origin, participant.decline_origin_is_manual
+        return DeclineOrigin.UNKNOWN, True
+
+    @staticmethod
     def _participant_display_name(participant: EngagementParticipant) -> str:
         """Never falls back to email -- see this stage's own Activity Log
         privacy rule (no contact information in Activity Log metadata,
@@ -1195,6 +1260,9 @@ class ClientCrmService:
                     "instead, or provide identifying information."
                 )
 
+        rsvp_status = fields.get("rsvp_status")
+        decline_origin = self._normalize_decline_origin_for_create(rsvp_status, fields.get("decline_origin"))
+
         participant = EngagementParticipant(
             participant_id=str(uuid.uuid4()),
             engagement_id=engagement_id,
@@ -1206,7 +1274,9 @@ class ClientCrmService:
             title=title,
             company=company,
             role=fields.get("role") or "guest",
-            rsvp_status=fields.get("rsvp_status"),
+            rsvp_status=rsvp_status,
+            decline_origin=decline_origin,
+            decline_origin_is_manual=decline_origin is not None,
             attendance_status=fields.get("attendance_status"),
             is_walk_in=bool(fields.get("is_walk_in", False)),
             source=ParticipantSource.MANUAL,
@@ -1279,6 +1349,13 @@ class ClientCrmService:
                 merged_fields["company"] = crm_contact.company
             else:
                 merged_fields["crm_contact_id"] = new_crm_contact_id
+
+        new_rsvp_status = merged_fields.get("rsvp_status", participant.rsvp_status)
+        decline_origin, decline_origin_is_manual = self._normalize_decline_origin_for_update(
+            participant, patch, new_rsvp_status
+        )
+        merged_fields["decline_origin"] = decline_origin
+        merged_fields["decline_origin_is_manual"] = decline_origin_is_manual
 
         updated = participant.model_copy(update={**merged_fields, "updated_at": datetime.now(timezone.utc)})
 

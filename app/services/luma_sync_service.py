@@ -38,6 +38,7 @@ from loguru import logger
 from app.config import settings
 from app.luma.client import LumaClient
 from app.models.activity import ActivityCategory, ActivitySource
+from app.models.client_crm import DeclineOrigin
 from app.models.crm import (
     EXTERNAL_FIELD_NAMES,
     THESIS_FIELD_NAMES,
@@ -75,6 +76,7 @@ from app.services.luma_contact_enrichment import (
     resolve_contact_luma_fields,
     resolve_tier1_website,
 )
+from app.services.luma_decline_origin import derive_from_first_seen_declined, derive_from_observed_transition
 from app.services.luma_engagement_participant_sync_service import LumaEngagementParticipantSyncService
 
 # The only webhook event types Phase 1 processes -- event.*/calendar.*
@@ -655,7 +657,9 @@ class LumaSyncService:
         # None) -- see this class's own constructor docstring note.
         if self.participant_sync_service is not None:
             try:
-                await self.participant_sync_service.sync_luma_registration_to_engagement_participant(registration)
+                await self.participant_sync_service.sync_luma_registration_to_engagement_participant(
+                    registration, derived_decline_origin=self._derive_decline_origin(existing, registration)
+                )
             except Exception as e:  # noqa: BLE001 -- must never break Luma registration/Contact processing
                 logger.error(
                     f"Luma participant sync failed for guest {guest_id} (event {luma_event.luma_event_id}): "
@@ -746,6 +750,27 @@ class LumaSyncService:
             synced_at=now,
             updated_at=now,
         )
+
+    @staticmethod
+    def _derive_decline_origin(existing: LumaRegistration | None, registration: LumaRegistration) -> DeclineOrigin | None:
+        """Client CRM Stage 5A. Returns None whenever there is no NEW
+        decline fact for LumaEngagementParticipantSyncService to apply --
+        i.e. the new approval_status isn't declined at all, or it's
+        declined but nothing about this delivery actually changed that
+        (a duplicate/no-op delivery, or `existing` was already declined
+        too). This is deliberately computed HERE, not in
+        LumaEngagementParticipantSyncService -- `existing` (the PRE-
+        overwrite LumaRegistration) only still exists as a local variable
+        in THIS method, since LumaRegistrationStore.save() upserts in
+        place with no history table; by the time the participant sync
+        service runs, the store itself has already been overwritten."""
+        if registration.approval_status != LumaApprovalStatus.DECLINED:
+            return None
+        if existing is not None:
+            if existing.approval_status == registration.approval_status:
+                return None  # no transition happened -- nothing new to apply
+            return derive_from_observed_transition(existing.approval_status)
+        return derive_from_first_seen_declined(registration.invited_at, registration.registered_at)
 
     async def _record_activity(
         self, luma_event: LumaEvent, existing: LumaRegistration | None, result: LumaProcessResult

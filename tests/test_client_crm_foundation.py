@@ -34,6 +34,7 @@ from app.models.client_crm import (
     ClientStatus,
     ClientTouchpoint,
     ContactType,
+    DeclineOrigin,
     DinnerType,
     Engagement,
     EngagementCloseout,
@@ -411,10 +412,39 @@ def test_engagement_participant_defaults():
     assert participant.crm_contact_id is None
     assert participant.role == ParticipantRole.GUEST
     assert participant.rsvp_status is None
+    assert participant.decline_origin is None
+    assert participant.decline_origin_is_manual is False
     assert participant.attendance_status is None
     assert participant.is_walk_in is False
     assert participant.source == ParticipantSource.MANUAL
     assert participant.archived is False
+
+
+def test_engagement_participant_decline_origin_json_round_trip():
+    participant = _participant(rsvp_status=ParticipantRsvpStatus.DECLINED, decline_origin=DeclineOrigin.HOST, decline_origin_is_manual=True)
+    restored = EngagementParticipant.model_validate_json(participant.model_dump_json())
+    assert restored == participant
+    assert restored.decline_origin == DeclineOrigin.HOST
+    assert restored.decline_origin_is_manual is True
+
+
+def test_engagement_participant_old_shape_json_without_decline_origin_loads_as_null():
+    """Client CRM Stage 5A -- a participant row persisted BEFORE this
+    stage existed has no decline_origin/decline_origin_is_manual keys in
+    its stored JSON at all. Must load safely as (None, False), never
+    raise, matching this model's JSON-blob-storage convention (see
+    crm_contact_store.py's own note on evolving-shape aggregates)."""
+    old_shape_json = (
+        '{"participant_id": "p1", "engagement_id": "e1", "client_id": "c1", "crm_contact_id": null, '
+        '"first_name": "Jane", "last_name": null, "email": null, "title": null, "company": null, '
+        '"role": "guest", "rsvp_status": "declined", "attendance_status": null, "is_walk_in": false, '
+        '"source": "manual", "created_at": "2026-09-10T12:00:00+00:00", "updated_at": "2026-09-10T12:00:00+00:00", '
+        '"archived": false}'
+    )
+    restored = EngagementParticipant.model_validate_json(old_shape_json)
+    assert restored.rsvp_status == ParticipantRsvpStatus.DECLINED
+    assert restored.decline_origin is None
+    assert restored.decline_origin_is_manual is False
 
 
 def test_engagement_participant_walk_in_and_attended_is_a_valid_combination():

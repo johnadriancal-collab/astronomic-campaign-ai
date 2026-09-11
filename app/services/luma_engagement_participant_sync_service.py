@@ -41,6 +41,7 @@ from loguru import logger
 
 from app.models.activity import ActivityCategory, ActivitySource
 from app.models.client_crm import (
+    DeclineOrigin,
     Engagement,
     EngagementParticipant,
     EngagementStatus,
@@ -133,7 +134,7 @@ class LumaEngagementParticipantSyncService:
         self.contact_engagement_signal_service = contact_engagement_signal_service
 
     async def sync_luma_registration_to_engagement_participant(
-        self, registration: LumaRegistration
+        self, registration: LumaRegistration, *, derived_decline_origin: DeclineOrigin | None = None
     ) -> LumaParticipantSyncResult:
         """The one entry point. Every eligibility rule below is a plain
         NO-OP (never an exception) -- an unlinked event, an archived/
@@ -154,7 +155,15 @@ class LumaEngagementParticipantSyncService:
         5. registration.crm_contact_id must be set AND resolve to a real,
            still-existing CrmContact -- else NO_CONTACT. Never creates an
            EngagementParticipant without a resolved canonical Contact.
-        """
+
+        `derived_decline_origin` (Client CRM Stage 5A) -- already computed
+        by the ONE caller (LumaSyncService._derive_decline_origin(), which
+        alone still holds the pre-overwrite LumaRegistration state this
+        needs); None means "no new decline fact from this delivery" (the
+        new approval_status isn't declined, or nothing about it actually
+        changed). This module never re-derives it itself -- see
+        app/services/luma_decline_origin.py's own docstring for why that
+        logic lives there and only there."""
         engagement = await self.engagement_store.get_by_luma_event_id(registration.luma_event_id)
         if engagement is None:
             return LumaParticipantSyncResult(outcome=LumaParticipantSyncOutcome.NO_ENGAGEMENT_LINKED)
@@ -171,8 +180,8 @@ class LumaEngagementParticipantSyncService:
 
         existing = await self._find_existing_participant(engagement.engagement_id, contact.crm_contact_id)
         if existing is not None:
-            return await self._sync_against_existing(engagement, existing, contact, registration)
-        return await self._create_participant(engagement, contact, registration)
+            return await self._sync_against_existing(engagement, existing, contact, registration, derived_decline_origin)
+        return await self._create_participant(engagement, contact, registration, derived_decline_origin)
 
     async def _find_existing_participant(self, engagement_id: str, crm_contact_id: str) -> EngagementParticipant | None:
         """(engagement_id, crm_contact_id) is the canonical participant
@@ -187,9 +196,14 @@ class LumaEngagementParticipantSyncService:
         return next((p for p in participants if p.crm_contact_id == crm_contact_id), None)
 
     async def _create_participant(
-        self, engagement: Engagement, contact: CrmContact, registration: LumaRegistration
+        self,
+        engagement: Engagement,
+        contact: CrmContact,
+        registration: LumaRegistration,
+        derived_decline_origin: DeclineOrigin | None,
     ) -> LumaParticipantSyncResult:
         now = datetime.now(timezone.utc)
+        rsvp_status = _map_rsvp_status(registration.approval_status)
         participant = EngagementParticipant(
             participant_id=str(uuid.uuid4()),
             engagement_id=engagement.engagement_id,
@@ -201,7 +215,13 @@ class LumaEngagementParticipantSyncService:
             title=contact.title,
             company=contact.company,
             role=ParticipantRole.GUEST,
-            rsvp_status=_map_rsvp_status(registration.approval_status),
+            rsvp_status=rsvp_status,
+            # Stage 5A: decline_origin is meaningful ONLY alongside DECLINED
+            # -- a brand-new participant has no prior human assertion to
+            # protect, so this is always the fresh Luma-derived value (or
+            # None if rsvp_status isn't DECLINED at all).
+            decline_origin=derived_decline_origin if rsvp_status == ParticipantRsvpStatus.DECLINED else None,
+            decline_origin_is_manual=False,
             is_walk_in=False,
             source=ParticipantSource.LUMA,
             created_at=now,
@@ -220,7 +240,7 @@ class LumaEngagementParticipantSyncService:
             refreshed = await self._find_existing_participant(engagement.engagement_id, contact.crm_contact_id)
             if refreshed is None:
                 raise  # genuinely unexpected -- the row the constraint just rejected against should be findable
-            return await self._sync_against_existing(engagement, refreshed, contact, registration)
+            return await self._sync_against_existing(engagement, refreshed, contact, registration, derived_decline_origin)
 
         await self._record_activity(
             event_type="luma.engagement_participant.created",
@@ -232,7 +252,12 @@ class LumaEngagementParticipantSyncService:
         return LumaParticipantSyncResult(outcome=LumaParticipantSyncOutcome.CREATED, participant=participant)
 
     async def _sync_against_existing(
-        self, engagement: Engagement, existing: EngagementParticipant, contact: CrmContact, registration: LumaRegistration
+        self,
+        engagement: Engagement,
+        existing: EngagementParticipant,
+        contact: CrmContact,
+        registration: LumaRegistration,
+        derived_decline_origin: DeclineOrigin | None,
     ) -> LumaParticipantSyncResult:
         """Preserves EVERYTHING about an existing participant except the
         narrow set of Luma-owned fields below -- role, source, is_walk_in,
@@ -240,7 +265,13 @@ class LumaEngagementParticipantSyncService:
         never touched, regardless of whether this participant was created
         MANUALLY or by an earlier Luma sync. A MANUAL participant is never
         converted to LUMA; a human-selected role (Host/Client/Speaker/
-        Panelist/etc.) is never overwritten to Guest."""
+        Panelist/etc.) is never overwritten to Guest. Stage 5A:
+        decline_origin joins this same "narrow set of Luma-owned fields"
+        list, EXCEPT it has its own additional guard -- see
+        _build_update_patch()'s own docstring -- a human-asserted
+        decline_origin (existing.decline_origin_is_manual) is never
+        overwritten by an automatic Luma derivation, on a manually-created
+        participant or a Luma-created one alike."""
         if existing.archived:
             logger.info(
                 f"Luma participant sync: participant {existing.participant_id} for Engagement "
@@ -248,7 +279,7 @@ class LumaEngagementParticipantSyncService:
             )
             return LumaParticipantSyncResult(outcome=LumaParticipantSyncOutcome.ARCHIVED_PARTICIPANT_SKIPPED, participant=existing)
 
-        patch = self._build_update_patch(existing, contact, registration)
+        patch = self._build_update_patch(existing, contact, registration, derived_decline_origin)
         if not patch:
             return LumaParticipantSyncResult(outcome=LumaParticipantSyncOutcome.UNCHANGED, participant=existing)
 
@@ -280,7 +311,10 @@ class LumaEngagementParticipantSyncService:
 
     @staticmethod
     def _build_update_patch(
-        existing: EngagementParticipant, contact: CrmContact, registration: LumaRegistration
+        existing: EngagementParticipant,
+        contact: CrmContact,
+        registration: LumaRegistration,
+        derived_decline_origin: DeclineOrigin | None,
     ) -> dict[str, Any]:
         """Snapshot fields: fill-only-if-blank, never overwrite a nonblank
         human-entered value. rsvp_status: only ever set when Luma's
@@ -289,7 +323,26 @@ class LumaEngagementParticipantSyncService:
         appear in this patch at all, leaving rsvp_status completely
         untouched for those (Section G's own locked mapping). Never
         includes role/source/is_walk_in/attendance_status/archived --
-        those are simply never candidates here."""
+        those are simply never candidates here.
+
+        Stage 5A decline_origin/decline_origin_is_manual:
+        - rsvp_status is CHANGING to something other than DECLINED (or was
+          never DECLINED) -- both are cleared (None, False), per the
+          model's own core invariant.
+        - rsvp_status is CHANGING to DECLINED -- both are set from
+          `derived_decline_origin` (always a real value here, never None,
+          since the caller only computes a decline fact when the incoming
+          approval_status actually IS declined) and decline_origin_is_manual
+          becomes False -- an automatic Luma derivation is never "manual."
+        - rsvp_status is NOT changing (already DECLINED, still DECLINED) --
+          decline_origin is left alone UNLESS `derived_decline_origin` is
+          non-None (a genuinely fresh transition was observed even though
+          the mapped rsvp_status happens to be unchanged -- see
+          LumaSyncService._derive_decline_origin()'s own docstring for when
+          that can happen) AND the existing value isn't human-asserted
+          (`existing.decline_origin_is_manual`) AND it would actually
+          change something -- never touches it otherwise, so a routine
+          duplicate/no-op delivery never manufactures a patch."""
         patch: dict[str, Any] = {}
         for field_name in _SNAPSHOT_FIELDS:
             if not getattr(existing, field_name) and getattr(contact, field_name):
@@ -298,6 +351,20 @@ class LumaEngagementParticipantSyncService:
         mapped_rsvp = _map_rsvp_status(registration.approval_status)
         if mapped_rsvp is not None and existing.rsvp_status != mapped_rsvp:
             patch["rsvp_status"] = mapped_rsvp
+            if mapped_rsvp == ParticipantRsvpStatus.DECLINED:
+                patch["decline_origin"] = derived_decline_origin
+                patch["decline_origin_is_manual"] = False
+            else:
+                patch["decline_origin"] = None
+                patch["decline_origin_is_manual"] = False
+        elif (
+            mapped_rsvp == ParticipantRsvpStatus.DECLINED
+            and existing.rsvp_status == ParticipantRsvpStatus.DECLINED
+            and derived_decline_origin is not None
+            and not existing.decline_origin_is_manual
+            and existing.decline_origin != derived_decline_origin
+        ):
+            patch["decline_origin"] = derived_decline_origin
 
         return patch
 
