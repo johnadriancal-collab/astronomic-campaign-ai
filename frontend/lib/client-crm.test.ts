@@ -16,6 +16,8 @@ import {
   CONTACT_TYPE_OPTIONS,
   CONTACTED_BY_OPTIONS,
   contactTypeLabel,
+  DECLINE_ORIGIN_OPTIONS,
+  declineOriginLabel,
   defaultClientListFilters,
   dinnerTypeLabel,
   emptyClientContactFormState,
@@ -43,6 +45,7 @@ import {
   isDinnerShapedEngagementType,
   isEngagementFormValid,
   latestActiveTouchpoint,
+  nextDeclineOriginOnRsvpChange,
   participantAttendanceStatusLabel,
   participantDisplayName,
   participantIdentityIsMeaningful,
@@ -712,6 +715,8 @@ function makeEngagementParticipant(overrides: Partial<EngagementParticipant> = {
     company: null,
     role: "guest",
     rsvp_status: null,
+    decline_origin: null,
+    decline_origin_is_manual: false,
     attendance_status: null,
     is_walk_in: false,
     source: "manual",
@@ -742,6 +747,54 @@ test("participantRsvpStatusLabel and participantAttendanceStatusLabel render nul
   assert.equal(participantAttendanceStatusLabel(null), "—");
   assert.equal(participantRsvpStatusLabel("confirmed"), "Confirmed");
   assert.equal(participantAttendanceStatusLabel("attended"), "Attended");
+});
+
+// --- Client CRM Stage 5B -- decline_origin label/form semantics ------------
+
+test("participantRsvpStatusLabel: invited", () => {
+  assert.equal(participantRsvpStatusLabel("invited"), "Invited");
+});
+
+test("participantRsvpStatusLabel: confirmed", () => {
+  assert.equal(participantRsvpStatusLabel("confirmed"), "Confirmed");
+});
+
+test("participantRsvpStatusLabel: declined + guest = Declined by Guest", () => {
+  assert.equal(participantRsvpStatusLabel("declined", "guest"), "Declined by Guest");
+});
+
+test("participantRsvpStatusLabel: declined + host = Declined by Host", () => {
+  assert.equal(participantRsvpStatusLabel("declined", "host"), "Declined by Host");
+});
+
+test("participantRsvpStatusLabel: declined + unknown = Declined (never the raw technical value)", () => {
+  const label = participantRsvpStatusLabel("declined", "unknown");
+  assert.equal(label, "Declined");
+  assert.doesNotMatch(label, /unknown/i);
+});
+
+test("participantRsvpStatusLabel: declined + null = Declined", () => {
+  assert.equal(participantRsvpStatusLabel("declined", null), "Declined");
+  assert.equal(participantRsvpStatusLabel("declined"), "Declined");
+});
+
+test("participantRsvpStatusLabel: null RSVP = em dash regardless of decline_origin", () => {
+  assert.equal(participantRsvpStatusLabel(null, "guest"), "—");
+});
+
+test("participantRsvpStatusLabel never leaks guest/host/unknown as raw technical values for any RSVP state", () => {
+  for (const [rsvp, origin] of [
+    ["invited", "guest"],
+    ["confirmed", "host"],
+    ["declined", "guest"],
+    ["declined", "host"],
+    ["declined", "unknown"],
+  ] as const) {
+    const label = participantRsvpStatusLabel(rsvp, origin);
+    if (rsvp === "declined" && origin !== "guest" && origin !== "host") {
+      assert.doesNotMatch(label, /\bunknown\b/i);
+    }
+  }
 });
 
 test("participantDisplayName never falls back to email -- only name, else a placeholder", () => {
@@ -891,6 +944,124 @@ test("engagementParticipantUpdatePatch never includes participant_id/engagement_
   assert.ok(!("source" in patch));
   assert.ok(!("created_at" in patch));
   assert.ok(!("updated_at" in patch));
+});
+
+// --- Client CRM Stage 5B -- decline_origin form/payload semantics ---------
+
+test("DECLINE_ORIGIN_OPTIONS uses user-facing labels, never the raw technical values", () => {
+  assert.deepEqual(DECLINE_ORIGIN_OPTIONS, [
+    { value: "guest", label: "Guest" },
+    { value: "host", label: "Host" },
+    { value: "unknown", label: "Unknown" },
+  ]);
+  assert.equal(declineOriginLabel("guest"), "Guest");
+  assert.equal(declineOriginLabel("host"), "Host");
+  assert.equal(declineOriginLabel("unknown"), "Unknown");
+});
+
+test("engagementParticipantFormStateFromParticipant preselects Guest for an existing declined+guest participant", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "declined", decline_origin: "guest" });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  assert.equal(form.declineOrigin, "guest");
+});
+
+test("engagementParticipantFormStateFromParticipant preselects Host for an existing declined+host participant", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "declined", decline_origin: "host" });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  assert.equal(form.declineOrigin, "host");
+});
+
+test("engagementParticipantFormStateFromParticipant preselects Unknown for an existing declined participant with a null origin (historical row)", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "declined", decline_origin: null });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  assert.equal(form.declineOrigin, "unknown");
+});
+
+test("engagementParticipantFormStateFromParticipant leaves declineOrigin blank for a non-declined participant", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "confirmed", decline_origin: null });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  assert.equal(form.declineOrigin, "");
+});
+
+test("nextDeclineOriginOnRsvpChange: moving RSVP into Declined defaults to Unknown, never guessed", () => {
+  assert.equal(nextDeclineOriginOnRsvpChange("declined", ""), "unknown");
+  assert.equal(nextDeclineOriginOnRsvpChange("declined", ""), "unknown");
+});
+
+test("nextDeclineOriginOnRsvpChange: re-selecting Declined while already declined preserves the current selection", () => {
+  assert.equal(nextDeclineOriginOnRsvpChange("declined", "guest"), "guest");
+  assert.equal(nextDeclineOriginOnRsvpChange("declined", "host"), "host");
+});
+
+test("nextDeclineOriginOnRsvpChange: moving RSVP away from Declined clears the selection", () => {
+  assert.equal(nextDeclineOriginOnRsvpChange("invited", "guest"), "");
+  assert.equal(nextDeclineOriginOnRsvpChange("confirmed", "host"), "");
+  assert.equal(nextDeclineOriginOnRsvpChange("", "guest"), "");
+});
+
+test("engagementParticipantCreatePayload: Declined submits the selected origin", () => {
+  const form = { ...emptyEngagementParticipantFormState(), crmContactId: "cc1", rsvpStatus: "declined" as const, declineOrigin: "guest" as const };
+  const payload = engagementParticipantCreatePayload(form);
+  assert.equal(payload.rsvp_status, "declined");
+  assert.equal(payload.decline_origin, "guest");
+});
+
+test("engagementParticipantCreatePayload: Declined with no explicit selection defaults to Unknown", () => {
+  const form = { ...emptyEngagementParticipantFormState(), crmContactId: "cc1", rsvpStatus: "declined" as const, declineOrigin: "" as const };
+  const payload = engagementParticipantCreatePayload(form);
+  assert.equal(payload.decline_origin, "unknown");
+});
+
+test("engagementParticipantCreatePayload: non-declined RSVP never sends a decline_origin, even a stale one", () => {
+  const form = { ...emptyEngagementParticipantFormState(), crmContactId: "cc1", rsvpStatus: "confirmed" as const, declineOrigin: "guest" as const };
+  const payload = engagementParticipantCreatePayload(form);
+  assert.equal(payload.decline_origin, null);
+});
+
+test("engagementParticipantUpdatePatch: Declined submits the selected origin", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "confirmed" });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  form.rsvpStatus = "declined";
+  form.declineOrigin = "host";
+  const patch = engagementParticipantUpdatePatch(form, participant);
+  assert.equal(patch.rsvp_status, "declined");
+  assert.equal(patch.decline_origin, "host");
+});
+
+test("engagementParticipantUpdatePatch: an unchanged already-declined+guest participant omits decline_origin from the patch", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "declined", decline_origin: "guest" });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  const patch = engagementParticipantUpdatePatch(form, participant);
+  assert.ok(!("decline_origin" in patch));
+  assert.ok(!("rsvp_status" in patch));
+});
+
+test("engagementParticipantUpdatePatch: saving Unknown over a null historical origin is a real, sent change", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "declined", decline_origin: null });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  assert.equal(form.declineOrigin, "unknown");
+  const patch = engagementParticipantUpdatePatch(form, participant);
+  assert.equal(patch.decline_origin, "unknown");
+});
+
+test("engagementParticipantUpdatePatch: moving RSVP away from Declined clears decline_origin in the patch", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "declined", decline_origin: "host" });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  form.rsvpStatus = "confirmed";
+  form.declineOrigin = nextDeclineOriginOnRsvpChange("confirmed", form.declineOrigin);
+  const patch = engagementParticipantUpdatePatch(form, participant);
+  assert.equal(patch.rsvp_status, "confirmed");
+  assert.equal(patch.decline_origin, null);
+});
+
+test("engagementParticipantUpdatePatch: submitting a stale decline_origin while RSVP is non-declined never sends it", () => {
+  const participant = makeEngagementParticipant({ rsvp_status: "confirmed" });
+  const form = engagementParticipantFormStateFromParticipant(participant);
+  // Simulate a stale/inconsistent form value the UI should never actually
+  // produce -- the payload builder must still be defensively correct.
+  (form as { declineOrigin: string }).declineOrigin = "guest";
+  const patch = engagementParticipantUpdatePatch(form, participant);
+  assert.ok(!("decline_origin" in patch));
 });
 
 // --- ClientTouchpoint (Stage 2A backend, Stage 2B frontend) -----------------

@@ -19,6 +19,7 @@ import type {
   ClientTouchpointUpdateInput,
   ClientUpdateInput,
   ContactType,
+  DeclineOrigin,
   DinnerType,
   Engagement,
   EngagementCloseout,
@@ -737,9 +738,47 @@ export const PARTICIPANT_RSVP_STATUS_OPTIONS: { value: ParticipantRsvpStatus; la
   { value: "declined", label: "Declined" },
 ];
 
-export function participantRsvpStatusLabel(value: ParticipantRsvpStatus | null): string {
-  if (value === null) return "—";
-  return PARTICIPANT_RSVP_STATUS_OPTIONS.find((o) => o.value === value)?.label ?? value;
+/** Client CRM Stage 5B. User-facing labels ONLY -- "guest"/"host"/"unknown"
+ * must never leak into the UI as raw technical values; see DeclineOrigin's
+ * own doc comment in lib/api.ts. Used by the Edit/Create Participant
+ * modal's Decline Origin selector. */
+export const DECLINE_ORIGIN_OPTIONS: { value: DeclineOrigin; label: string }[] = [
+  { value: "guest", label: "Guest" },
+  { value: "host", label: "Host" },
+  { value: "unknown", label: "Unknown" },
+];
+
+export function declineOriginLabel(value: DeclineOrigin): string {
+  return DECLINE_ORIGIN_OPTIONS.find((o) => o.value === value)?.label ?? value;
+}
+
+/** THE one place an EngagementParticipant's RSVP ever becomes user-facing
+ * text -- Client CRM Stage 5B, reused by both the Engagement Participants
+ * table and (Stage 5C, later) Contact Event History, so those two screens
+ * can never disagree about what a given (rsvp_status, decline_origin) pair
+ * means. `declineOrigin` is only ever consulted when `rsvpStatus` is
+ * "declined" -- for every other value (including null) it's ignored
+ * entirely, matching the model's own invariant that decline_origin is
+ * meaningless outside the declined state.
+ *
+ *   invited            -> "Invited"
+ *   confirmed          -> "Confirmed"
+ *   declined + guest   -> "Declined by Guest"
+ *   declined + host    -> "Declined by Host"
+ *   declined + unknown -> "Declined"
+ *   declined + null    -> "Declined"
+ *   null               -> "—" */
+export function participantRsvpStatusLabel(
+  rsvpStatus: ParticipantRsvpStatus | null,
+  declineOrigin?: DeclineOrigin | null
+): string {
+  if (rsvpStatus === null) return "—";
+  if (rsvpStatus === "declined") {
+    if (declineOrigin === "guest") return "Declined by Guest";
+    if (declineOrigin === "host") return "Declined by Host";
+    return "Declined"; // unknown or null -- never shown as a raw technical value
+  }
+  return PARTICIPANT_RSVP_STATUS_OPTIONS.find((o) => o.value === rsvpStatus)?.label ?? rsvpStatus;
 }
 
 export const PARTICIPANT_ATTENDANCE_STATUS_OPTIONS: { value: ParticipantAttendanceStatus; label: string }[] = [
@@ -789,8 +828,31 @@ export interface EngagementParticipantFormState {
   company: string;
   role: ParticipantRole;
   rsvpStatus: ParticipantRsvpStatus | "";
+  /** Only ever meaningful while rsvpStatus === "declined" -- see
+   * nextDeclineOriginOnRsvpChange, which is what keeps this in sync
+   * whenever the RSVP field itself changes. "" means "no selection yet",
+   * distinct from the DeclineOrigin value "unknown". */
+  declineOrigin: DeclineOrigin | "";
   attendanceStatus: ParticipantAttendanceStatus | "";
   isWalkIn: boolean;
+}
+
+/** Client CRM Stage 5B. Call this whenever the RSVP field changes (both
+ * the Edit and Create paths, same one modal) to keep declineOrigin in
+ * sync with the core invariant: non-null only while declined.
+ *   - Moving TO declined: default to "unknown" -- NEVER guess Guest or
+ *     Host from a manual edit; that requires an explicit operator choice
+ *     (see DECLINE_ORIGIN_OPTIONS). Already having a value (re-selecting
+ *     "declined" while already declined) leaves it untouched.
+ *   - Moving AWAY from declined: always clears to "" -- the backend also
+ *     enforces this, but the form should never let the UI show a stale
+ *     Decline Origin selection for a non-declined participant. */
+export function nextDeclineOriginOnRsvpChange(
+  newRsvpStatus: ParticipantRsvpStatus | "",
+  currentDeclineOrigin: DeclineOrigin | ""
+): DeclineOrigin | "" {
+  if (newRsvpStatus !== "declined") return "";
+  return currentDeclineOrigin || "unknown";
 }
 
 export function emptyEngagementParticipantFormState(): EngagementParticipantFormState {
@@ -803,6 +865,7 @@ export function emptyEngagementParticipantFormState(): EngagementParticipantForm
     company: "",
     role: "guest",
     rsvpStatus: "",
+    declineOrigin: "",
     attendanceStatus: "",
     isWalkIn: false,
   };
@@ -818,6 +881,10 @@ export function engagementParticipantFormStateFromParticipant(participant: Engag
     company: participant.company ?? "",
     role: participant.role,
     rsvpStatus: participant.rsvp_status ?? "",
+    // Stage 5B: an existing declined participant with no known origin
+    // (historical rows) preselects Unknown, never blank -- see this
+    // stage's own product decision on that exact case.
+    declineOrigin: participant.rsvp_status === "declined" ? participant.decline_origin ?? "unknown" : "",
     attendanceStatus: participant.attendance_status ?? "",
     isWalkIn: participant.is_walk_in,
   };
@@ -833,6 +900,10 @@ export function engagementParticipantCreatePayload(form: EngagementParticipantFo
   const base: EngagementParticipantCreateInput = {
     role: form.role,
     rsvp_status: form.rsvpStatus || null,
+    // Stage 5B: gated on rsvpStatus itself, not just form.declineOrigin's
+    // own value -- defensively correct even if some future change ever
+    // left declineOrigin out of sync with rsvpStatus.
+    decline_origin: form.rsvpStatus === "declined" ? form.declineOrigin || "unknown" : null,
     attendance_status: form.attendanceStatus || null,
     is_walk_in: form.isWalkIn,
   };
@@ -882,6 +953,11 @@ export function engagementParticipantUpdatePatch(
   if (form.role !== original.role) patch.role = form.role;
   const rsvpStatus = form.rsvpStatus || null;
   if (rsvpStatus !== original.rsvp_status) patch.rsvp_status = rsvpStatus;
+  // Stage 5B: same diff-only convention as every other field here. Gated
+  // on rsvpStatus (not just form.declineOrigin) so a transition away from
+  // declined always diffs to null even if the form state somehow lagged.
+  const declineOrigin = form.rsvpStatus === "declined" ? form.declineOrigin || "unknown" : null;
+  if (declineOrigin !== original.decline_origin) patch.decline_origin = declineOrigin;
   const attendanceStatus = form.attendanceStatus || null;
   if (attendanceStatus !== original.attendance_status) patch.attendance_status = attendanceStatus;
   if (form.isWalkIn !== original.is_walk_in) patch.is_walk_in = form.isWalkIn;

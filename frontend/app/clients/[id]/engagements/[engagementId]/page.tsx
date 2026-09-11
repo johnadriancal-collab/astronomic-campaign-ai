@@ -650,7 +650,9 @@ export default function EngagementDetailPage() {
                         <td className="px-3 py-2.5 text-muted-foreground">{participant.resolved_title || "—"}</td>
                         <td className="px-3 py-2.5 text-muted-foreground">{participant.resolved_company || "—"}</td>
                         <td className="px-3 py-2.5 text-muted-foreground">{participantRoleLabel(participant.role)}</td>
-                        <td className="px-3 py-2.5 text-muted-foreground">{participantRsvpStatusLabel(participant.rsvp_status)}</td>
+                        <td className="px-3 py-2.5 text-muted-foreground">
+                          {participantRsvpStatusLabel(participant.rsvp_status, participant.decline_origin)}
+                        </td>
                         <td className="px-3 py-2.5 text-muted-foreground">
                           {participantAttendanceStatusLabel(participant.attendance_status)}
                         </td>

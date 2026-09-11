@@ -18,10 +18,12 @@ import {
 import { formatApiErrorMessage } from "@/lib/add-prospects-flow";
 import { formatContactName, formatContactTitleCompany } from "@/lib/contact-results-view";
 import {
+  DECLINE_ORIGIN_OPTIONS,
   emptyEngagementParticipantFormState,
   engagementParticipantCreatePayload,
   engagementParticipantFormStateFromParticipant,
   engagementParticipantUpdatePatch,
+  nextDeclineOriginOnRsvpChange,
   participantIdentityIsMeaningful,
   PARTICIPANT_ATTENDANCE_STATUS_OPTIONS,
   PARTICIPANT_ROLE_OPTIONS,
@@ -248,7 +250,10 @@ export function EngagementParticipantFormModal({
               <label className="text-xs font-medium text-muted-foreground">RSVP</label>
               <select
                 value={form.rsvpStatus}
-                onChange={(e) => update({ rsvpStatus: e.target.value as EngagementParticipantFormState["rsvpStatus"] })}
+                onChange={(e) => {
+                  const rsvpStatus = e.target.value as EngagementParticipantFormState["rsvpStatus"];
+                  update({ rsvpStatus, declineOrigin: nextDeclineOriginOnRsvpChange(rsvpStatus, form.declineOrigin) });
+                }}
                 disabled={saving}
                 className={selectClassName}
               >
@@ -277,6 +282,24 @@ export function EngagementParticipantFormModal({
               </select>
             </div>
           </div>
+
+          {form.rsvpStatus === "declined" && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-medium text-muted-foreground">Decline Origin</label>
+              <select
+                value={form.declineOrigin}
+                onChange={(e) => update({ declineOrigin: e.target.value as EngagementParticipantFormState["declineOrigin"] })}
+                disabled={saving}
+                className={selectClassName}
+              >
+                {DECLINE_ORIGIN_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
         </div>
 
         <DialogFooter>

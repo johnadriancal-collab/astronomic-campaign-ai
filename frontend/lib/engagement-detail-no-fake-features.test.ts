@@ -145,6 +145,11 @@ test("Participants table renders the resolved (canonical-Contact-preferring) dis
   assert.match(ENGAGEMENT_DETAIL_PAGE, /participant\.resolved_company/);
 });
 
+test("Participants table RSVP column passes decline_origin into the shared label helper -- no new column, no raw technical values inline", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /participantRsvpStatusLabel\(participant\.rsvp_status,\s*participant\.decline_origin\)/);
+  assert.doesNotMatch(ENGAGEMENT_DETAIL_PAGE, />Decline Origin</);
+});
+
 test("a Walk-in indicator is present, distinct from attendance status", () => {
   assert.match(ENGAGEMENT_DETAIL_PAGE, /Walk-in/);
 });
@@ -169,4 +174,41 @@ test("the Participant form strongly favors selecting an existing Contact -- free
   const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
   assert.match(modal, /Add an unresolved participant instead/);
   assert.match(modal, /CrmContactPicker/);
+});
+
+// --- Client CRM Stage 5B -- decline_origin in the Participant form ---------
+
+test("the Decline Origin selector is gated behind rsvpStatus === \"declined\" -- hidden for Invited/Confirmed/blank", () => {
+  const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.match(modal, /form\.rsvpStatus === "declined"/);
+  assert.match(modal, /Decline Origin/);
+});
+
+test("the Decline Origin selector uses user-facing labels (Guest/Host/Unknown), never raw technical values inline", () => {
+  const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.match(modal, /DECLINE_ORIGIN_OPTIONS/);
+  // The raw enum values only ever appear via the shared options list, not
+  // hardcoded as separate visible strings inside this component.
+  assert.doesNotMatch(modal, />guest</);
+  assert.doesNotMatch(modal, />host</);
+  assert.doesNotMatch(modal, />unknown</);
+});
+
+test("the RSVP select's onChange keeps decline_origin in sync via the shared helper, not ad hoc logic in the component", () => {
+  const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.match(modal, /nextDeclineOriginOnRsvpChange/);
+});
+
+test("decline_origin_is_manual is never rendered as an editable field in the Participant form", () => {
+  const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.doesNotMatch(modal, /decline_origin_is_manual/);
+  assert.doesNotMatch(modal, /declineOriginIsManual/);
+});
+
+test("Participant form Edit/Archive-adjacent structure is otherwise unaffected -- Contact picker, unresolved fields, and Save/Cancel remain intact", () => {
+  const modal = readFileSync(new URL("../components/engagement-participant-form-modal.tsx", import.meta.url), "utf-8");
+  assert.match(modal, /CrmContactPicker/);
+  assert.match(modal, /Add an unresolved participant instead/);
+  assert.match(modal, /Save/);
+  assert.match(modal, /Cancel/);
 });

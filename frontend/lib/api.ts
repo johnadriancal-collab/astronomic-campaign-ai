@@ -2115,6 +2115,14 @@ export type ParticipantRsvpStatus = "invited" | "confirmed" | "declined";
 export type ParticipantAttendanceStatus = "attended" | "no_show" | "cancelled";
 export type ParticipantSource = "manual" | "luma";
 
+/** Client CRM Stage 5A/5B. Meaningful ONLY alongside rsvp_status ===
+ * "declined" -- who caused the decline, never exposed as these raw
+ * technical values in any UI label (see participantRsvpStatusLabel in
+ * lib/client-crm.ts, which is the ONLY place a decline_origin should ever
+ * be turned into user-facing text). Provider-agnostic -- a manual edit
+ * can set this exactly the same way a Luma sync does. */
+export type DeclineOrigin = "guest" | "host" | "unknown";
+
 export interface EngagementParticipant {
   participant_id: string;
   engagement_id: string;
@@ -2129,6 +2137,13 @@ export interface EngagementParticipant {
 
   role: ParticipantRole;
   rsvp_status: ParticipantRsvpStatus | null;
+  decline_origin: DeclineOrigin | null;
+  /** Backend provenance/state -- true means a human explicitly asserted
+   * the current decline_origin (a later automatic Luma sync must not
+   * overwrite it while still declined). Never an editable UI field --
+   * the backend infers it from which API call set decline_origin, not
+   * from anything the operator picks directly. */
+  decline_origin_is_manual: boolean;
   attendance_status: ParticipantAttendanceStatus | null;
   is_walk_in: boolean;
   source: ParticipantSource;
@@ -2172,6 +2187,12 @@ export interface EngagementParticipantCreateInput {
   company?: string | null;
   role?: ParticipantRole;
   rsvp_status?: ParticipantRsvpStatus | null;
+  /** Only meaningful alongside rsvp_status: "declined" -- the backend
+   * forces this to null for any other rsvp_status regardless of what's
+   * sent here. decline_origin_is_manual is never accepted from the
+   * client -- the backend always sets it to true for anything submitted
+   * through this create/update path. */
+  decline_origin?: DeclineOrigin | null;
   attendance_status?: ParticipantAttendanceStatus | null;
   is_walk_in?: boolean;
 }
