@@ -63,10 +63,12 @@ from app.models.client_crm import (
     Engagement,
     EngagementCloseout,
     EngagementParticipant,
+    EngagementParticipantView,
     EngagementStatus,
     EngagementType,
     ParticipantSource,
 )
+from app.models.crm import CrmContact
 from app.models.luma import LumaEventSummary
 from app.repositories.client_contact_store import ClientContactStore
 from app.repositories.client_store import ClientStore
@@ -1068,9 +1070,78 @@ class ClientCrmService:
         name = " ".join(part for part in (participant.first_name, participant.last_name) if part)
         return name or "Unnamed participant"
 
-    async def list_engagement_participants(self, client_id: str, engagement_id: str) -> list[EngagementParticipant]:
+    @staticmethod
+    def _join_name(first_name: str | None, last_name: str | None) -> str:
+        """Same "join non-blank parts with a space" convention already used
+        by _participant_display_name()/_contact_display_name() -- extended
+        here to also treat a whitespace-only part as blank (`part.strip()`),
+        so a Contact with e.g. first_name=" " never suppresses a real
+        snapshot name in _resolve_participant_view()'s caller. Returns ""
+        (never None) when both parts are blank, matching those helpers'
+        own "join, don't guess" style."""
+        return " ".join(part.strip() for part in (first_name, last_name) if part and part.strip())
+
+    @staticmethod
+    def _first_nonblank(*values: str | None) -> str | None:
+        """First value that is non-None AND non-whitespace-only, else None.
+        Used for resolved_title/resolved_company -- same blank-safety as
+        _join_name, just for a single field instead of a first/last pair."""
+        for value in values:
+            if value is not None and value.strip():
+                return value
+        return None
+
+    @classmethod
+    def _resolve_participant_view(
+        cls, participant: EngagementParticipant, contact: CrmContact | None
+    ) -> EngagementParticipantView:
+        """Stage 4A precedence -- see EngagementParticipantView's own
+        docstring for the full contract. `contact` is passed in already
+        resolved (bulk-looked-up by the caller) rather than fetched here,
+        so this stays a pure function with no store access of its own.
+        An ARCHIVED contact is used exactly like any other -- archived
+        status is never checked here, by design (see the model docstring's
+        "archived means no longer active, not forgotten" rule); the ONLY
+        reasons this falls back to the snapshot are contact is None or a
+        specific field on it is blank."""
+        contact_name = cls._join_name(contact.first_name, contact.last_name) if contact else ""
+        if contact_name:
+            resolved_name = contact_name
+        else:
+            resolved_name = cls._join_name(participant.first_name, participant.last_name) or "Unnamed participant"
+
+        resolved_title = cls._first_nonblank(contact.title if contact else None, participant.title)
+        resolved_company = cls._first_nonblank(contact.company if contact else None, participant.company)
+        resolved_profile_photo_url = contact.profile_photo_url if contact else None
+
+        return EngagementParticipantView(
+            **participant.model_dump(),
+            resolved_name=resolved_name,
+            resolved_title=resolved_title,
+            resolved_company=resolved_company,
+            resolved_profile_photo_url=resolved_profile_photo_url,
+        )
+
+    async def list_engagement_participants(self, client_id: str, engagement_id: str) -> list[EngagementParticipantView]:
+        """Read-only, same as before Stage 4A -- this method still makes
+        zero writes to any Contact, EngagementParticipant, raw Luma record,
+        or the Activity Log. Stage 4A adds exactly one extra bulk read: the
+        distinct non-null crm_contact_ids referenced by this Engagement's
+        participants are resolved in ONE CrmContactStore.list_by_ids()
+        call (never one Contact fetch per participant), then each
+        participant is projected to an EngagementParticipantView via
+        _resolve_participant_view(). Ordering is untouched -- exactly the
+        store's own list_for_engagement() order, unchanged from before."""
         await self._require_engagement(client_id, engagement_id)
-        return await self.engagement_participant_store.list_for_engagement(engagement_id)
+        participants = await self.engagement_participant_store.list_for_engagement(engagement_id)
+
+        crm_contact_ids = list({p.crm_contact_id for p in participants if p.crm_contact_id})
+        contacts_by_id = {c.crm_contact_id: c for c in await self.crm_contact_store.list_by_ids(crm_contact_ids)}
+
+        return [
+            self._resolve_participant_view(p, contacts_by_id.get(p.crm_contact_id) if p.crm_contact_id else None)
+            for p in participants
+        ]
 
     async def _reconcile_engagement_signal(self, participant: EngagementParticipant) -> None:
         """Contacts CRM Stage 3B. Invoked AFTER a manual EngagementParticipant

@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 import pytest_asyncio
 
+from app.config import settings
 from app.models.activity import ActivityCategory
 from app.models.client_crm import (
     ClientRelationshipClassification,
@@ -19,6 +20,7 @@ from app.models.client_crm import (
     ContactType,
     Engagement,
     EngagementParticipant,
+    EngagementParticipantView,
     EngagementStatus,
     EngagementType,
 )
@@ -2665,6 +2667,318 @@ async def test_manual_signal_failure_never_blocks_the_participant_write(particip
         client.client_id, engagement.engagement_id, {"crm_contact_id": "ethan-1", "role": "guest", "rsvp_status": "confirmed"}
     )
     assert await store.get(participant.participant_id) is not None
+
+
+# =====================================================================
+# Engagement Participant canonical Contact display -- Client CRM Stage 4A
+# (2026-09-11). list_engagement_participants() now returns
+# EngagementParticipantView; resolved_name/resolved_title/resolved_company/
+# resolved_profile_photo_url prefer the CURRENT linked Contact, falling
+# back to the participant's own (untouched) snapshot fields. See
+# EngagementParticipantView's own model docstring for the full precedence.
+# =====================================================================
+
+
+def _seed_stage4a_participant(client_id, engagement_id, crm_contact_id=None, participant_id="p1", **overrides) -> EngagementParticipant:
+    """Same shape as _seed_participant() below, but with NO default
+    first_name -- Stage 4A's own tests need a genuinely blank snapshot as
+    their normal starting point, unlike Stage 3A's tests which default to
+    a named "Jane"."""
+    now = datetime.now(timezone.utc)
+    overrides.setdefault("first_name", None)
+    overrides.setdefault("last_name", None)
+    overrides.setdefault("created_at", now)
+    overrides.setdefault("updated_at", now)
+    return EngagementParticipant(
+        participant_id=participant_id, engagement_id=engagement_id, client_id=client_id,
+        crm_contact_id=crm_contact_id, **overrides,
+    )
+
+
+async def test_resolved_name_prefers_current_contact_name(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name="John", last_name="Minter")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert isinstance(view, EngagementParticipantView)
+    assert view.resolved_name == "John Minter"
+    # The raw snapshot itself is untouched -- still blank, per Stage 4A's
+    # own "never rewrite participant storage" rule.
+    assert view.first_name is None
+    assert view.last_name is None
+
+
+async def test_resolved_title_prefers_current_contact_title(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, title="Founder and Managing Director")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", title="Old Title"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_title == "Founder and Managing Director"
+    assert view.title == "Old Title"  # snapshot untouched
+
+
+async def test_resolved_company_prefers_current_contact_company(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, company="Austin Growth Capital")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", company="OldCo"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_company == "Austin Growth Capital"
+    assert view.company == "OldCo"  # snapshot untouched
+
+
+async def test_resolved_profile_photo_url_from_current_contact(participant_service, monkeypatch):
+    monkeypatch.setattr(settings, "profile_photo_cdn_base_url", "https://photos.astronomicconnect.com")
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, profile_photo_key="avatars/john.jpg")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_profile_photo_url is not None
+    assert view.resolved_profile_photo_url.endswith("avatars/john.jpg")
+
+
+async def test_resolved_name_falls_back_to_snapshot_when_contact_name_blank(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name=None, last_name=None)
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(
+        _seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", first_name="Jane", last_name="Doe")
+    )
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "Jane Doe"
+
+
+async def test_resolved_title_falls_back_to_snapshot_when_contact_title_blank(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, title=None)
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", title="Snapshot Title"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_title == "Snapshot Title"
+
+
+async def test_resolved_company_falls_back_to_snapshot_when_contact_company_blank(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, company=None)
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", company="Snapshot Co"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_company == "Snapshot Co"
+
+
+async def test_resolved_name_is_unnamed_participant_when_contact_and_snapshot_both_blank(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name=None, last_name=None)
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "Unnamed participant"
+
+
+async def test_resolved_name_contact_first_name_only(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name="John", last_name=None)
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "John"
+
+
+async def test_resolved_name_contact_last_name_only(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name=None, last_name="Minter")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "Minter"
+
+
+async def test_whitespace_only_contact_name_does_not_suppress_snapshot_name(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name="   ", last_name="  ")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(
+        _seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", first_name="Jane", last_name="Doe")
+    )
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "Jane Doe"
+
+
+async def test_whitespace_only_contact_title_does_not_suppress_snapshot_title(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, title="   ")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", title="Snapshot Title"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_title == "Snapshot Title"
+
+
+async def test_unresolved_participant_uses_snapshot_directly(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(
+        _seed_stage4a_participant(
+            client.client_id, engagement.engagement_id, crm_contact_id=None,
+            first_name="Jane", last_name="Doe", title="Walk-in Title", company="Walk-in Co",
+        )
+    )
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "Jane Doe"
+    assert view.resolved_title == "Walk-in Title"
+    assert view.resolved_company == "Walk-in Co"
+    assert view.resolved_profile_photo_url is None
+
+
+async def test_missing_linked_contact_falls_back_to_snapshot(participant_service):
+    """crm_contact_id points to a Contact that no longer resolves (e.g.
+    deleted from the store outright) -- must fail safe to the snapshot,
+    never raise."""
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(
+        _seed_stage4a_participant(
+            client.client_id, engagement.engagement_id, crm_contact_id="does-not-exist",
+            first_name="Jane", last_name="Doe",
+        )
+    )
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "Jane Doe"
+
+
+async def test_archived_linked_contact_current_identity_still_wins(participant_service):
+    """LOCKED Stage 4A decision: archived does not mean forgotten -- an
+    archived Contact's CURRENT name/title/company still wins over the
+    participant snapshot, exactly like an active Contact would."""
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(
+        crm_contact_store, first_name="John", last_name="Minter", title="Founder", company="Austin Growth Capital", archived=True
+    )
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.resolved_name == "John Minter"
+    assert view.resolved_title == "Founder"
+    assert view.resolved_company == "Austin Growth Capital"
+
+
+async def test_multiple_linked_participants_use_exactly_one_bulk_contact_call(participant_service, monkeypatch):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="ethan-1", first_name="Ethan")
+    await _seed_crm_contact(crm_contact_store, crm_contact_id="ethan-2", first_name="Priya")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", participant_id="p1"))
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-2", participant_id="p2"))
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id=None, participant_id="p3"))
+
+    call_count = 0
+    original_list_by_ids = crm_contact_store.list_by_ids
+
+    async def _counting_list_by_ids(ids):
+        nonlocal call_count
+        call_count += 1
+        return await original_list_by_ids(ids)
+
+    monkeypatch.setattr(crm_contact_store, "list_by_ids", _counting_list_by_ids)
+
+    views = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert len(views) == 3
+    assert call_count == 1
+
+
+async def test_duplicate_crm_contact_ids_are_deduped_in_the_bulk_lookup(participant_service, monkeypatch):
+    """Two participant rows referencing the SAME crm_contact_id within one
+    Engagement -- store.create()'s own duplicate guard would normally
+    prevent this even across archived/active (see
+    EngagementParticipantDuplicateError), so this seeds the second row
+    directly into the Memory store's internal dict to construct the edge
+    case regardless; the bulk lookup must still never pass that id twice."""
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name="Ethan")
+    client, engagement = await _make_client_and_engagement(service)
+    p1 = _seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", participant_id="p1", archived=True)
+    p2 = _seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1", participant_id="p2")
+    store._rows[p1.participant_id] = p1
+    store._rows[p2.participant_id] = p2
+
+    seen_ids = []
+    original_list_by_ids = crm_contact_store.list_by_ids
+
+    async def _spying_list_by_ids(ids):
+        seen_ids.append(list(ids))
+        return await original_list_by_ids(ids)
+
+    monkeypatch.setattr(crm_contact_store, "list_by_ids", _spying_list_by_ids)
+
+    views = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert len(views) == 2
+    assert len(seen_ids) == 1
+    assert len(seen_ids[0]) == len(set(seen_ids[0]))
+
+
+async def test_participant_ordering_is_unchanged_by_the_projection(participant_service):
+    service, _activity_log, store, _crm_contact_store = participant_service
+    client, engagement = await _make_client_and_engagement(service)
+    base = datetime.now(timezone.utc)
+    await store.create(
+        _seed_stage4a_participant(
+            client.client_id, engagement.engagement_id, participant_id="p-second", first_name="Second", created_at=base + timedelta(seconds=1)
+        )
+    )
+    await store.create(
+        _seed_stage4a_participant(
+            client.client_id, engagement.engagement_id, participant_id="p-first", first_name="First", created_at=base
+        )
+    )
+
+    raw = await store.list_for_engagement(engagement.engagement_id)
+    views = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert [p.participant_id for p in views] == [p.participant_id for p in raw]
+
+
+async def test_list_engagement_participants_makes_zero_writes(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    contact = await _seed_crm_contact(crm_contact_store)
+    client, engagement = await _make_client_and_engagement(service)
+    participant = _seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1")
+    await store.create(participant)
+
+    await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+
+    unchanged_contact = await crm_contact_store.get("ethan-1")
+    unchanged_participant = await store.get(participant.participant_id)
+    assert unchanged_contact == contact
+    assert unchanged_participant == participant
+
+
+async def test_raw_snapshot_fields_remain_unchanged_in_the_view_response(participant_service):
+    service, _activity_log, store, crm_contact_store = participant_service
+    await _seed_crm_contact(crm_contact_store, first_name="John", last_name="Minter", title="Founder", company="Austin Growth Capital")
+    client, engagement = await _make_client_and_engagement(service)
+    await store.create(_seed_stage4a_participant(client.client_id, engagement.engagement_id, crm_contact_id="ethan-1"))
+
+    [view] = await service.list_engagement_participants(client.client_id, engagement.engagement_id)
+    assert view.first_name is None
+    assert view.last_name is None
+    assert view.title is None
+    assert view.company is None
 
 
 # =====================================================================

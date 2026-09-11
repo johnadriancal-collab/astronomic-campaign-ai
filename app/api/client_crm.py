@@ -46,6 +46,7 @@ from app.models.client_crm import (
     EngagementCloseout,
     EngagementContractStatus,
     EngagementParticipant,
+    EngagementParticipantView,
     EngagementPaymentStatus,
     EngagementStatus,
     EngagementType,
@@ -541,7 +542,9 @@ async def update_engagement_closeout(
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/clients/{client_id}/engagements/{engagement_id}/participants", response_model=list[EngagementParticipant])
+@router.get(
+    "/clients/{client_id}/engagements/{engagement_id}/participants", response_model=list[EngagementParticipantView]
+)
 async def list_engagement_participants(
     client_id: str, engagement_id: str, service: ClientCrmService = Depends(get_client_crm_service)
 ):

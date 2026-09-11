@@ -2138,6 +2138,26 @@ export interface EngagementParticipant {
   archived: boolean;
 }
 
+/** Client CRM Stage 4A -- exactly an EngagementParticipant plus four
+ * READ-ONLY derived display fields returned by GET .../participants
+ * (never accepted on create/update). Prefer these four for ANY
+ * current-identity display; the plain first_name/last_name/title/company
+ * above remain each participant's own unchanged historical snapshot --
+ * useful for editing, never for display now that these exist.
+ *
+ * resolved_name: current linked Contact's name if non-blank, else this
+ * participant's own snapshot name, else "Unnamed participant".
+ * resolved_title / resolved_company: current Contact's field if
+ * non-blank, else this participant's own snapshot field, else null.
+ * resolved_profile_photo_url: current Contact's photo if the participant
+ * is linked to one that has it, else null. */
+export interface EngagementParticipantView extends EngagementParticipant {
+  resolved_name: string;
+  resolved_title: string | null;
+  resolved_company: string | null;
+  resolved_profile_photo_url: string | null;
+}
+
 /** `crm_contact_id` omitted (or null) creates an unresolved participant --
  * at least one of first_name/last_name/email must be non-blank in that
  * case (enforced server-side). When crm_contact_id IS provided, any
@@ -2166,8 +2186,8 @@ function participantsUrl(clientId: string, engagementId: string): string {
   return `/client-crm/clients/${clientId}/engagements/${engagementId}/participants`;
 }
 
-export function listEngagementParticipants(clientId: string, engagementId: string): Promise<EngagementParticipant[]> {
-  return request<EngagementParticipant[]>(participantsUrl(clientId, engagementId));
+export function listEngagementParticipants(clientId: string, engagementId: string): Promise<EngagementParticipantView[]> {
+  return request<EngagementParticipantView[]>(participantsUrl(clientId, engagementId));
 }
 
 /** 409 (surfaced as an ApiError) means crm_contact_id is already an active

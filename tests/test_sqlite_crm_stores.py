@@ -130,6 +130,43 @@ async def test_contact_survives_a_fresh_connection(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_contact_list_by_ids_empty_input_returns_empty(contact_store):
+    await contact_store.create(make_contact("c1"))
+    assert await contact_store.list_by_ids([]) == []
+
+
+@pytest.mark.asyncio
+async def test_contact_list_by_ids_known_ids(contact_store):
+    await contact_store.create(make_contact("c1", first_name="Ada"))
+    await contact_store.create(make_contact("c2", first_name="Bea"))
+    await contact_store.create(make_contact("c3", first_name="Cy"))
+    contacts = await contact_store.list_by_ids(["c1", "c3"])
+    assert {c.crm_contact_id for c in contacts} == {"c1", "c3"}
+
+
+@pytest.mark.asyncio
+async def test_contact_list_by_ids_mixed_known_and_unknown(contact_store):
+    await contact_store.create(make_contact("c1"))
+    contacts = await contact_store.list_by_ids(["c1", "does-not-exist"])
+    assert [c.crm_contact_id for c in contacts] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_contact_list_by_ids_duplicate_ids_no_duplicate_results(contact_store):
+    await contact_store.create(make_contact("c1"))
+    contacts = await contact_store.list_by_ids(["c1", "c1", "c1"])
+    assert [c.crm_contact_id for c in contacts] == ["c1"]
+
+
+@pytest.mark.asyncio
+async def test_contact_list_by_ids_includes_archived_contacts(contact_store):
+    await contact_store.create(make_contact("c1", archived=True))
+    contacts = await contact_store.list_by_ids(["c1"])
+    assert [c.crm_contact_id for c in contacts] == ["c1"]
+    assert contacts[0].archived is True
+
+
+@pytest.mark.asyncio
 async def test_custom_field_create_and_get_by_key(custom_field_store):
     now = datetime.now(timezone.utc)
     definition = CrmCustomFieldDefinition(

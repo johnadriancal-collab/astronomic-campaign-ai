@@ -1106,6 +1106,24 @@ def test_list_participants_missing_engagement_is_404(test_client):
     assert resp.status_code == 404
 
 
+def test_list_participants_includes_resolved_display_fields(contact_test_client):
+    """Client CRM Stage 4A -- the GET response includes resolved_name/
+    resolved_title/resolved_company alongside the untouched raw snapshot
+    fields, end to end through the actual HTTP route."""
+    client, _service, crm_contact_store = contact_test_client
+    _seed_crm_contact(crm_contact_store)
+    created_client, engagement = _create_client_and_engagement(client)
+    client.post(_participants_url(created_client["client_id"], engagement["engagement_id"]), json={"crm_contact_id": "ethan-1"})
+
+    resp = client.get(_participants_url(created_client["client_id"], engagement["engagement_id"]))
+    assert resp.status_code == 200
+    [body] = resp.json()
+    assert body["resolved_name"] == "Ethan Wong"
+    assert body["resolved_title"] == "Co-CEO"
+    assert body["resolved_company"] == "Hive ASMBLD"
+    assert body["first_name"] == "Ethan"  # raw snapshot still present, unchanged
+
+
 def test_create_resolved_participant(contact_test_client):
     client, _service, crm_contact_store = contact_test_client
     _seed_crm_contact(crm_contact_store)

@@ -59,6 +59,15 @@ class CrmContactStore(ABC):
         """
 
     @abstractmethod
+    async def list_by_ids(self, crm_contact_ids: list[str]) -> list[CrmContact]:
+        """Bulk lookup for read-projection callers (Stage 4A's own
+        EngagementParticipant display resolution is the first of these) --
+        same shape as EngagementStore.list_by_ids. Empty input returns [];
+        unknown ids are silently omitted, never an error; archived Contacts
+        ARE included (this is a lookup, not a visibility filter -- callers
+        that care about archived state check it themselves, same as get())."""
+
+    @abstractmethod
     async def list(self) -> list[CrmContact]:
         """Every stored contact -- filtering/search happens in crm_service.py, same
         convention as LeadStore (no search method on the store itself)."""
@@ -114,6 +123,20 @@ class MemoryCrmContactStore(CrmContactStore):
             if normalize_name_company(contact.first_name, contact.last_name, contact.company)
             == normalized_name_company
         ]
+
+    async def list_by_ids(self, crm_contact_ids: list[str]) -> list[CrmContact]:
+        if not crm_contact_ids:
+            return []
+        seen: set[str] = set()
+        results: list[CrmContact] = []
+        for crm_contact_id in crm_contact_ids:
+            if crm_contact_id in seen:
+                continue
+            seen.add(crm_contact_id)
+            contact = self._contacts.get(crm_contact_id)
+            if contact is not None:
+                results.append(contact)
+        return results
 
     async def list(self) -> list[CrmContact]:
         return list(self._contacts.values())

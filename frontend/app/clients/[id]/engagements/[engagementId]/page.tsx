@@ -27,6 +27,7 @@ import {
   type Engagement,
   type EngagementCloseout,
   type EngagementParticipant,
+  type EngagementParticipantView,
   type LumaEventSummary,
 } from "@/lib/api";
 import {
@@ -39,7 +40,6 @@ import {
   engagementTypeLabel,
   formatEngagementDate,
   participantAttendanceStatusLabel,
-  participantDisplayName,
   participantRoleLabel,
   participantRsvpStatusLabel,
 } from "@/lib/client-crm";
@@ -81,7 +81,7 @@ export default function EngagementDetailPage() {
   const [archivingCloseout, setArchivingCloseout] = useState(false);
   const [closeoutActionError, setCloseoutActionError] = useState<string | null>(null);
 
-  const [participants, setParticipants] = useState<EngagementParticipant[] | null>(null);
+  const [participants, setParticipants] = useState<EngagementParticipantView[] | null>(null);
   const [participantsError, setParticipantsError] = useState<string | null>(null);
   const [participantModalOpen, setParticipantModalOpen] = useState(false);
   const [editingParticipant, setEditingParticipant] = useState<EngagementParticipant | null>(null);
@@ -197,17 +197,21 @@ export default function EngagementDetailPage() {
     }
   }
 
-  async function handleArchiveParticipantToggle(participant: EngagementParticipant) {
+  async function handleArchiveParticipantToggle(participant: EngagementParticipantView) {
     const nextArchived = !participant.archived;
     if (nextArchived) {
-      const confirmed = window.confirm(`Archive ${participantDisplayName(participant)}? They can be restored anytime.`);
+      const confirmed = window.confirm(`Archive ${participant.resolved_name}? They can be restored anytime.`);
       if (!confirmed) return;
     }
     setBusyParticipantId(participant.participant_id);
     setParticipantActionError(null);
     try {
-      const saved = await updateEngagementParticipant(clientId, engagementId, participant.participant_id, { archived: nextArchived });
-      setParticipants((prev) => (prev ? prev.map((p) => (p.participant_id === saved.participant_id ? saved : p)) : prev));
+      await updateEngagementParticipant(clientId, engagementId, participant.participant_id, { archived: nextArchived });
+      // Re-fetch rather than patch the plain EngagementParticipant this
+      // update call returns into local state -- that response has no
+      // resolved_* fields (Stage 4A), and the list endpoint is the one
+      // place that resolves them server-side. See loadParticipants().
+      await loadParticipants();
     } catch (err) {
       setParticipantActionError(
         err instanceof ApiError ? `Couldn't update this Participant (${err.status}): ${err.message}` : "Couldn't reach the backend."
@@ -217,12 +221,12 @@ export default function EngagementDetailPage() {
     }
   }
 
-  function handleParticipantSaved(saved: EngagementParticipant) {
-    setParticipants((prev) => {
-      if (!prev) return [saved];
-      const exists = prev.some((p) => p.participant_id === saved.participant_id);
-      return exists ? prev.map((p) => (p.participant_id === saved.participant_id ? saved : p)) : [...prev, saved];
-    });
+  function handleParticipantSaved() {
+    // Same reasoning as handleArchiveParticipantToggle -- re-fetch via the
+    // list endpoint so the resolved_* display fields stay correct, rather
+    // than patching in the plain EngagementParticipant this callback
+    // receives (create/update intentionally do not return resolved fields).
+    void loadParticipants();
   }
 
   async function handleLinkLumaEvent(event: LumaEventSummary) {
@@ -611,6 +615,7 @@ export default function EngagementDetailPage() {
                   <thead className="bg-secondary/40 text-xs text-muted-foreground">
                     <tr>
                       <th className="px-3 py-2 text-left font-medium">Name</th>
+                      <th className="px-3 py-2 text-left font-medium">Title</th>
                       <th className="px-3 py-2 text-left font-medium">Company</th>
                       <th className="px-3 py-2 text-left font-medium">Role</th>
                       <th className="px-3 py-2 text-left font-medium">RSVP</th>
@@ -625,10 +630,10 @@ export default function EngagementDetailPage() {
                           <div className="flex flex-wrap items-center gap-1.5">
                             {participant.crm_contact_id ? (
                               <Link href={`/crm/${participant.crm_contact_id}`} className="hover:underline">
-                                {participantDisplayName(participant)}
+                                {participant.resolved_name}
                               </Link>
                             ) : (
-                              <span>{participantDisplayName(participant)}</span>
+                              <span>{participant.resolved_name}</span>
                             )}
                             {participant.is_walk_in && (
                               <Badge variant="secondary" className="bg-amber-100 text-amber-800">
@@ -642,7 +647,8 @@ export default function EngagementDetailPage() {
                             )}
                           </div>
                         </td>
-                        <td className="px-3 py-2.5 text-muted-foreground">{participant.company || "—"}</td>
+                        <td className="px-3 py-2.5 text-muted-foreground">{participant.resolved_title || "—"}</td>
+                        <td className="px-3 py-2.5 text-muted-foreground">{participant.resolved_company || "—"}</td>
                         <td className="px-3 py-2.5 text-muted-foreground">{participantRoleLabel(participant.role)}</td>
                         <td className="px-3 py-2.5 text-muted-foreground">{participantRsvpStatusLabel(participant.rsvp_status)}</td>
                         <td className="px-3 py-2.5 text-muted-foreground">

@@ -153,6 +153,18 @@ class SQLiteCrmContactStore(CrmContactStore):
         await cursor.close()
         return [CrmContact.model_validate_json(row["data"]) for row in rows]
 
+    async def list_by_ids(self, crm_contact_ids: list[str]) -> list[CrmContact]:
+        if not crm_contact_ids:
+            return []
+        unique_ids = list(dict.fromkeys(crm_contact_ids))
+        placeholders = ",".join("?" for _ in unique_ids)
+        cursor = await self._connection.execute(
+            f"SELECT data FROM crm_contacts WHERE crm_contact_id IN ({placeholders})", tuple(unique_ids)
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        return [CrmContact.model_validate_json(row["data"]) for row in rows]
+
     async def list(self) -> list[CrmContact]:
         # Declared LAST -- see crm_contact_store.py's module docstring for why
         # (a method literally named `list` shadows the builtin within the

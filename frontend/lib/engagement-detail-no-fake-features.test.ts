@@ -134,9 +134,15 @@ test("a real Participants section is present, using the shared EngagementPartici
 });
 
 test("Participants table uses the exact columns this stage specified", () => {
-  for (const label of [/>Name</, />Company</, />Role</, />RSVP</, />Attendance</]) {
+  for (const label of [/>Name</, />Title</, />Company</, />Role</, />RSVP</, />Attendance</]) {
     assert.match(ENGAGEMENT_DETAIL_PAGE, label);
   }
+});
+
+test("Participants table renders the resolved (canonical-Contact-preferring) display fields, not the raw snapshot fields", () => {
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /participant\.resolved_name/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /participant\.resolved_title/);
+  assert.match(ENGAGEMENT_DETAIL_PAGE, /participant\.resolved_company/);
 });
 
 test("a Walk-in indicator is present, distinct from attendance status", () => {

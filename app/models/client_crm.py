@@ -536,6 +536,21 @@ class EngagementParticipant(BaseModel):
     fields are the ONLY record of who this person is, not a snapshot of
     anything else.
 
+    Stage 4A (2026-09-11) addendum -- these snapshot fields remain
+    immutable-ish historical/source data: editing the linked Contact
+    later never rewrites them, and nothing here changes that. What DOES
+    change is what CURRENT DISPLAY prefers: for a linked participant
+    (crm_contact_id set, Contact found), ClientCrmService.
+    list_engagement_participants() now resolves and returns
+    EngagementParticipantView, whose resolved_name/resolved_title/
+    resolved_company/resolved_profile_photo_url prefer the canonical
+    Contact's CURRENT values, falling back to these snapshot fields only
+    when the Contact field is blank (or there's no linked Contact, or it
+    can't be found) -- see EngagementParticipantView's own docstring for
+    the exact precedence. The raw snapshot fields below are still
+    returned unchanged in that same response, for compatibility and for
+    editing this participant's own record.
+
     `rsvp_status` and `attendance_status` are deliberately TWO separate
     nullable fields, not one overloaded status enum -- they answer
     different questions ("did they say they were coming" vs "did they
@@ -582,6 +597,48 @@ class EngagementParticipant(BaseModel):
     created_at: datetime
     updated_at: datetime
     archived: bool = False
+
+
+class EngagementParticipantView(EngagementParticipant):
+    """Client CRM Stage 4A -- exactly an EngagementParticipant plus four
+    READ-ONLY derived display fields, never persisted and never accepted
+    on any create/update request (only list_engagement_participants()'s
+    response uses this type -- create/update routes keep returning plain
+    EngagementParticipant, unaugmented). Same "strict superset, derived-
+    only, GET-response-only" shape as ClientListItem(Client).
+
+    Precedence (see ClientCrmService.list_engagement_participants()'s own
+    docstring for the exact implementation):
+
+    resolved_name: current Contact's first_name+last_name if that joins
+    to a nonblank string, else the participant's OWN first_name+last_name
+    snapshot, else "Unnamed participant". A whitespace-only Contact name
+    does NOT suppress a nonblank snapshot name.
+
+    resolved_title / resolved_company: current Contact's field if
+    nonblank, else the participant's own snapshot field, else None.
+
+    resolved_profile_photo_url: current Contact's profile_photo_url if
+    the participant is linked to a Contact that has one, else None --
+    EngagementParticipant itself has no photo field of its own to fall
+    back to.
+
+    An ARCHIVED linked Contact still wins over the snapshot -- archived
+    means "no longer an active relationship," not "this person's current
+    identity should be forgotten." Fallback to the snapshot happens ONLY
+    when crm_contact_id is None, the linked Contact can't be found, or
+    the specific Contact field itself is blank -- never merely because
+    the Contact is archived.
+
+    None of this touches storage: the plain first_name/last_name/title/
+    company/email fields inherited from EngagementParticipant are still
+    present, unchanged, in this same response -- for compatibility and
+    for editing this participant's own snapshot."""
+
+    resolved_name: str
+    resolved_title: str | None = None
+    resolved_company: str | None = None
+    resolved_profile_photo_url: str | None = None
 
 
 class ContactEventHistoryEntry(BaseModel):
