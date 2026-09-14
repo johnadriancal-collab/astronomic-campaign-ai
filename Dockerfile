@@ -17,6 +17,7 @@ COPY app ./app
 # line per operator script as new ones are approved for in-container use.
 COPY scripts/run_luma_engagement_participant_backfill.py ./scripts/run_luma_engagement_participant_backfill.py
 COPY scripts/run_luma_location_historical_reconciliation.py ./scripts/run_luma_location_historical_reconciliation.py
+COPY scripts/run_austin_forward_reconciliation.py ./scripts/run_austin_forward_reconciliation.py
 
 EXPOSE 8000
 
