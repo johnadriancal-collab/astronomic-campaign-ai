@@ -116,8 +116,12 @@ HEADER_ALIASES: dict[str, str] = {
     "do not call": f"{CUSTOM_FIELD_PREFIX}do_not_call",
     "last raised at": f"{CUSTOM_FIELD_PREFIX}last_raised_at",
     "how often do you invest": f"{CUSTOM_FIELD_PREFIX}how_often_do_you_invest",
-    "personal notes": f"{CUSTOM_FIELD_PREFIX}personal_notes",
-    "notes": f"{CUSTOM_FIELD_PREFIX}notes",
+    # "notes"/"personal notes" deliberately NOT aliased here (Stage NP-2) -- both raw
+    # columns are handled exclusively by classify_notes in crm_classification_rules.py,
+    # which merges them into the one canonical custom:notes destination instead of
+    # letting either column independently win (and silently drop the other) via this
+    # plain 1:1 table. Same "no bare alias, classification rule only" convention already
+    # used for role/dinner_subscriptions/dinners_attended above.
     "who were you referred to constellation dinners by": f"{CUSTOM_FIELD_PREFIX}referred_to_constellation_dinners_by",
     "geographic preference": f"{CUSTOM_FIELD_PREFIX}investment_geography_preference",
     "chris knows personally": f"{CUSTOM_FIELD_PREFIX}chris_knows_personally",

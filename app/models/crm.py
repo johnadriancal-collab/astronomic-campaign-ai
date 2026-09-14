@@ -351,6 +351,91 @@ def normalize_dinner_subscriptions(tokens: list[str]) -> list[str]:
     return result
 
 
+# Stage NP-2 (2026-09-14) -- Notes/Personal Notes consolidation. Shared by both
+# the one-time production migration (app/services/notes_personal_notes_merge.py,
+# for Contacts that already had personal_notes populated before this stage) and
+# the CSV import path (classify_notes in crm_classification_rules.py, for a CSV
+# row that has both a "Notes" and a "Personal Notes" column with distinct
+# values) -- ONE merge format, not two different ones, so a Contact's Notes
+# looks the same regardless of which path merged it in.
+NOTES_PERSONAL_NOTES_MERGE_HEADER = "Personal Notes (merged):"
+
+# Stage NP-2A (2026-09-14) -- the CSV-import-only counterpart to the header above.
+# Used ONLY when the content being appended onto an ALREADY-POPULATED existing
+# Notes value did NOT come solely from a Personal Notes column (i.e. the CSV row
+# itself had a real, distinct "Notes" value -- whether alone or combined with
+# Personal Notes, which classify_notes has already folded in using
+# NOTES_PERSONAL_NOTES_MERGE_HEADER internally before this outer header is ever
+# applied). Kept visually distinct from NOTES_PERSONAL_NOTES_MERGE_HEADER so a
+# human reading a Contact's Notes can tell, at a glance, whether appended content
+# came from a re-imported Notes column versus a Personal Notes column.
+NOTES_IMPORT_MERGE_HEADER = "Notes (merged from import):"
+
+# A private signal from classify_notes (crm_classification_rules.py) to
+# CrmService.apply_import_mapping(), consumed ONLY when merging field_key
+# "notes" against an EXISTING Contact -- never a real custom-field target
+# itself. Deliberately NOT prefixed with "custom:" so apply_import_mapping's
+# generic per-column loop auto-ignores it as an unrecognized target rather
+# than trying to write it anywhere. True means this row's proposed
+# `custom:notes` value came ENTIRELY from the Personal Notes column (the
+# row's own Notes column was blank) -- the one case that must append under
+# NOTES_PERSONAL_NOTES_MERGE_HEADER rather than NOTES_IMPORT_MERGE_HEADER
+# when merged onto an already-populated existing Notes value.
+NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY = "_notes_source_is_personal_notes_only"
+
+
+def _normalize_notes_for_comparison(value: str) -> str:
+    return " ".join(value.split()).lower()
+
+
+def merge_notes_import(
+    existing_notes: str | None, incoming_notes: str, *, source_is_personal_notes_only: bool
+) -> str | None:
+    """
+    Stage NP-2A: the ONE place canonical Contact `notes` import merge
+    semantics live -- deliberately NOT a broad scalar-field behavior change,
+    just this one field. `incoming_notes` is whatever classify_notes already
+    computed for this CSV row (itself already the canonicalized combination
+    of that row's own Notes/Personal Notes columns -- see that function's own
+    docstring); this function's only job is deciding how that ONE incoming
+    value relates to whatever is ALREADY on the Contact.
+
+    - Existing blank: incoming becomes the new value verbatim (unchanged
+      behavior from before this fix -- fill-only-if-empty already did
+      exactly this).
+    - Existing populated, incoming effectively identical (whitespace/case-
+      insensitive) OR already contained verbatim within existing: existing
+      is returned UNCHANGED (same object semantics as a true no-op) -- this
+      is what makes re-importing the same CSV idempotent, and what makes
+      "incoming already contained in existing" a no-op even when the two
+      aren't fully equal.
+    - Existing populated, incoming genuinely new/distinct: existing is
+      preserved byte-for-byte as the prefix, then
+      "\\n\\n{HEADER}\\n{incoming}" is appended -- NOTES_PERSONAL_NOTES_MERGE_HEADER
+      when `source_is_personal_notes_only` (the CSV row's own Notes column
+      was blank -- everything in `incoming_notes` came from Personal Notes),
+      otherwise NOTES_IMPORT_MERGE_HEADER. Neither value is summarized,
+      rewritten, or discarded.
+
+    Never touches/repopulates `personal_notes` -- that field is not this
+    function's concern at all; callers never pass it in.
+    """
+    incoming = incoming_notes.strip()
+    if not incoming:
+        return existing_notes
+    current = existing_notes.strip() if existing_notes else ""
+    if not current:
+        return incoming
+
+    incoming_norm = _normalize_notes_for_comparison(incoming)
+    current_norm = _normalize_notes_for_comparison(current)
+    if incoming_norm == current_norm or incoming_norm in current_norm:
+        return existing_notes  # unchanged -- true no-op, idempotent on repeated import
+
+    header = NOTES_PERSONAL_NOTES_MERGE_HEADER if source_is_personal_notes_only else NOTES_IMPORT_MERGE_HEADER
+    return f"{existing_notes}\n\n{header}\n{incoming}"
+
+
 def normalize_email(email: str | None) -> str | None:
     return email.strip().lower() or None if email else None
 

@@ -204,6 +204,55 @@ def classify_role(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str,
     return {"custom:role": kept} if kept else {}
 
 
+def classify_notes(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
+    """
+    notes (custom field) <- CSV `Notes` AND `Personal Notes`, merged into
+    the one canonical destination -- Stage NP-2 deprecated `personal_notes`
+    as an import target (no bare alias for it in crm_import_service.py's
+    HEADER_ALIASES any more; this rule is now the ONLY way either raw
+    column reaches a Contact), specifically to fix a real collision: a
+    naive 1:1 "Notes"->custom:notes plus "Personal Notes"->custom:personal_notes
+    mapping would let either column silently win a row where the OTHER
+    also had a distinct value, with no way for the human to know something
+    was dropped. Same deterministic collision policy as this module's own
+    docstring: never silently drop a populated column.
+
+    - Neither column populated: no-op (nothing to classify).
+    - Exactly one populated: that value, verbatim, becomes the proposed
+      `custom:notes`. This is the value CrmService.apply_import_mapping()
+      (Stage NP-2A) then merges against whatever the target Contact
+      already has -- fill it in if blank, append under a header if
+      distinct, no-op if already identical/contained -- see that method's
+      own docstring for the full merge semantics; this function only ever
+      decides what THIS ROW contributes, never how it interacts with an
+      existing Contact.
+    - Both populated and equal (case/whitespace-insensitive): one copy,
+      not two.
+    - Both populated and distinct: Notes first, then Personal Notes
+      appended below the same NOTES_PERSONAL_NOTES_MERGE_HEADER used by
+      the one-time notes_personal_notes_merge.py production migration --
+      one shared merge format, not two different ones.
+
+    Also sets NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY (True) when the
+    proposed value came solely from Personal Notes -- see that constant's
+    own docstring for why.
+    """
+    from app.models.crm import NOTES_PERSONAL_NOTES_MERGE_HEADER, NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY
+
+    notes_raw = _find_column(raw_row, "Notes")
+    personal_raw = _find_column(raw_row, "Personal Notes", "Personal notes")
+
+    if not notes_raw and not personal_raw:
+        return {}
+    if not personal_raw:
+        return {"custom:notes": notes_raw}
+    if not notes_raw:
+        return {"custom:notes": personal_raw, NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY: True}
+    if " ".join(notes_raw.split()).lower() == " ".join(personal_raw.split()).lower():
+        return {"custom:notes": notes_raw}
+    return {"custom:notes": f"{notes_raw}\n\n{NOTES_PERSONAL_NOTES_MERGE_HEADER}\n{personal_raw}"}
+
+
 def classify_dinner_subscriptions(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
     """
     dinner_subscriptions (custom field) <- CSV `Dinner Subscriptions`,
@@ -710,6 +759,7 @@ CLASSIFICATION_RULES: list[Classifier] = [
     classify_industry,
     classify_investor_mode,
     classify_role,
+    classify_notes,
     classify_dinner_subscriptions,
     classify_dinners_attended,
     classify_chris_degree_connection,

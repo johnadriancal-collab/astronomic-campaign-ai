@@ -1114,8 +1114,10 @@ async def test_future_upload_populates_all_ten_phase1_fields_with_zero_manual_ma
     assert cf["do_not_call"] is False
     assert cf["last_raised_at"] == "2025-07-01T00:00:00+00:00"
     assert cf["how_often_do_you_invest"] == "4 per year"
-    assert cf["personal_notes"] == "Family office context"
-    assert cf["notes"] == "General notes here"
+    # Stage NP-2: Notes and Personal Notes merge into the one canonical `notes`
+    # destination -- personal_notes is no longer an independent import target.
+    assert "personal_notes" not in cf
+    assert cf["notes"] == "General notes here\n\nPersonal Notes (merged):\nFamily office context"
     assert cf["referred_to_constellation_dinners_by"] == "Chris Beaman"
     assert cf["investment_geography_preference"] == "Austin, Texas"
     assert cf["chris_knows_personally"] is True
@@ -1275,6 +1277,12 @@ async def test_new_mappings_never_overwrite_existing_populated_values(import_ser
 
 @pytest.mark.asyncio
 async def test_phase1_scalar_fields_never_overwrite_existing_populated_value(import_service):
+    """accredited_status/chris_knows_personally: plain fill-only-if-empty, unaffected by
+    Stage NP-2A -- a distinct incoming value is simply discarded, existing wins outright.
+    notes is the one deliberate exception (Stage NP-2A): a distinct incoming value is
+    preserved too, appended rather than discarded -- see the dedicated notes-merge tests
+    below for that behavior in detail; this test only needs to confirm the OTHER fields
+    were not accidentally changed by that field-specific carve-out."""
     await _seed_validated_single_selects(import_service)
     existing = await import_service.crm_service.create_contact({
         "email": "known@example.com",
@@ -1286,17 +1294,126 @@ async def test_phase1_scalar_fields_never_overwrite_existing_populated_value(imp
         "newer.csv",
         csv_bytes("Email,Notes,Accredited Status,Chris knows personally\nknown@example.com,New note,Yes,Yes\n"),
     )
-    mapping = suggest_mapping(batch.headers)  # Notes/Chris knows personally are alias-based, not
-    # classification-rule-driven -- must use the real suggested mapping, not a narrowed one, or
-    # they'd never even be read and this test would pass for the wrong reason.
+    mapping = suggest_mapping(batch.headers)  # Notes is classify_notes-driven (Stage NP-2) and
+    # Chris knows personally is alias-based -- must use the real suggested mapping, not a
+    # narrowed one, or they'd never even be read and this test would pass for the wrong reason.
     await import_service.preview(batch.import_batch_id, mapping)
     report = await import_service.commit(batch.import_batch_id)
 
     assert report.updated == 1
     updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
-    assert updated.custom_fields["notes"] == "Original note"
+    assert updated.custom_fields["notes"] == "Original note\n\nNotes (merged from import):\nNew note"
     assert updated.custom_fields["accredited_status"] == "No"
     assert updated.custom_fields["chris_knows_personally"] is False
+
+
+@pytest.mark.asyncio
+async def test_notes_merge_collision_preserves_existing_and_appends_both_incoming_columns(import_service):
+    """Stage NP-2A: classify_notes first canonicalizes the CSV row's own Notes+Personal
+    Notes columns into one value (Notes, then "Personal Notes (merged):" + Personal
+    Notes, since the two are distinct from each other); THAT canonical value is then
+    merged onto the existing Contact's already-populated notes -- preserved byte-for-byte,
+    with the incoming content appended under NOTES_IMPORT_MERGE_HEADER (this row's own
+    Notes column was populated, so this is NOT the personal-notes-only case). Nothing
+    from either CSV column is ever discarded, and personal_notes is never (re)populated."""
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact({
+        "email": "known@example.com",
+        "custom_fields": {"notes": "Original note"},
+    })
+    batch = await import_service.upload(
+        "newer.csv",
+        csv_bytes(
+            "Email,Notes,Personal Notes\nknown@example.com,New CSV notes,New CSV personal notes\n"
+        ),
+    )
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["notes"] == (
+        "Original note\n\nNotes (merged from import):\nNew CSV notes\n\nPersonal Notes (merged):\nNew CSV personal notes"
+    )
+    assert "personal_notes" not in updated.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_notes_blank_notes_only_csv_populates_directly(import_service):
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact({"email": "known@example.com"})
+    batch = await import_service.upload("newer.csv", csv_bytes("Email,Notes\nknown@example.com,General notes here\n"))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["notes"] == "General notes here"
+    assert "personal_notes" not in updated.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_notes_blank_personal_notes_only_csv_populates_notes_directly(import_service):
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact({"email": "known@example.com"})
+    batch = await import_service.upload("newer.csv", csv_bytes("Email,Personal Notes\nknown@example.com,Family office context\n"))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.updated == 1
+    updated = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert updated.custom_fields["notes"] == "Family office context"
+    assert "personal_notes" not in updated.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_notes_new_contact_with_personal_notes_only_csv_never_populates_personal_notes(import_service):
+    """Stage NP-2A on the CREATE path too, not just update -- a brand-new Contact
+    created from a CSV row with only a Personal Notes column must land that content
+    in canonical `notes`, never resurrect `personal_notes`."""
+    await _seed_validated_single_selects(import_service)
+    batch = await import_service.upload("new.csv", csv_bytes("Email,Personal Notes\nbrandnew@example.com,Spouse of an existing investor\n"))
+    mapping = suggest_mapping(batch.headers)
+    await import_service.preview(batch.import_batch_id, mapping)
+    report = await import_service.commit(batch.import_batch_id)
+
+    assert report.created == 1
+    contact = (await import_service.crm_service.list_contacts()).items[0]
+    assert contact.custom_fields["notes"] == "Spouse of an existing investor"
+    assert "personal_notes" not in contact.custom_fields
+
+
+@pytest.mark.asyncio
+async def test_notes_repeated_import_of_same_csv_appends_only_once(import_service):
+    """The idempotency requirement at full pipeline level, not just the pure merge
+    function -- committing the SAME CSV against the SAME Contact twice must not
+    double-append."""
+    await _seed_validated_single_selects(import_service)
+    existing = await import_service.crm_service.create_contact({
+        "email": "known@example.com", "custom_fields": {"notes": "Original note"},
+    })
+    csv_content = csv_bytes("Email,Notes\nknown@example.com,New note from later import\n")
+
+    batch1 = await import_service.upload("first.csv", csv_content)
+    mapping1 = suggest_mapping(batch1.headers)
+    await import_service.preview(batch1.import_batch_id, mapping1)
+    await import_service.commit(batch1.import_batch_id)
+
+    after_first = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    expected = "Original note\n\nNotes (merged from import):\nNew note from later import"
+    assert after_first.custom_fields["notes"] == expected
+
+    batch2 = await import_service.upload("second.csv", csv_content)
+    mapping2 = suggest_mapping(batch2.headers)
+    await import_service.preview(batch2.import_batch_id, mapping2)
+    await import_service.commit(batch2.import_batch_id)
+
+    after_second = await import_service.crm_service.get_contact(existing.crm_contact_id)
+    assert after_second.custom_fields["notes"] == expected  # unchanged -- not appended a second time
+    assert after_second.custom_fields["notes"].count("New note from later import") == 1
 
 
 @pytest.mark.asyncio

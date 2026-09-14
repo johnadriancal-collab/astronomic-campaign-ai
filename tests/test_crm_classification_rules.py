@@ -26,6 +26,7 @@ from app.services.crm_classification_rules import (
     classify_investor_mode,
     classify_dietary_preferences,
     classify_legacy_thesis_columns,
+    classify_notes,
     classify_revenue_stage,
     classify_role,
     classify_thesis_checklist_fields,
@@ -270,6 +271,55 @@ def test_role_never_falls_back_to_options_missing_from_context():
     row = {"Role": "Investor"}
     result = classify_role(row, NO_CONTEXT)  # no "role_options" key at all
     assert result == {}
+
+
+# --- classify_notes (Stage NP-2) ---
+
+
+def test_notes_only_column_populated_passes_through_verbatim():
+    row = {"Notes": "General notes here"}
+    result = classify_notes(row, NO_CONTEXT)
+    assert result == {"custom:notes": "General notes here"}
+
+
+def test_personal_notes_only_column_populated_targets_canonical_notes():
+    from app.models.crm import NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY
+
+    row = {"Personal Notes": "Family office context"}
+    result = classify_notes(row, NO_CONTEXT)
+    # Personal Notes is no longer an independent destination -- it lands in
+    # custom:notes directly, same as a bare Notes column would. Also tagged as
+    # personal-notes-only so apply_import_mapping picks the right append header
+    # (Stage NP-2A) if this ever needs to merge onto an existing Contact's notes.
+    assert result["custom:notes"] == "Family office context"
+    assert result[NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY] is True
+    assert "custom:personal_notes" not in result
+
+
+def test_notes_and_personal_notes_identical_collapse_to_one_copy():
+    row = {"Notes": "Angel investor, Austin-based", "Personal Notes": "  angel investor,   austin-based "}
+    result = classify_notes(row, NO_CONTEXT)
+    assert result == {"custom:notes": "Angel investor, Austin-based"}
+
+
+def test_notes_and_personal_notes_distinct_append_with_shared_header():
+    row = {"Notes": "General notes here", "Personal Notes": "Family office context"}
+    result = classify_notes(row, NO_CONTEXT)
+    assert result == {"custom:notes": "General notes here\n\nPersonal Notes (merged):\nFamily office context"}
+
+
+def test_notes_neither_column_populated_produces_no_keys():
+    row = {"First Name": "Ada"}
+    result = classify_notes(row, NO_CONTEXT)
+    assert result == {}
+
+
+def test_notes_merge_format_matches_the_production_migration_header_exactly():
+    from app.models.crm import NOTES_PERSONAL_NOTES_MERGE_HEADER
+
+    row = {"Notes": "A", "Personal Notes": "B"}
+    result = classify_notes(row, NO_CONTEXT)
+    assert NOTES_PERSONAL_NOTES_MERGE_HEADER in result["custom:notes"]
 
 
 # --- classify_dinner_subscriptions ---

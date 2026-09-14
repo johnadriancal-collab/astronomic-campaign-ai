@@ -45,7 +45,9 @@ from app.models.crm import (
     CustomFieldType,
     FilterFieldMeta,
     FilterQuery,
+    NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY,
     derive_investor_mode,
+    merge_notes_import,
     normalize_email,
     normalize_linkedin_url,
     normalize_name_company,
@@ -830,12 +832,27 @@ class CrmService:
         contacts get every mapped field set directly (nothing exists yet
         to protect). Existing contacts follow the merge rule described in
         this module's docstring.
+
+        `custom:notes` (Stage NP-2A) is the one exception to that generic
+        merge rule -- see _apply_custom_field's own docstring for why it
+        gets its own append-if-distinct/no-op-if-already-present behavior
+        instead of plain fill-only-if-empty. NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY
+        is looked up directly here (not via the generic loop below, which
+        already ignores it automatically as an unrecognized, non-"custom:"
+        target) so _apply_custom_field can choose the right append header.
         """
+        notes_source_personal_only = bool(mapped_fields.get(NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY))
         updates: dict[str, Any] = {}
         for field_name, incoming_value in mapped_fields.items():
             if field_name.startswith(CUSTOM_FIELD_PREFIX):
-                self._apply_custom_field(contact, updates, field_name[len(CUSTOM_FIELD_PREFIX) :], incoming_value, is_new)
+                field_key = field_name[len(CUSTOM_FIELD_PREFIX) :]
+                self._apply_custom_field(
+                    contact, updates, field_key, incoming_value, is_new,
+                    notes_source_personal_only=notes_source_personal_only if field_key == "notes" else False,
+                )
                 continue
+            if field_name == NOTES_SOURCE_IS_PERSONAL_NOTES_ONLY_KEY:
+                continue  # synthetic signal, already consumed above -- never a real field
             if field_name not in EXTERNAL_FIELD_NAMES and field_name not in THESIS_FIELD_NAMES:
                 continue  # unmapped/unknown target -- ignored, never guessed at
 
@@ -880,7 +897,13 @@ class CrmService:
         return contact.model_copy(update=updates)
 
     def _apply_custom_field(
-        self, contact: CrmContact, updates: dict[str, Any], field_key: str, incoming_value: Any, is_new: bool
+        self,
+        contact: CrmContact,
+        updates: dict[str, Any],
+        field_key: str,
+        incoming_value: Any,
+        is_new: bool,
+        notes_source_personal_only: bool = False,
     ) -> None:
         """
         Custom fields follow the SAME protection rule as thesis fields --
@@ -898,6 +921,18 @@ class CrmService:
         without ever dropping a selection that was already there --
         replacing the list outright would silently erase whatever the
         incoming row didn't happen to repeat.
+
+        `notes` (Stage NP-2A) is the second exception, deliberately scoped
+        to ONLY this one field -- every other scalar custom field keeps
+        plain fill-only-if-empty. The goal of Notes/Personal Notes
+        consolidation is for `notes` to become the durable destination for
+        ALL useful Notes intelligence, not merely to stop writing
+        `personal_notes` -- so a re-import with genuinely new Notes/
+        Personal Notes content must not be silently discarded just because
+        the Contact already has SOME notes. See merge_notes_import()
+        (app/models/crm.py) for the exact no-op/copy/append semantics; this
+        method only decides that `notes` gets that function instead of the
+        generic fill-only-if-empty rule below.
         """
         base = updates.get("custom_fields", contact.custom_fields)
         current = base.get(field_key)
@@ -912,6 +947,16 @@ class CrmService:
             merged = _union_merge_list(existing_list, incoming_value)
             if merged != existing_list:
                 updates["custom_fields"] = {**base, field_key: merged}
+            return
+
+        if field_key == "notes" and isinstance(incoming_value, str):
+            merged_notes = merge_notes_import(
+                current if isinstance(current, str) else None,
+                incoming_value,
+                source_is_personal_notes_only=notes_source_personal_only,
+            )
+            if merged_notes != current:
+                updates["custom_fields"] = {**base, field_key: merged_notes}
             return
 
         # See LATEST_WINS_CUSTOM_FIELDS above -- these always take the incoming value
