@@ -21,6 +21,31 @@ import {
   participantSourceLabel,
 } from "./client-crm.ts";
 
+// Event History generalization stage: the two-axis rsvp_status/attendance_status
+// model (see EngagementParticipant's own backend docstring for why they're kept
+// separate) collapses to ONE user-facing status word for the card's primary
+// line -- attendance_status wins whenever it's set (it answers the more
+// specific "did they actually show up" question), falling back to
+// rsvp_status, and finally "—" when neither is known. Nothing is lost from
+// the API by doing this: rsvpLabel/attendanceLabel below still carry both
+// individually for any other consumer.
+function primaryStatusLabel(
+  attendanceStatus: ApiContactEventHistoryEntry["attendance_status"],
+  rsvpStatus: ApiContactEventHistoryEntry["rsvp_status"]
+): string {
+  if (attendanceStatus !== null) return participantAttendanceStatusLabel(attendanceStatus);
+  if (rsvpStatus !== null) return participantRsvpStatusLabel(rsvpStatus);
+  return "—";
+}
+
+// Guest is the default role Luma sync (and most manual adds) always uses --
+// showing it on every single card would be noise, not signal. Any OTHER role
+// (Host, Sponsor, Speaker/Panelist, Astronomic Team, Client, Other) is
+// meaningfully different from "just attended as a guest" and worth a line.
+function isNoteworthyRole(role: ApiContactEventHistoryEntry["role"]): boolean {
+  return role !== "guest";
+}
+
 export interface ContactEventHistoryEntry {
   eventName: string;
   lumaEventId: string;
@@ -86,13 +111,21 @@ export interface ParticipantEventHistoryEntry {
   engagementId: string;
   participantId: string;
   eventName: string;
-  clientName: string;
+  // Event History generalization stage -- the card's own simplified visual
+  // hierarchy: event name (primary), then this line combining date/location/
+  // status (primary metadata), then secondaryLabel (role and/or client, only
+  // when there's something noteworthy to show). None of the existing fields
+  // below are removed -- this only ADDS a simpler way to render the same data.
+  metaLabel: string; // "Sep 10, 2026 · Austin, TX · Attended" (omits any missing piece)
+  secondaryLabel: string | null; // role (if not the default Guest) and/or client name; null if neither applies
+  location: string | null;
+  clientName: string | null; // null for Astronomic's own directly-hosted events (see backend docstring)
   dateLabel: string; // formatClientDate's own "—" for a null date
   typeLabel: string; // e.g. "Dinner · Donor Dinner", or just "Sponsorship" for a non-dinner
   roleLabel: string;
   rsvpLabel: string; // "—" for null (participantRsvpStatusLabel's own null handling)
   attendanceLabel: string; // "—" for null
-  sourceLabel: string; // "Manual" or "Luma"
+  sourceLabel: string; // "Manual" or "Luma" -- kept in the data, just not emphasized in the default card
 }
 
 export function buildParticipantEventHistoryEntry(entry: ApiContactEventHistoryEntry): ParticipantEventHistoryEntry {
@@ -100,12 +133,26 @@ export function buildParticipantEventHistoryEntry(entry: ApiContactEventHistoryE
     ? `${engagementTypeLabel(entry.engagement_type)} · ${dinnerTypeLabel(entry.dinner_type)}`
     : engagementTypeLabel(entry.engagement_type);
 
+  const dateLabel = formatClientDate(entry.engagement_date);
+  const statusLabel = primaryStatusLabel(entry.attendance_status, entry.rsvp_status);
+  const metaLabel = [dateLabel !== "—" ? dateLabel : null, entry.location, statusLabel !== "—" ? statusLabel : null]
+    .filter((part): part is string => Boolean(part))
+    .join(" · ");
+
+  const secondaryParts: string[] = [];
+  if (isNoteworthyRole(entry.role)) secondaryParts.push(participantRoleLabel(entry.role));
+  if (entry.client_name) secondaryParts.push(entry.client_name);
+  const secondaryLabel = secondaryParts.length > 0 ? secondaryParts.join(" · ") : null;
+
   return {
     engagementId: entry.engagement_id,
     participantId: entry.participant_id,
     eventName: entry.event_name,
+    metaLabel,
+    secondaryLabel,
+    location: entry.location,
     clientName: entry.client_name,
-    dateLabel: formatClientDate(entry.engagement_date),
+    dateLabel,
     typeLabel,
     roleLabel: participantRoleLabel(entry.role),
     rsvpLabel: participantRsvpStatusLabel(entry.rsvp_status),

@@ -569,13 +569,10 @@ export default function CrmContactDetailPage() {
                 {eventHistory.map((entry) => (
                   <li key={`${entry.engagementId}-${entry.participantId}`} className="border-b border-border pb-3 last:border-0 last:pb-0">
                     <p className="text-sm font-medium text-foreground">{entry.eventName}</p>
-                    <p className="text-xs text-muted-foreground">
-                      {entry.clientName} · {entry.typeLabel}
-                    </p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      {entry.dateLabel} · {entry.roleLabel} · RSVP: {entry.rsvpLabel} · Attendance: {entry.attendanceLabel} ·{" "}
-                      {entry.sourceLabel}
-                    </p>
+                    {entry.metaLabel && <p className="text-xs text-muted-foreground">{entry.metaLabel}</p>}
+                    {entry.secondaryLabel && (
+                      <p className="mt-0.5 text-xs text-muted-foreground">{entry.secondaryLabel}</p>
+                    )}
                   </li>
                 ))}
               </ul>

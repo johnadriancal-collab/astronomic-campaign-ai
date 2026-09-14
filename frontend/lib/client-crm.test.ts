@@ -729,11 +729,15 @@ function makeEngagementParticipant(overrides: Partial<EngagementParticipant> = {
 
 // --- labels/options --------------------------------------------------------
 
-test("PARTICIPANT_ROLE_OPTIONS has exactly the six approved values -- Client and Host stay distinct, no Moderator", () => {
+test("PARTICIPANT_ROLE_OPTIONS has exactly the seven approved values -- Client and Host stay distinct, no Moderator", () => {
   assert.deepEqual(
     PARTICIPANT_ROLE_OPTIONS.map((o) => o.value),
-    ["guest", "client", "host", "speaker_panelist", "astronomic_team", "other"]
+    ["guest", "client", "host", "speaker_panelist", "astronomic_team", "sponsor", "other"]
   );
+});
+
+test("Sponsor (Event History generalization stage) has a real label, not a raw-value fallback", () => {
+  assert.equal(participantRoleLabel("sponsor"), "Sponsor");
 });
 
 test("participantRoleLabel falls back to the raw value for an unrecognized role", () => {

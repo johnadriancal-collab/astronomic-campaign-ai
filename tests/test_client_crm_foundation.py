@@ -479,9 +479,12 @@ def test_participant_role_client_and_host_are_distinct_values():
 
 def test_participant_role_has_no_dedicated_moderator_value():
     """Moderator stays folded into SPEAKER_PANELIST for V1 -- no concrete
-    need for the distinction was found."""
+    need for the distinction was found. SPONSOR was added in the Event
+    History generalization stage as a safe, purely additive enum value
+    (see ParticipantRole's own docstring) -- it is included here rather
+    than treated as a moderator-style omission."""
     assert {member.value for member in ParticipantRole} == {
-        "guest", "client", "host", "speaker_panelist", "astronomic_team", "other",
+        "guest", "client", "host", "speaker_panelist", "astronomic_team", "sponsor", "other",
     }
 
 

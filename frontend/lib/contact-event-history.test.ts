@@ -73,6 +73,7 @@ function makeParticipantEntry(overrides: Partial<ContactEventHistoryEntry> = {})
     participant_id: "p1",
     event_name: "Austin Donor Dinner",
     client_name: "Miracle Foundation",
+    location: "Austin, Texas",
     engagement_date: "2026-10-08",
     engagement_type: "dinner",
     dinner_type: "donor_dinner",
@@ -134,10 +135,80 @@ test("no dinner_type falls back to just the Engagement Type label", () => {
 });
 
 test("every role value produces a real, friendly label, not the raw enum string", () => {
-  for (const role of ["guest", "client", "host", "speaker_panelist", "astronomic_team", "other"] as const) {
+  for (const role of ["guest", "client", "host", "speaker_panelist", "astronomic_team", "sponsor", "other"] as const) {
     const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ role }));
     assert.notEqual(entry.roleLabel, role);
   }
+});
+
+// --- Event History generalization stage: metaLabel / secondaryLabel / location ---
+
+test("metaLabel combines date, location, and status with middot separators", () => {
+  const entry = buildParticipantEventHistoryEntry(
+    makeParticipantEntry({ engagement_date: "2026-09-10", location: "Austin, TX", attendance_status: "attended", rsvp_status: null })
+  );
+  assert.equal(entry.metaLabel, "Sep 10, 2026 · Austin, TX · Attended");
+});
+
+test("metaLabel omits a missing location without leaving a stray separator", () => {
+  const entry = buildParticipantEventHistoryEntry(
+    makeParticipantEntry({ engagement_date: "2026-09-10", location: null, attendance_status: "attended" })
+  );
+  assert.equal(entry.metaLabel, "Sep 10, 2026 · Attended");
+});
+
+test("metaLabel prefers attendance_status over rsvp_status when both are set", () => {
+  const entry = buildParticipantEventHistoryEntry(
+    makeParticipantEntry({ attendance_status: "attended", rsvp_status: "confirmed" })
+  );
+  assert.ok(entry.metaLabel.endsWith("Attended"), `expected metaLabel to end with Attended, got "${entry.metaLabel}"`);
+});
+
+test("metaLabel falls back to rsvp_status when attendance_status is null", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ attendance_status: null, rsvp_status: "confirmed" }));
+  assert.ok(entry.metaLabel.endsWith("Confirmed"), `expected metaLabel to end with Confirmed, got "${entry.metaLabel}"`);
+});
+
+test("secondaryLabel shows just the client name for a default Guest role at a real Client dinner", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ role: "guest", client_name: "Miracle Foundation" }));
+  assert.equal(entry.secondaryLabel, "Miracle Foundation");
+});
+
+test("secondaryLabel is null when role is the default Guest and there is no client to show (Astronomic-hosted event)", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ role: "guest", client_name: null }));
+  assert.equal(entry.secondaryLabel, null);
+});
+
+test("secondaryLabel shows the role when it is noteworthy (Host), even with no client", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ role: "host", client_name: null }));
+  assert.equal(entry.secondaryLabel, "Host");
+});
+
+test("secondaryLabel shows Sponsor as a noteworthy role", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ role: "sponsor", client_name: null }));
+  assert.equal(entry.secondaryLabel, "Sponsor");
+});
+
+test("secondaryLabel combines a noteworthy role and a real client together", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ role: "host", client_name: "Miracle Foundation" }));
+  assert.equal(entry.secondaryLabel, "Host · Miracle Foundation");
+});
+
+test("clientName passes through null unchanged (Astronomic's own directly-hosted events)", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ client_name: null }));
+  assert.equal(entry.clientName, null);
+});
+
+test("location passes through unchanged, including null", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ location: "San Francisco, CA" }));
+  assert.equal(entry.location, "San Francisco, CA");
+  const entryNull = buildParticipantEventHistoryEntry(makeParticipantEntry({ location: null }));
+  assert.equal(entryNull.location, null);
+});
+
+test("sourceLabel is still computed even though the card no longer emphasizes it", () => {
+  const entry = buildParticipantEventHistoryEntry(makeParticipantEntry({ source: "manual" }));
+  assert.equal(entry.sourceLabel, "Manual");
 });
 
 test("buildParticipantEventHistory maps in the given order without re-sorting -- trusts the backend's own ordering", () => {

@@ -56,6 +56,20 @@ class ClientRelationshipClassification(str, Enum):
     CLOSED_INACTIVE = "closed_inactive"
 
 
+# Event History generalization stage (2026-09-14): the one reserved Client
+# name representing Astronomic's own directly-hosted events (Austin Forward,
+# and future non-Luma, non-client-dinner events) -- NOT a real external
+# company. Deliberately just a NAME convention, not a hardcoded client_id:
+# the backfill script that creates/reuses this Client does so idempotently
+# by looking it up by this exact name (get-or-create), so no ID needs to be
+# baked into code anywhere. Used by ClientCrmService.list_contact_event_history()
+# to decide when to suppress client_name from the Contact-facing Event
+# History projection (see ContactEventHistoryEntry's own docstring) -- this
+# Client itself is a completely ordinary row everywhere else in the product
+# (Client CRM's own list/detail pages show it like any other Client).
+DIRECT_EVENTS_CLIENT_NAME = "Astronomic — Direct Events"
+
+
 class Client(BaseModel):
     """The durable company/account relationship record -- e.g. "Hive
     ASMBLD". Owns nothing else directly; ClientContact/Engagement/
@@ -467,13 +481,26 @@ class ParticipantRole(str, Enum):
     values (revisited after this stage's own investigation proposed
     combining them) -- Astronomic's own review preferred keeping them
     distinct. Moderator is NOT a separate value yet -- folds into
-    SPEAKER_PANELIST until a concrete need for the distinction exists."""
+    SPEAKER_PANELIST until a concrete need for the distinction exists.
+
+    SPONSOR (Event History generalization stage, 2026-09-14): added after
+    confirming it's a purely additive, non-destructive enum extension --
+    EngagementParticipant.role is stored inside the participant's JSON
+    blob (no SQL-level enum/CHECK constraint to alter), the one
+    role-filtering consumer (ContactEngagementSignalService._ELIGIBLE_ROLES,
+    {GUEST, SPEAKER_PANELIST}) already treats every unlisted role
+    (HOST/CLIENT/ASTRONOMIC_TEAM/OTHER) as simply not eligible and needs no
+    change for SPONSOR to join that same non-eligible set, and the
+    frontend's participantRoleLabel() already falls back to the raw value
+    for anything not in its label map. Distinguishes event sponsors (a
+    meaningful, reusable Astronomic-wide role) from OTHER."""
 
     GUEST = "guest"
     CLIENT = "client"
     HOST = "host"
     SPEAKER_PANELIST = "speaker_panelist"
     ASTRONOMIC_TEAM = "astronomic_team"
+    SPONSOR = "sponsor"
     OTHER = "other"
 
 
@@ -717,12 +744,29 @@ class ContactEventHistoryEntry(BaseModel):
     `attendance_status`/`source` reuse the EXACT existing enums already
     defined above -- a manually-created Guest/Confirmed participant and a
     Luma-created one are indistinguishable in shape, differing only in
-    `source`."""
+    `source`.
+
+    `location` (Event History generalization stage, 2026-09-14) is
+    Engagement.location, added so the Contact-facing card can show city
+    without a second lookup -- purely additive, no change to any existing
+    field's meaning.
+
+    `client_name` (same stage) is now nullable: `None` specifically (and
+    only) when the underlying Engagement's Client is the reserved internal
+    "Astronomic -- Direct Events" pseudo-client used for Astronomic's own
+    directly-hosted events (Austin Forward, etc.) that aren't run on
+    behalf of any real external Client -- see
+    ClientCrmService.list_contact_event_history()'s own docstring for the
+    exact suppression rule. This affects ONLY this read-only Contact
+    Event History projection: the real Client row, its name, and its own
+    Client CRM pages are completely unaffected and still show normally
+    everywhere else in the product."""
 
     engagement_id: str
     participant_id: str
     event_name: str  # Engagement.title
-    client_name: str  # Client.name
+    client_name: str | None  # Client.name; None only for the internal direct-events pseudo-client
+    location: str | None = None  # Engagement.location
     engagement_date: date | None
     engagement_type: EngagementType
     dinner_type: DinnerType | None

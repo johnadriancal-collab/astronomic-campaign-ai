@@ -725,6 +725,7 @@ export const PARTICIPANT_ROLE_OPTIONS: { value: ParticipantRole; label: string }
   { value: "host", label: "Host" },
   { value: "speaker_panelist", label: "Speaker / Panelist" },
   { value: "astronomic_team", label: "Astronomic Team" },
+  { value: "sponsor", label: "Sponsor" },
   { value: "other", label: "Other" },
 ];
 

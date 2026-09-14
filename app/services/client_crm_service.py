@@ -61,6 +61,7 @@ from app.models.client_crm import (
     ContactEventHistoryEntry,
     ContactType,
     DeclineOrigin,
+    DIRECT_EVENTS_CLIENT_NAME,
     Engagement,
     EngagementCloseout,
     EngagementParticipant,
@@ -1423,6 +1424,16 @@ class ClientCrmService:
         stage's own approved design for why omission, not an error, is
         the least-surprising behavior here.
 
+        Event History generalization stage (2026-09-14): when the
+        resolved Client is the reserved DIRECT_EVENTS_CLIENT_NAME
+        pseudo-client (Astronomic's own directly-hosted events, e.g.
+        Austin Forward -- never a real external company), `client_name` is
+        set to None on that entry instead of the pseudo-client's literal
+        name -- see ContactEventHistoryEntry's own docstring for why. This
+        is a purely cosmetic suppression on THIS read projection only;
+        the real Client row is untouched and still shows normally
+        everywhere else (Client CRM's own list/detail pages, etc.).
+
         Ordering is entirely this method's responsibility (never the
         caller's): engagement_date descending, Clients/participants with
         no engagement_date sorting last regardless, tie-broken by
@@ -1449,7 +1460,8 @@ class ClientCrmService:
                     engagement_id=engagement.engagement_id,
                     participant_id=p.participant_id,
                     event_name=engagement.title,
-                    client_name=client.name,
+                    client_name=None if client.name == DIRECT_EVENTS_CLIENT_NAME else client.name,
+                    location=engagement.location,
                     engagement_date=engagement.engagement_date,
                     engagement_type=engagement.engagement_type,
                     dinner_type=engagement.dinner_type,

@@ -43,14 +43,19 @@ test("the page never re-sorts the event history it receives", () => {
   assert.doesNotMatch(CONTACT_DETAIL_PAGE, /\.sort\(/);
 });
 
-test("the card renders Role/RSVP/Attendance/Source labels, not raw enum strings", () => {
+test("the card renders the derived metaLabel/secondaryLabel hierarchy (Event History generalization stage), not raw enum strings", () => {
+  // The card was intentionally simplified to Event Name / Date · Location ·
+  // Status / Role-or-client, per explicit user approval in the Event
+  // History generalization stage. The underlying per-field labels
+  // (roleLabel, rsvpLabel, attendanceLabel, sourceLabel) are still computed
+  // and available on ParticipantEventHistoryEntry -- see
+  // contact-event-history.test.ts -- nothing was removed from the data
+  // layer, only the page's own rendering was simplified.
   const cardMatch = CONTACT_DETAIL_PAGE.match(/<CardTitle className="text-sm">Event History<\/CardTitle>[\s\S]*?<\/Card>/);
   assert.ok(cardMatch, "expected to find the Event History card");
   const card = cardMatch![0];
-  assert.match(card, /entry\.roleLabel/);
-  assert.match(card, /entry\.rsvpLabel/);
-  assert.match(card, /entry\.attendanceLabel/);
-  assert.match(card, /entry\.sourceLabel/);
+  assert.match(card, /entry\.metaLabel/);
+  assert.match(card, /entry\.secondaryLabel/);
 });
 
 test("existing loading/empty states remain present", () => {

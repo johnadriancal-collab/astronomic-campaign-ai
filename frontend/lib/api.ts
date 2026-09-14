@@ -619,11 +619,18 @@ export function getCrmContactLumaRegistrations(crmContactId: string): Promise<Cr
 // EngagementParticipant/Engagement/Client field -- a manually-created
 // Guest/Confirmed row and a Luma-created one are the exact same shape,
 // differing only in `source`. Read-only: never mutates anything.
+//
+// Event History generalization stage: `location` is new (Engagement.location,
+// may be null for an older Engagement that never recorded one).
+// `client_name` is now nullable -- null specifically (and only) for
+// Astronomic's own directly-hosted events (the internal "Astronomic --
+// Direct Events" pseudo-client), never for a real external Client dinner.
 export interface ContactEventHistoryEntry {
   engagement_id: string;
   participant_id: string;
   event_name: string;
-  client_name: string;
+  client_name: string | null;
+  location: string | null;
   engagement_date: string | null; // "YYYY-MM-DD"
   engagement_type: EngagementType;
   dinner_type: DinnerType | null;
@@ -2110,7 +2117,7 @@ export function updateEngagementCloseout(
 // (engagement_id, crm_contact_id) -- enforced by a real backend unique
 // index; archiving does not free the slot, only restoring does.
 
-export type ParticipantRole = "guest" | "client" | "host" | "speaker_panelist" | "astronomic_team" | "other";
+export type ParticipantRole = "guest" | "client" | "host" | "speaker_panelist" | "astronomic_team" | "sponsor" | "other";
 export type ParticipantRsvpStatus = "invited" | "confirmed" | "declined";
 export type ParticipantAttendanceStatus = "attended" | "no_show" | "cancelled";
 export type ParticipantSource = "manual" | "luma";
