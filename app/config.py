@@ -213,6 +213,41 @@ class Settings(BaseSettings):
     luma_api_key: str | None = None
     luma_webhook_secret: str | None = None
 
+    # Stage 6A Capture (2026-09-14) -- OPTIONAL, additional webhook signing
+    # secret(s), tried only if luma_webhook_secret itself doesn't verify
+    # (see app/luma/webhook_signature.py's verify_luma_webhook_signature_with_fallback()
+    # and app/dependencies.py's verify_luma_webhook_request()). Deliberately
+    # a SEPARATE setting, never merged into luma_webhook_secret itself --
+    # that variable already authenticates the one real, working production
+    # Luma webhook today and must never be migrated, renamed, or converted
+    # into a list; this exists purely to let a SECOND, independent Luma
+    # webhook (its own signing secret, per Luma's own per-webhook secret
+    # model) verify too, without touching the primary secret's config or
+    # behavior in any way. Comma-separated, same parsing convention as
+    # unsubscribe_token_encryption_keys (see app/services/unsubscribe_token.py) --
+    # order doesn't matter here (unlike that key-rotation case), every
+    # configured value is simply tried in turn after the primary secret.
+    # None/unset (the default) means exactly what it does today: only the
+    # primary secret is ever tried, byte-identical to before this setting
+    # existed.
+    luma_additional_webhook_secrets: str | None = None
+
+    # Stage 6A Capture (2026-09-14) -- temporary, narrowly-scoped schema-
+    # discovery capture for calendar.person.subscribed/unsubscribed
+    # deliveries (see app/services/luma_sync_service.py's handle_webhook()
+    # and app/repositories/luma_calendar_event_capture_store.py). Defaults
+    # False (fails CLOSED, same precedent as every other feature flag in
+    # this file) -- while False, those two event types are handled exactly
+    # as they are today: silently ignored, zero storage, zero CRM/Contact/
+    # Activity Log/MailSuppression effect. This flag is INDEPENDENT of
+    # whether Luma has even been configured to send these event types at
+    # all (see Stage 6A's own investigation history) -- it exists purely
+    # as an extra manual gate on top of that. This is temporary,
+    # schema-discovery-only infrastructure, meant to be removed once a
+    # real payload has been captured and inspected -- never a permanent
+    # feature flag.
+    luma_calendar_event_capture_enabled: bool = False
+
     # Luma self-report Company/Job Title -> CrmContact enrichment (see
     # app/services/luma_contact_enrichment.py). Defaults False (fails
     # CLOSED, same precedent as mail_sending_engine_enabled below) -- while

@@ -54,6 +54,7 @@ from app.models.luma import (
     LumaApprovalStatus,
     LumaBackfillCheckpoint,
     LumaBackfillStatus,
+    LumaCalendarEventCapture,
     LumaEvent,
     LumaEventBackfillResult,
     LumaEventTicket,
@@ -65,6 +66,7 @@ from app.models.luma import (
 )
 from app.repositories.engagement_store import EngagementStore
 from app.repositories.luma_backfill_checkpoint_store import LumaBackfillCheckpointStore
+from app.repositories.luma_calendar_event_capture_store import LumaCalendarEventCaptureStore
 from app.repositories.luma_event_store import LumaEventStore
 from app.repositories.luma_question_mapping_store import LumaQuestionMappingStore
 from app.repositories.luma_registration_store import LumaRegistrationStore
@@ -86,6 +88,13 @@ from app.services.luma_engagement_participant_sync_service import LumaEngagement
 # architecture report: Luma doesn't cleanly expose event status/history,
 # and only guest/ticket data is needed for the CRM sync).
 SUPPORTED_WEBHOOK_TYPES = frozenset({"guest.registered", "guest.updated", "guest.refunded", "ticket.registered"})
+
+# Stage 6A Capture (2026-09-14) -- the exact two, and only two, event
+# types the temporary schema-discovery capture reacts to. Deliberately a
+# closed set checked BEFORE SUPPORTED_WEBHOOK_TYPES above, not a generic
+# "capture anything unsupported" mechanism -- see handle_webhook()'s own
+# docstring for why.
+CALENDAR_EVENT_CAPTURE_TYPES = frozenset({"calendar.person.subscribed", "calendar.person.unsubscribed"})
 
 
 class LumaSyncError(Exception):
@@ -311,6 +320,7 @@ class LumaSyncService:
         luma_client: LumaClient | None = None,
         participant_sync_service: LumaEngagementParticipantSyncService | None = None,
         engagement_store: EngagementStore | None = None,
+        calendar_event_capture_store: LumaCalendarEventCaptureStore | None = None,
     ):
         self.crm_service = crm_service
         self.event_store = event_store
@@ -338,6 +348,13 @@ class LumaSyncService:
         # Engagement lookup for provenance; never required for the
         # enrichment itself to run. See _apply_luma_location_enrichment.
         self.engagement_store = engagement_store
+        # Stage 6A Capture (2026-09-14) -- optional, same "skip entirely
+        # when unset" convention as every other optional dependency above.
+        # Used ONLY by handle_webhook()'s own narrow, two-exact-event-type
+        # capture branch (see CALENDAR_EVENT_CAPTURE_TYPES) -- never
+        # referenced by process_guest_event()/_process_guest_event_locked()
+        # or anything in the guest-registration path.
+        self.calendar_event_capture_store = calendar_event_capture_store
         # Per-guest-id concurrency guard -- see process_guest_event()'s
         # docstring for the race this closes. Deliberately per-guest, not a
         # single global lock: two DIFFERENT guests' webhooks still process
@@ -1043,7 +1060,37 @@ class LumaSyncService:
         process_guest_event(), since this is the only place a genuinely
         LIVE Luma delivery (not a historical replay) enters this
         service. See process_guest_event()'s own docstring for the full
-        safeguard contract."""
+        safeguard contract.
+
+        Stage 6A Capture (2026-09-14): the temporary schema-discovery
+        capture is checked FIRST, before SUPPORTED_WEBHOOK_TYPES, and
+        returns immediately either way -- it can never fall through into
+        guest/ticket processing, Contact matching/creation, participant
+        sync, Stage 6B location enrichment, MailSuppression, or the
+        Activity Log, all of which live entirely below this block and are
+        never reached from it. Deliberately a closed, exact check against
+        CALENDAR_EVENT_CAPTURE_TYPES -- never a generic "capture any
+        unsupported event type" mechanism. Gated by
+        settings.luma_calendar_event_capture_enabled (default False): while
+        False, these two event types are handled exactly as they are
+        today (silently ignored by the SUPPORTED_WEBHOOK_TYPES check
+        below, zero storage). Idempotent and bounded to at most one
+        stored row per event type for the lifetime of this mechanism --
+        see LumaCalendarEventCaptureStore.save_if_first_for_event_type()'s
+        own docstring for the exact, atomic guarantee. Never logs the raw
+        payload."""
+        if event_type in CALENDAR_EVENT_CAPTURE_TYPES:
+            if settings.luma_calendar_event_capture_enabled and self.calendar_event_capture_store is not None:
+                await self.calendar_event_capture_store.save_if_first_for_event_type(
+                    LumaCalendarEventCapture(
+                        event_type=event_type,
+                        delivery_id=webhook_delivery_id,
+                        captured_at=datetime.now(timezone.utc),
+                        raw_payload=data,
+                    )
+                )
+            return None
+
         if event_type not in SUPPORTED_WEBHOOK_TYPES:
             return None
 

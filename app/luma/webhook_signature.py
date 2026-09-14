@@ -63,6 +63,42 @@ def verify_luma_webhook_signature(
         raise LumaWebhookSignatureError("Webhook signature does not match.")
 
 
+def verify_luma_webhook_signature_with_fallback(
+    primary_secret: str, additional_secrets: list[str], raw_body: bytes, signature_header: str | None, now: datetime
+) -> None:
+    """Stage 6A Capture (2026-09-14) -- tries `primary_secret` FIRST, via
+    the exact same verify_luma_webhook_signature() above (today's own,
+    completely unmodified, existing-webhook behavior), then each of
+    `additional_secrets` in order, returning on the first success. Exists
+    to let a SECOND, independently-registered Luma webhook (its own,
+    different signing secret -- see Luma's per-webhook secret model)
+    verify too, without ever touching `primary_secret`'s own config,
+    behavior, or the one real, working production webhook it already
+    authenticates.
+
+    Raises LumaWebhookSignatureError -- the SAME single collapsed
+    exception type as verify_luma_webhook_signature() itself -- only when
+    EVERY secret fails, so the caller's response (a generic 401, per this
+    module's own docstring) is byte-identical whether zero or many
+    additional secrets are configured, and never reveals which secret (if
+    any) came closest. Never logs which secret matched, any secret value,
+    or any signature content -- this function's only observable behavior
+    is raise-or-return.
+
+    `additional_secrets` empty (today's default, before this setting is
+    ever configured) means exactly one attempt (`primary_secret`) --
+    identical to calling verify_luma_webhook_signature() directly."""
+    last_error: LumaWebhookSignatureError | None = None
+    for secret in (primary_secret, *additional_secrets):
+        try:
+            verify_luma_webhook_signature(secret, raw_body, signature_header, now)
+            return
+        except LumaWebhookSignatureError as e:
+            last_error = e
+    assert last_error is not None  # the loop always runs at least once (primary_secret)
+    raise last_error
+
+
 def _parse_signature_header(header: str) -> tuple[str, str] | None:
     """Parses "t=169000000,v1=abcdef..." -> ("169000000", "abcdef..."). None
     if either the timestamp or signature component is missing."""

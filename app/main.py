@@ -87,6 +87,7 @@ from app.repositories.sqlite_email_sequence_store import SQLiteEmailSequenceStor
 from app.repositories.sqlite_itf_ingestion_log_store import SQLiteItfIngestionLogStore
 from app.repositories.sqlite_lead_store import SQLiteLeadStore
 from app.repositories.sqlite_luma_backfill_checkpoint_store import SQLiteLumaBackfillCheckpointStore
+from app.repositories.sqlite_luma_calendar_event_capture_store import SQLiteLumaCalendarEventCaptureStore
 from app.repositories.sqlite_luma_event_store import SQLiteLumaEventStore
 from app.repositories.sqlite_luma_question_mapping_store import SQLiteLumaQuestionMappingStore
 from app.repositories.sqlite_luma_registration_store import SQLiteLumaRegistrationStore
@@ -196,6 +197,10 @@ async def lifespan(app: FastAPI):
     luma_registration_store = SQLiteLumaRegistrationStore(settings.database_path)
     luma_question_mapping_store = SQLiteLumaQuestionMappingStore(settings.database_path)
     luma_backfill_checkpoint_store = SQLiteLumaBackfillCheckpointStore(settings.database_path)
+    # Stage 6A Capture (2026-09-14) -- temporary, schema-discovery-only
+    # store, isolated from every canonical Luma/CRM store above. See
+    # app/models/luma.py's LumaCalendarEventCapture docstring.
+    luma_calendar_event_capture_store = SQLiteLumaCalendarEventCaptureStore(settings.database_path)
     worker_lease_store = SQLiteWorkerLeaseStore(settings.database_path)
     await campaign_store.connect()
     await lead_store.connect()
@@ -238,6 +243,7 @@ async def lifespan(app: FastAPI):
     await luma_registration_store.connect()
     await luma_question_mapping_store.connect()
     await luma_backfill_checkpoint_store.connect()
+    await luma_calendar_event_capture_store.connect()
     await worker_lease_store.connect()
 
     activity_log_service = ActivityLogService(store=activity_event_store)
@@ -525,6 +531,7 @@ async def lifespan(app: FastAPI):
         luma_client=LumaClient(),
         participant_sync_service=luma_engagement_participant_sync_service,
         engagement_store=engagement_store,
+        calendar_event_capture_store=luma_calendar_event_capture_store,
     )
 
     yield
@@ -575,6 +582,7 @@ async def lifespan(app: FastAPI):
     await luma_registration_store.close()
     await luma_question_mapping_store.close()
     await luma_backfill_checkpoint_store.close()
+    await luma_calendar_event_capture_store.close()
     await worker_lease_store.close()
 
 

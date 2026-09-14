@@ -14,6 +14,7 @@ from app.luma.webhook_signature import (
     MAX_SIGNATURE_AGE_SECONDS,
     LumaWebhookSignatureError,
     verify_luma_webhook_signature,
+    verify_luma_webhook_signature_with_fallback,
 )
 
 SECRET = "whsec_test_secret_value"
@@ -134,3 +135,75 @@ def test_signature_is_body_specific():
 
     with pytest.raises(LumaWebhookSignatureError):
         verify_luma_webhook_signature(SECRET, tampered_body, header, now)
+
+
+# --- Stage 6A Capture: verify_luma_webhook_signature_with_fallback ---------
+# (2026-09-14) -- LUMA_ADDITIONAL_WEBHOOK_SECRETS support. Permanent,
+# general-purpose multi-webhook capability -- NOT part of the temporary
+# capture mechanism itself (that lives in test_luma_calendar_event_capture.py).
+
+
+ADDITIONAL_SECRET = "whsec_second_webhook_secret"
+
+
+def test_fallback_with_no_additional_secrets_behaves_exactly_like_the_single_secret_check():
+    now = datetime.now(timezone.utc)
+    body = b'{"type": "guest.registered", "data": {}}'
+    timestamp = int(now.timestamp())
+    header = _sign(SECRET, timestamp, body)
+
+    verify_luma_webhook_signature_with_fallback(SECRET, [], body, header, now)  # must not raise
+
+
+def test_fallback_rejects_when_no_additional_secrets_and_primary_is_wrong():
+    now = datetime.now(timezone.utc)
+    body = b'{"type": "guest.registered", "data": {}}'
+    timestamp = int(now.timestamp())
+    header = _sign("wrong-secret", timestamp, body)
+
+    with pytest.raises(LumaWebhookSignatureError):
+        verify_luma_webhook_signature_with_fallback(SECRET, [], body, header, now)
+
+
+def test_fallback_verifies_primary_secret_without_even_trying_additional():
+    now = datetime.now(timezone.utc)
+    body = b'{"type": "guest.registered", "data": {}}'
+    timestamp = int(now.timestamp())
+    header = _sign(SECRET, timestamp, body)  # signed with the PRIMARY secret
+
+    verify_luma_webhook_signature_with_fallback(SECRET, [ADDITIONAL_SECRET], body, header, now)  # must not raise
+
+
+def test_fallback_verifies_via_an_additional_secret_when_primary_does_not_match():
+    now = datetime.now(timezone.utc)
+    body = b'{"type": "calendar.person.subscribed", "data": {}}'
+    timestamp = int(now.timestamp())
+    header = _sign(ADDITIONAL_SECRET, timestamp, body)  # signed with the ADDITIONAL secret, not primary
+
+    verify_luma_webhook_signature_with_fallback(SECRET, [ADDITIONAL_SECRET], body, header, now)  # must not raise
+
+
+def test_fallback_tries_every_configured_additional_secret_in_order():
+    now = datetime.now(timezone.utc)
+    body = b'{"type": "calendar.person.subscribed", "data": {}}'
+    timestamp = int(now.timestamp())
+    third_secret = "whsec_third_secret"
+    header = _sign(third_secret, timestamp, body)  # matches only the LAST configured additional secret
+
+    verify_luma_webhook_signature_with_fallback(SECRET, [ADDITIONAL_SECRET, third_secret], body, header, now)  # must not raise
+
+
+def test_fallback_rejects_when_primary_and_all_additional_secrets_are_wrong():
+    now = datetime.now(timezone.utc)
+    body = b'{"type": "calendar.person.subscribed", "data": {}}'
+    timestamp = int(now.timestamp())
+    header = _sign("some-completely-unrelated-secret", timestamp, body)
+
+    with pytest.raises(LumaWebhookSignatureError):
+        verify_luma_webhook_signature_with_fallback(SECRET, [ADDITIONAL_SECRET, "whsec_third_secret"], body, header, now)
+
+
+def test_fallback_with_missing_signature_header_still_rejects_cleanly():
+    now = datetime.now(timezone.utc)
+    with pytest.raises(LumaWebhookSignatureError):
+        verify_luma_webhook_signature_with_fallback(SECRET, [ADDITIONAL_SECRET], b"{}", None, now)

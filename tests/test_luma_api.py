@@ -248,6 +248,73 @@ def test_malformed_json_body_returns_400(client):
     assert resp.status_code == 400
 
 
+# --- Stage 6A Capture: LUMA_ADDITIONAL_WEBHOOK_SECRETS (2026-09-14) --------
+# Permanent capability, not part of the temporary capture mechanism itself.
+
+
+ADDITIONAL_SECRET = "whsec_second_webhook_secret"
+
+
+def test_primary_secret_alone_still_verifies_with_no_additional_secrets_configured(client):
+    """No luma_additional_webhook_secrets fixture requested -- confirms the
+    real production default (None/unset) leaves today's single-secret
+    behavior completely unchanged."""
+    body = _webhook_body()
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    signature = _sign(WEBHOOK_SECRET, timestamp, body)
+    resp = client.post(
+        "/sync/luma-event",
+        content=body,
+        headers={"Webhook-Signature": signature, "Webhook-Id": "wh-1", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+
+
+def test_additional_secret_verifies_when_configured(client, monkeypatch):
+    from app.dependencies import settings as deps_settings
+
+    monkeypatch.setattr(deps_settings, "luma_additional_webhook_secrets", ADDITIONAL_SECRET)
+    body = json.dumps({"type": "calendar.person.subscribed", "data": {"id": "usr-1"}}).encode("utf-8")
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    signature = _sign(ADDITIONAL_SECRET, timestamp, body)  # signed with the ADDITIONAL secret, not primary
+    resp = client.post(
+        "/sync/luma-event",
+        content=body,
+        headers={"Webhook-Signature": signature, "Webhook-Id": "wh-2", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+
+
+def test_primary_secret_still_verifies_when_additional_secret_is_also_configured(client, monkeypatch):
+    from app.dependencies import settings as deps_settings
+
+    monkeypatch.setattr(deps_settings, "luma_additional_webhook_secrets", ADDITIONAL_SECRET)
+    body = _webhook_body()
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    signature = _sign(WEBHOOK_SECRET, timestamp, body)  # signed with the PRIMARY secret
+    resp = client.post(
+        "/sync/luma-event",
+        content=body,
+        headers={"Webhook-Signature": signature, "Webhook-Id": "wh-3", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200
+
+
+def test_wrong_primary_and_wrong_additional_secret_both_reject(client, monkeypatch):
+    from app.dependencies import settings as deps_settings
+
+    monkeypatch.setattr(deps_settings, "luma_additional_webhook_secrets", ADDITIONAL_SECRET)
+    body = json.dumps({"type": "calendar.person.subscribed", "data": {"id": "usr-1"}}).encode("utf-8")
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    signature = _sign("neither-configured-secret", timestamp, body)
+    resp = client.post(
+        "/sync/luma-event",
+        content=body,
+        headers={"Webhook-Signature": signature, "Webhook-Id": "wh-4", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 401
+
+
 def test_unsupported_event_type_still_returns_200(client):
     """An out-of-scope-this-phase event type is a legitimate signed
     delivery we choose to ignore -- never a 4xx (that would make Luma

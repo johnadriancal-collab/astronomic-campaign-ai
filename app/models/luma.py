@@ -247,6 +247,28 @@ class LumaBackfillStatus(str, Enum):
     FAILED = "failed"
 
 
+class LumaCalendarEventCapture(BaseModel):
+    """Stage 6A Capture (2026-09-14) -- TEMPORARY, schema-discovery-only
+    storage for the first real `calendar.person.subscribed` and
+    `calendar.person.unsubscribed` webhook deliveries AstroHub receives.
+    Deliberately NOT part of the canonical CRM model set (CrmContact,
+    LumaRegistration, EngagementParticipant) -- this exists purely to let
+    a human inspect one real example of each event type's payload shape,
+    never to drive any Contact/CRM behavior itself. `event_type` is this
+    model's own identity (see SQLiteLumaCalendarEventCaptureStore): at
+    most ONE row ever exists per event_type, by design, to bound how much
+    real subscriber PII this temporary mechanism can ever accumulate.
+    Meant to be deleted, and this whole model/store removed, once the
+    real payload shape has been captured and used to design Stage 6A's
+    actual data model -- see this stage's own investigation history for
+    why a real payload was needed before that design could be finalized."""
+
+    event_type: str  # "calendar.person.subscribed" | "calendar.person.unsubscribed" -- the row's own identity
+    delivery_id: str | None = None  # Luma's "Webhook-Id" header, if present
+    captured_at: datetime
+    raw_payload: dict[str, Any]  # the complete, unmodified `data` object from this delivery
+
+
 class LumaBackfillCheckpoint(BaseModel):
     """Durable resume state for the one-time historical backfill -- single
     row (checkpoint_id is always "default", single-calendar scope) so a

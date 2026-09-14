@@ -14,7 +14,9 @@ from fastapi import Header, HTTPException, Request
 
 from app.config import settings
 from app.luma.webhook_signature import LumaWebhookSignatureError
-from app.luma.webhook_signature import verify_luma_webhook_signature as _verify_luma_webhook_signature
+from app.luma.webhook_signature import (
+    verify_luma_webhook_signature_with_fallback as _verify_luma_webhook_signature_with_fallback,
+)
 from app.services.activity_log_service import ActivityLogService
 from app.services.astro_ai_service import AstroAiService
 from app.services.astro_export_store import AstroExportStore
@@ -127,6 +129,15 @@ async def get_luma_sync_service(request: Request) -> LumaSyncService:
     return request.app.state.luma_sync_service
 
 
+def _parse_additional_luma_webhook_secrets(raw: str | None) -> list[str]:
+    """Same comma-separated parsing convention as
+    unsubscribe_token_encryption_keys (app/services/unsubscribe_token.py) --
+    trimmed, blank entries dropped. None/unset -> []."""
+    if not raw:
+        return []
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
 async def verify_luma_webhook_request(request: Request) -> bytes:
     """
     Verifies Luma's own documented Svix-style webhook signature (see
@@ -137,17 +148,27 @@ async def verify_luma_webhook_request(request: Request) -> bytes:
     signature check).
 
     503 if LUMA_WEBHOOK_SECRET isn't configured (deployment gap, same
-    convention as every other webhook token above). 401 for ANY
-    missing/malformed/stale/invalid signature -- deliberately never
-    distinguishing which, so a forger gets no oracle to iterate against.
-    Fails closed in every case.
+    convention as every other webhook token above) -- the PRIMARY secret
+    remains required and authoritative exactly as before Stage 6A
+    Capture. 401 for ANY missing/malformed/stale/invalid signature --
+    deliberately never distinguishing which, so a forger gets no oracle
+    to iterate against. Fails closed in every case.
+
+    Stage 6A Capture (2026-09-14): tries the primary secret FIRST (see
+    verify_luma_webhook_signature_with_fallback()'s own docstring), then
+    any configured LUMA_ADDITIONAL_WEBHOOK_SECRETS in turn -- optional,
+    defaults to none configured, in which case this is byte-identical to
+    the single-secret check that existed before this setting did.
     """
     if not settings.luma_webhook_secret:
         raise HTTPException(status_code=503, detail="Luma webhook is not configured.")
     raw_body = await request.body()
     signature_header = request.headers.get("webhook-signature")
+    additional_secrets = _parse_additional_luma_webhook_secrets(settings.luma_additional_webhook_secrets)
     try:
-        _verify_luma_webhook_signature(settings.luma_webhook_secret, raw_body, signature_header, datetime.now(timezone.utc))
+        _verify_luma_webhook_signature_with_fallback(
+            settings.luma_webhook_secret, additional_secrets, raw_body, signature_header, datetime.now(timezone.utc)
+        )
     except LumaWebhookSignatureError:
         raise HTTPException(status_code=401, detail="Invalid webhook signature.")
     return raw_body
