@@ -20,6 +20,7 @@ COPY scripts/run_luma_location_historical_reconciliation.py ./scripts/run_luma_l
 COPY scripts/run_austin_forward_reconciliation.py ./scripts/run_austin_forward_reconciliation.py
 COPY scripts/run_notes_personal_notes_merge.py ./scripts/run_notes_personal_notes_merge.py
 COPY scripts/run_austin_forward_event_history_backfill.py ./scripts/run_austin_forward_event_history_backfill.py
+COPY scripts/run_historical_dinner_migration.py ./scripts/run_historical_dinner_migration.py
 
 EXPOSE 8000
 
