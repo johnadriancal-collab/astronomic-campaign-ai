@@ -16,6 +16,7 @@ COPY app ./app
 # happen to be sitting in scripts/ at build time. Add one explicit COPY
 # line per operator script as new ones are approved for in-container use.
 COPY scripts/run_luma_engagement_participant_backfill.py ./scripts/run_luma_engagement_participant_backfill.py
+COPY scripts/run_luma_location_historical_reconciliation.py ./scripts/run_luma_location_historical_reconciliation.py
 
 EXPOSE 8000
 
