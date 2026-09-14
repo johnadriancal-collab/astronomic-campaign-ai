@@ -19,6 +19,7 @@ COPY scripts/run_luma_engagement_participant_backfill.py ./scripts/run_luma_enga
 COPY scripts/run_luma_location_historical_reconciliation.py ./scripts/run_luma_location_historical_reconciliation.py
 COPY scripts/run_austin_forward_reconciliation.py ./scripts/run_austin_forward_reconciliation.py
 COPY scripts/run_notes_personal_notes_merge.py ./scripts/run_notes_personal_notes_merge.py
+COPY scripts/run_austin_forward_event_history_backfill.py ./scripts/run_austin_forward_event_history_backfill.py
 
 EXPOSE 8000
 
