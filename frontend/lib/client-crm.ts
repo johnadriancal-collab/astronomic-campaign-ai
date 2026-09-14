@@ -132,10 +132,19 @@ export interface ClientListFilters {
 // that changed -- the backend's own bare/omitted sort_by default is
 // deliberately left as "name", unchanged, in case anything else ever
 // calls this API directly without an explicit sort_by.
+//
+// Post-historical-migration stage (2026-09-14): the plain/default
+// operational view must be Active-only -- after the historical dinner
+// migration added 36 INACTIVE Clients, an unfiltered default view went
+// from 6 Clients to 42, mostly historical noise. See
+// applySearchStatus()'s own docstring for how text search still reaches
+// every status despite this default.
+export const ACTIVE_STATUS_DEFAULT: ClientStatus = "active";
+
 export function defaultClientListFilters(): ClientListFilters {
   return {
     q: "",
-    status: "",
+    status: ACTIVE_STATUS_DEFAULT,
     relationshipClassification: "",
     owner: "",
     includeArchived: false,
@@ -144,6 +153,65 @@ export function defaultClientListFilters(): ClientListFilters {
     page: 1,
     pageSize: 25,
   };
+}
+
+/** Whether `status` should count as a deliberate filter the user applied
+ * (for empty-state copy, "No Clients match these filters" vs "No Clients
+ * yet") -- the plain Active default is neutral, not a filter, so it's
+ * excluded here; anything else (Inactive, or an explicit Any-status "")
+ * counts. */
+export function isNonDefaultStatusFilter(status: ClientStatus | ""): boolean {
+  return status !== ACTIVE_STATUS_DEFAULT;
+}
+
+/** Client CRM list, post-historical-migration: the default view is
+ * Active-only, but a text search must still be able to find an inactive
+ * historical Client (e.g. "Valorem Capital", "Ristretto") without the
+ * user manually switching the status dropdown to "Any" first.
+ *
+ * `lastManualStatus` is the most recent status the user picked from the
+ * dropdown by hand (see applyManualStatusFilter()) -- `null` means they've
+ * never touched it this session. Deliberately a REMEMBERED value, not a
+ * one-shot flag: a manual pick made BEFORE a search must still be
+ * restored when that search is later cleared, even though the search
+ * itself temporarily overrides it to Any status in between. (An earlier
+ * version of this function used a "was the CURRENT status manually set"
+ * boolean instead -- that lost a pre-search manual pick the moment a
+ * search ran, so clearing the search fell back to the plain Active
+ * default instead of the user's actual choice. Caught by hand-testing
+ * against a real backend, not by the pure unit tests alone -- see
+ * client-crm.test.ts's own sequence tests for the regression this
+ * fixed.)
+ *
+ * Called whenever the user runs a search (Enter or the Search button,
+ * matching this page's existing Enter-to-search convention -- see
+ * runSearch() in app/clients/page.tsx).
+ *
+ * Rules:
+ *   - a non-blank query ALWAYS widens status to Any ("") -- unconditionally,
+ *     even if the user had manually narrowed to a specific status, so a
+ *     search is guaranteed to find matches regardless of status.
+ *     `lastManualStatus` itself is untouched either way -- searching never
+ *     erases a remembered manual pick, it only temporarily overrides it.
+ *   - a blank query (the search box was cleared and re-submitted) restores
+ *     `lastManualStatus` if the user has ever set one, otherwise the plain
+ *     Active default. */
+export function applySearchStatus(
+  query: string,
+  lastManualStatus: ClientStatus | "" | null
+): ClientStatus | "" {
+  if (query.trim()) {
+    return "";
+  }
+  return lastManualStatus ?? ACTIVE_STATUS_DEFAULT;
+}
+
+/** The status dropdown itself (Active / Inactive / Any status) -- always a
+ * deliberate, remembered user choice (see applySearchStatus()'s own
+ * docstring for why this must persist across a later search rather than
+ * being a one-shot flag). */
+export function applyManualStatusFilter(value: ClientStatus | ""): { status: ClientStatus | ""; lastManualStatus: ClientStatus | "" } {
+  return { status: value, lastManualStatus: value };
 }
 
 /** Maps the UI's own filter state onto exactly the backend's real query

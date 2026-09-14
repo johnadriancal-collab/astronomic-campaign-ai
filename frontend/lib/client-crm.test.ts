@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  ACTIVE_STATUS_DEFAULT,
+  applyManualStatusFilter,
+  applySearchStatus,
   buildClientListQueryParams,
   clientContactCreatePayload,
   clientContactDisplayName,
@@ -44,6 +47,7 @@ import {
   isCuratedContactedBy,
   isDinnerShapedEngagementType,
   isEngagementFormValid,
+  isNonDefaultStatusFilter,
   latestActiveTouchpoint,
   nextDeclineOriginOnRsvpChange,
   participantAttendanceStatusLabel,
@@ -124,12 +128,17 @@ test("formatClientDate renders a full ISO timestamp using its own UTC date, not 
 // --- List query construction -----------------------------------------------
 
 test("buildClientListQueryParams omits every empty filter", () => {
-  const params = buildClientListQueryParams(defaultClientListFilters());
+  const params = buildClientListQueryParams({ ...defaultClientListFilters(), status: "" });
   assert.equal(params.q, undefined);
   assert.equal(params.status, undefined);
   assert.equal(params.relationship_classification, undefined);
   assert.equal(params.owner, undefined);
   assert.equal(params.include_archived, false);
+});
+
+test("buildClientListQueryParams sends the real default filters unchanged -- status=active is a real filter, not omitted", () => {
+  const params = buildClientListQueryParams(defaultClientListFilters());
+  assert.equal(params.status, "active");
 });
 
 test("buildClientListQueryParams maps every real filter to the backend's own param names", () => {
@@ -161,6 +170,107 @@ test("buildClientListQueryParams trims whitespace out of q/owner", () => {
   const params = buildClientListQueryParams({ ...defaultClientListFilters(), q: "  hive  ", owner: "  chris  " });
   assert.equal(params.q, "hive");
   assert.equal(params.owner, "chris");
+});
+
+// --- Post-historical-migration Active-default / cross-status search -------
+
+test("defaultClientListFilters defaults status to Active, not Any status", () => {
+  assert.equal(defaultClientListFilters().status, ACTIVE_STATUS_DEFAULT);
+  assert.equal(defaultClientListFilters().status, "active");
+});
+
+test("isNonDefaultStatusFilter treats the plain Active default as no filter at all", () => {
+  assert.equal(isNonDefaultStatusFilter("active"), false);
+});
+
+test("isNonDefaultStatusFilter treats Inactive and explicit Any-status as real filters", () => {
+  assert.equal(isNonDefaultStatusFilter("inactive"), true);
+  assert.equal(isNonDefaultStatusFilter(""), true);
+});
+
+test("applySearchStatus: a non-blank query on a fresh page (no manual pick yet) widens status to Any", () => {
+  assert.equal(applySearchStatus("Valorem Capital", null), "");
+});
+
+test("applySearchStatus: a non-blank query overrides even a remembered manual pick -- search always finds inactive Clients", () => {
+  assert.equal(applySearchStatus("Ristretto", "active"), "");
+  assert.equal(applySearchStatus("Ristretto", "inactive"), "");
+});
+
+test("applySearchStatus: a query that's only whitespace is treated as blank", () => {
+  assert.equal(applySearchStatus("   ", null), "active");
+});
+
+test("applySearchStatus: clearing the search (blank query) restores the Active default when the user has never manually picked a status", () => {
+  assert.equal(applySearchStatus("", null), "active");
+});
+
+test("applySearchStatus: clearing the search restores the user's last deliberate manual pick, not the Active default", () => {
+  assert.equal(applySearchStatus("", "inactive"), "inactive");
+  assert.equal(applySearchStatus("", ""), ""); // a deliberate "Any status" pick is remembered too
+});
+
+test("applyManualStatusFilter always remembers the choice, for every dropdown option", () => {
+  assert.deepEqual(applyManualStatusFilter("active"), { status: "active", lastManualStatus: "active" });
+  assert.deepEqual(applyManualStatusFilter("inactive"), { status: "inactive", lastManualStatus: "inactive" });
+  assert.deepEqual(applyManualStatusFilter(""), { status: "", lastManualStatus: "" });
+});
+
+test("full sequence: search then clear returns to Active default (no manual pick ever made)", () => {
+  let status: "active" | "inactive" | "" = "active";
+  let lastManualStatus: "active" | "inactive" | "" | null = null;
+
+  // page loads with the Active default
+  assert.equal(status, "active");
+
+  // user searches "Valorem Capital" -- an inactive historical Client
+  status = applySearchStatus("Valorem Capital", lastManualStatus);
+  assert.equal(status, ""); // Any status, so the inactive Client is found
+
+  // user clears the search box and re-submits
+  status = applySearchStatus("", lastManualStatus);
+  assert.equal(status, "active"); // back to the Active-only default, not stuck on Any
+});
+
+test("full sequence: a manual pick made BEFORE a search still survives clearing that search", () => {
+  // regression case: an earlier design forgot a pre-search manual pick the
+  // moment a search ran, since it only tracked "was the CURRENT status
+  // manually set" as a one-shot flag rather than remembering the pick
+  // itself -- caught by hand-testing against a real backend.
+  let status: "active" | "inactive" | "" = "active";
+  let lastManualStatus: "active" | "inactive" | "" | null = null;
+
+  // user manually narrows to Inactive from the dropdown first
+  let resolved = applyManualStatusFilter("inactive");
+  status = resolved.status;
+  lastManualStatus = resolved.lastManualStatus;
+  assert.equal(status, "inactive");
+
+  // THEN searches "Valorem Capital" -- still finds it, widening to Any
+  status = applySearchStatus("Valorem Capital", lastManualStatus);
+  assert.equal(status, "");
+
+  // user clears the search box and re-submits
+  status = applySearchStatus("", lastManualStatus);
+  assert.equal(status, "inactive"); // the earlier manual pick is restored, not lost
+});
+
+test("full sequence: search, then a deliberate manual status pick survives clearing the search", () => {
+  let status: "active" | "inactive" | "" = "active";
+  let lastManualStatus: "active" | "inactive" | "" | null = null;
+
+  status = applySearchStatus("Ristretto", lastManualStatus);
+  assert.equal(status, "");
+
+  // user manually narrows to Inactive from the dropdown after seeing results
+  const resolved = applyManualStatusFilter("inactive");
+  status = resolved.status;
+  lastManualStatus = resolved.lastManualStatus;
+  assert.equal(status, "inactive");
+
+  // user clears the search box and re-submits
+  status = applySearchStatus("", lastManualStatus);
+  assert.equal(status, "inactive"); // their deliberate choice is preserved, not silently reset
 });
 
 // --- Create payload ----------------------------------------------------

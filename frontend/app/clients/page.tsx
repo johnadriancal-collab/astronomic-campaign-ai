@@ -19,6 +19,8 @@ import {
   type ClientStatus,
 } from "@/lib/api";
 import {
+  applyManualStatusFilter,
+  applySearchStatus,
   CLIENT_RELATIONSHIP_CLASSIFICATION_OPTIONS,
   CLIENT_STATUS_OPTIONS,
   buildClientListQueryParams,
@@ -28,12 +30,19 @@ import {
   clientStatusLabel,
   defaultClientListFilters,
   formatClientDate,
+  isNonDefaultStatusFilter,
   type ClientListFilters,
 } from "@/lib/client-crm";
 
 export default function ClientsPage() {
   const router = useRouter();
   const [filters, setFilters] = useState<ClientListFilters>(defaultClientListFilters());
+  // The most recent status the user picked from the dropdown by hand;
+  // null means they've never touched it this session. Deliberately
+  // persists across a search (which only TEMPORARILY overrides status to
+  // Any) so clearing that search restores this choice rather than the
+  // plain Active default -- see applySearchStatus()'s own docstring.
+  const [lastManualStatus, setLastManualStatus] = useState<ClientStatus | "" | null>(null);
   const [searchInput, setSearchInput] = useState("");
   const [ownerInput, setOwnerInput] = useState("");
   const [page, setPage] = useState<ClientPage | null>(null);
@@ -60,12 +69,21 @@ export default function ClientsPage() {
   // existing Contacts page's own convention (/crm) -- no live-as-you-type
   // debounce exists anywhere in this codebase to match instead (see this
   // stage's own investigation).
+  //
+  // Every search run also resolves the status filter via
+  // applySearchStatus() -- a non-blank query widens to Any status so a
+  // search can always find an inactive historical Client; a blank query
+  // (the box was cleared and re-submitted) restores whatever status the
+  // user last picked by hand, or the Active default if they never have.
   function runSearch() {
-    setFilters((prev) => ({ ...prev, q: searchInput, owner: ownerInput, page: 1 }));
+    const status = applySearchStatus(searchInput, lastManualStatus);
+    setFilters((prev) => ({ ...prev, q: searchInput, owner: ownerInput, status, page: 1 }));
   }
 
   function applyStatus(value: string) {
-    setFilters((prev) => ({ ...prev, status: value as ClientStatus | "", page: 1 }));
+    const resolved = applyManualStatusFilter(value as ClientStatus | "");
+    setLastManualStatus(resolved.lastManualStatus);
+    setFilters((prev) => ({ ...prev, status: resolved.status, page: 1 }));
   }
 
   function applyRelationship(value: string) {
@@ -86,7 +104,9 @@ export default function ClientsPage() {
     router.push(`/clients/${client.client_id}`);
   }
 
-  const hasActiveFilters = Boolean(filters.q || filters.status || filters.relationshipClassification || filters.owner);
+  const hasActiveFilters = Boolean(
+    filters.q || isNonDefaultStatusFilter(filters.status) || filters.relationshipClassification || filters.owner
+  );
   const totalPages = page ? Math.max(1, Math.ceil(page.total / page.page_size)) : 1;
 
   return (
