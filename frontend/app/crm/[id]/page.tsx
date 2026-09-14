@@ -13,6 +13,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { AddToListPanel } from "@/components/add-to-list-panel";
 import { ContactAvatar } from "@/components/contact-avatar";
+import { SearchableMultiSelect } from "@/components/searchable-multi-select";
 import {
   ApiError,
   archiveCrmContact,
@@ -40,7 +41,12 @@ import {
   emailStatusOptionLabel,
   emailStatusSelectOptionValues,
 } from "@/lib/crm-field-options";
-import { DIETARY_PREFERENCE_OPTIONS, INVESTOR_MODE_OPTIONS, THESIS_SECTION_FIELDS } from "@/lib/crm-thesis-options";
+import {
+  DIETARY_PREFERENCE_OPTIONS,
+  INDUSTRY_OPTIONS,
+  INVESTOR_MODE_OPTIONS,
+  THESIS_SECTION_FIELDS,
+} from "@/lib/crm-thesis-options";
 import { canOrdinaryUnsuppress, nextSuppressionAction, suppressionToggleLabel } from "@/lib/mail";
 import { addTagValue, removeTagValue } from "@/lib/tag-multi-select";
 
@@ -771,6 +777,26 @@ export default function CrmContactDetailPage() {
                   );
                 }
                 if (field.field_type === "multi_select") {
+                  // Investment Industry is the one multi_select custom field routed
+                  // to the approved-options-only searchable picker instead of the
+                  // generic MultiSelect/TagMultiSelect fallback -- see Stage 7's own
+                  // investigation for why this field's LIVE options are empty (an
+                  // intentionally open field today) yet a real canonical taxonomy
+                  // already exists in INDUSTRY_OPTIONS. Every other multi_select
+                  // custom field keeps its exact current behavior, unchanged.
+                  if (field.field_key === "investment_industry") {
+                    return (
+                      <div key={field.field_key} className="sm:col-span-2">
+                        <SearchableMultiSelect
+                          label={field.label}
+                          options={INDUSTRY_OPTIONS}
+                          values={(value as string[]) ?? []}
+                          onChange={(v) => setCustomField(field.field_key, v)}
+                          placeholder="Search industries..."
+                        />
+                      </div>
+                    );
+                  }
                   return (
                     <div key={field.field_key} className="sm:col-span-2">
                       <MultiSelect
