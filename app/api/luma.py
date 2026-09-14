@@ -10,6 +10,23 @@ for exactly that reason, mirroring /sync/itf-contact and
 /sync/email-intake's precedent -- being public only exempts it from the
 session-cookie gate; the signature check is the real guard.
 
+POST /sync/luma-calendar-event -- Stage 6A Capture (2026-09-14), the
+dedicated route for calendar.person.subscribed/unsubscribed webhook
+deliveries ONLY. A second, distinct URL was required (rather than adding
+these event types to the existing /sync/luma-event webhook's own
+configuration) because Luma rejects registering two webhooks with the
+same URL on one calendar (confirmed live against the real API: "A
+webhook with this URL already exists."). Reuses the EXACT SAME
+verify_luma_webhook_request dependency as /sync/luma-event -- including
+its optional LUMA_ADDITIONAL_WEBHOOK_SECRETS fallback, so this new
+webhook's own, independently-generated secret can verify without ever
+touching the primary secret /sync/luma-event already depends on. Also on
+PUBLIC_PATHS for the identical reason /sync/luma-event is: Luma's
+delivery carries no Hub session cookie, and its own signature is the
+real guard. Structurally isolated from every guest/ticket/Contact/
+EngagementParticipant/Stage 6B/MailSuppression/Activity Log code path --
+see LumaSyncService.handle_calendar_webhook()'s own docstring.
+
 POST /sync/luma-backfill -- the one-time historical import trigger.
 Deliberately session-authenticated (an internal admin action a logged-in
 Hub user triggers), so it carries NO auth dependency of its own -- it's
@@ -79,6 +96,40 @@ async def luma_webhook(
         await service.handle_webhook(event_type, data, webhook_delivery_id=webhook_id)
     except LumaSyncError as e:
         logger.warning(f"Luma webhook delivery skipped ({event_type}): {e}")
+    return {"status": "ok"}
+
+
+@router.post("/luma-calendar-event")
+async def luma_calendar_webhook(
+    raw_body: bytes = Depends(verify_luma_webhook_request),
+    webhook_id: str | None = Header(default=None, alias="Webhook-Id"),
+    service: LumaSyncService = Depends(get_luma_sync_service),
+):
+    """
+    Stage 6A Capture (2026-09-14). Same envelope-parsing/validation
+    contract as /sync/luma-event above (missing Webhook-Id or malformed
+    JSON/envelope -> 400; a structurally valid, signed delivery always
+    returns 200, even one this route chooses to ignore, so Luma never
+    retries a delivery retrying can't fix). The ONLY difference is which
+    service method is called at the end -- handle_calendar_webhook()
+    reaches nothing but the isolated Stage 6A capture path; it can never
+    invoke guest/ticket processing, Contact matching/creation, participant
+    sync, Stage 6B location enrichment, MailSuppression, or the Activity
+    Log.
+    """
+    if not webhook_id:
+        raise HTTPException(status_code=400, detail="Missing Webhook-Id header.")
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Malformed JSON body.")
+
+    event_type = payload.get("type") if isinstance(payload, dict) else None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not event_type or not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail="Malformed webhook envelope.")
+
+    await service.handle_calendar_webhook(event_type, data, webhook_delivery_id=webhook_id)
     return {"status": "ok"}
 
 

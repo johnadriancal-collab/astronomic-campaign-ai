@@ -27,6 +27,13 @@ session cookie:
     mechanism (verify_luma_webhook_request in app/dependencies.py), not a
     token we issue. /sync/luma-backfill is deliberately NOT here -- it's
     an internal admin action and stays behind the normal session gate.
+  - /sync/luma-calendar-event: Stage 6A Capture (2026-09-14) -- a SECOND,
+    dedicated Luma webhook delivery target (calendar.person.subscribed/
+    unsubscribed only), same reasoning as /sync/luma-event immediately
+    above -- Luma's own signature is the real guard, verified by the
+    exact same verify_luma_webhook_request dependency (including its
+    optional LUMA_ADDITIONAL_WEBHOOK_SECRETS fallback for this webhook's
+    own, independently-generated secret).
   - /integrations/contacts/photo: the existing Leads List Google Apps
     Script (no browser, no session cookie possible) resolving a
     Contact's profile_photo_url by email -- its OWN shared-secret
@@ -257,6 +264,7 @@ PUBLIC_PATHS = frozenset(
         "/sync/itf-contact",
         "/sync/email-intake",
         "/sync/luma-event",
+        "/sync/luma-calendar-event",
         "/mail/unsubscribe",
         "/mail/unsubscribe/one-click",
         "/integrations/contacts/photo",

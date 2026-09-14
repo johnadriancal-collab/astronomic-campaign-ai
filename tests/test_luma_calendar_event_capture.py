@@ -149,6 +149,22 @@ def _post(client, event_type: str, webhook_id: str, delivery_ref: str = "usr-1")
     )
 
 
+def _post_calendar_route(client, event_type: str, webhook_id: str, delivery_ref: str = "usr-1", secret: str = WEBHOOK_SECRET):
+    """Same shape as _post() above, but targets the NEW, dedicated
+    /sync/luma-calendar-event route -- this event type's real, live entry
+    point. `secret` defaults to the primary WEBHOOK_SECRET but can be
+    overridden to prove the additional-secret fallback authenticates this
+    route too."""
+    body = _calendar_event_body(event_type, delivery_ref)
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    signature = _sign(secret, timestamp, body)
+    return client.post(
+        "/sync/luma-calendar-event",
+        content=body,
+        headers={"Webhook-Signature": signature, "Webhook-Id": webhook_id, "Content-Type": "application/json"},
+    )
+
+
 # --- feature flag default -----------------------------------------------------
 
 
@@ -403,3 +419,153 @@ async def test_sqlite_store_two_different_event_types_each_get_their_own_row(sql
     assert await sqlite_capture_store.save_if_first_for_event_type(sub) is True
     assert await sqlite_capture_store.save_if_first_for_event_type(unsub) is True
     assert len(await sqlite_capture_store.list()) == 2
+
+
+# --- Dedicated /sync/luma-calendar-event route (2026-09-14) -----------------
+# Required because Luma rejects two webhooks with the same URL -- see
+# LumaSyncService.handle_calendar_webhook()'s own docstring.
+
+
+async def test_calendar_route_with_flag_off_returns_200_and_stores_nothing(client, capture_store):
+    resp = _post_calendar_route(client, "calendar.person.subscribed", "wh-1")
+    assert resp.status_code == 200
+    assert await capture_store.list() == []
+
+
+async def test_calendar_route_subscribed_with_flag_on_stores_exactly_one_row(client, capture_store, capture_flag_enabled):
+    resp = _post_calendar_route(client, "calendar.person.subscribed", "wh-1")
+    assert resp.status_code == 200
+    rows = await capture_store.list()
+    assert len(rows) == 1
+    assert rows[0].event_type == "calendar.person.subscribed"
+    assert rows[0].delivery_id == "wh-1"
+
+
+async def test_calendar_route_unsubscribed_with_flag_on_stores_exactly_one_row(client, capture_store, capture_flag_enabled):
+    resp = _post_calendar_route(client, "calendar.person.unsubscribed", "wh-1")
+    assert resp.status_code == 200
+    rows = await capture_store.list()
+    assert len(rows) == 1
+    assert rows[0].event_type == "calendar.person.unsubscribed"
+
+
+async def test_calendar_route_repeated_delivery_remains_bounded_and_idempotent(client, capture_store, capture_flag_enabled):
+    _post_calendar_route(client, "calendar.person.subscribed", "wh-1", delivery_ref="usr-1")
+    resp2 = _post_calendar_route(client, "calendar.person.subscribed", "wh-2", delivery_ref="usr-2")  # different delivery
+    resp3 = _post_calendar_route(client, "calendar.person.subscribed", "wh-1")  # exact same delivery id retried
+
+    assert resp2.status_code == 200
+    assert resp3.status_code == 200
+    rows = await capture_store.list()
+    assert len(rows) == 1
+    assert rows[0].delivery_id == "wh-1"  # the first one, never overwritten or duplicated
+
+
+async def test_calendar_route_wrong_signature_is_rejected_before_capture(client, capture_store, capture_flag_enabled):
+    body = _calendar_event_body("calendar.person.subscribed")
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    bad_signature = f"t={timestamp},v1=" + "0" * 64
+    resp = client.post(
+        "/sync/luma-calendar-event",
+        content=body,
+        headers={"Webhook-Signature": bad_signature, "Webhook-Id": "wh-1", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 401
+    assert await capture_store.list() == []
+
+
+async def test_guest_registered_sent_to_calendar_route_never_enters_guest_processing(client, luma_service, capture_flag_enabled):
+    from tests.test_luma_sync_service import make_event, make_guest
+
+    body = json.dumps({"type": "guest.registered", "data": {**make_guest(email="carol@example.com"), "event": make_event()}}).encode("utf-8")
+    timestamp = int(datetime.now(timezone.utc).timestamp())
+    signature = _sign(WEBHOOK_SECRET, timestamp, body)
+    resp = client.post(
+        "/sync/luma-calendar-event",
+        content=body,
+        headers={"Webhook-Signature": signature, "Webhook-Id": "wh-1", "Content-Type": "application/json"},
+    )
+    assert resp.status_code == 200  # a structurally valid, signed delivery -- ignored, not an error
+    assert await luma_service.crm_service.contact_store.list() == []  # no Contact created
+    assert await luma_service.registration_store.list() == []  # no registration created
+
+
+async def test_calendar_route_is_reachable_with_no_hub_session(client):
+    """Same PUBLIC_PATHS precedent as /sync/luma-event -- Luma's delivery
+    carries no Hub session cookie."""
+    resp = _post_calendar_route(client, "calendar.person.subscribed", "wh-1")
+    assert resp.status_code == 200
+
+
+async def test_additional_secret_authenticates_the_calendar_route(client, capture_store, capture_flag_enabled, monkeypatch):
+    from app.dependencies import settings as deps_settings
+
+    additional_secret = "whsec_second_webhook_secret"
+    monkeypatch.setattr(deps_settings, "luma_additional_webhook_secrets", additional_secret)
+    resp = _post_calendar_route(client, "calendar.person.subscribed", "wh-1", secret=additional_secret)
+    assert resp.status_code == 200
+    rows = await capture_store.list()
+    assert len(rows) == 1
+
+
+async def test_primary_secret_still_authenticates_calendar_route_when_additional_is_also_configured(
+    client, capture_store, capture_flag_enabled, monkeypatch
+):
+    from app.dependencies import settings as deps_settings
+
+    monkeypatch.setattr(deps_settings, "luma_additional_webhook_secrets", "whsec_second_webhook_secret")
+    resp = _post_calendar_route(client, "calendar.person.subscribed", "wh-1")  # signed with PRIMARY (default) secret
+    assert resp.status_code == 200
+    assert len(await capture_store.list()) == 1
+
+
+# --- no CRM/Contact/Activity/MailSuppression/EngagementParticipant mutation -
+# from the new route -----------------------------------------------------
+
+
+async def test_calendar_route_never_creates_a_contact(client, luma_service, capture_flag_enabled):
+    _post_calendar_route(client, "calendar.person.subscribed", "wh-1")
+    assert await luma_service.crm_service.contact_store.list() == []
+
+
+async def test_calendar_route_never_writes_an_activity_log_entry(client, luma_service, capture_flag_enabled):
+    _post_calendar_route(client, "calendar.person.subscribed", "wh-1")
+    _post_calendar_route(client, "calendar.person.unsubscribed", "wh-2")
+    page = await luma_service.activity_log.list_events()
+    assert page.items == []
+
+
+def test_calendar_webhook_methods_never_use_mail_suppression_engagement_participant_or_activity_log():
+    """Structural guard scoped to the TWO new methods specifically (not
+    the whole file -- the existing guest pipeline elsewhere in this same
+    module legitimately uses LumaEngagementParticipantSyncService/
+    activity_log, so a whole-file or bare-word check would be
+    meaningless/false-positive on their own docstrings, which describe
+    what these methods must NOT do). Checks the METHOD BODY (docstring
+    stripped) for actual code-usage patterns -- an attribute access or
+    call -- never a bare English word."""
+    import ast
+    import inspect
+    import textwrap
+
+    from app.services.luma_sync_service import LumaSyncService
+
+    forbidden_patterns = (
+        "mail_suppression",
+        "MailSuppressionStore",
+        "EngagementParticipantStore",
+        "participant_sync_service",
+        "activity_log.record",
+    )
+    for method_name in ("handle_calendar_webhook", "_maybe_capture_calendar_event"):
+        method = getattr(LumaSyncService, method_name)
+        source = textwrap.dedent(inspect.getsource(method))
+        tree = ast.parse(source)
+        func_node = tree.body[0]
+        # Strip the docstring (the first statement, if it's a bare string
+        # expression) before checking -- this test cares about actual
+        # code, never the prose describing what the code must NOT do.
+        body_without_docstring = func_node.body[1:] if ast.get_docstring(func_node) else func_node.body
+        body_source = "\n".join(ast.unparse(stmt) for stmt in body_without_docstring)
+        for pattern in forbidden_patterns:
+            assert pattern not in body_source, f"{method_name} unexpectedly references {pattern!r}"

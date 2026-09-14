@@ -1051,6 +1051,63 @@ class LumaSyncService:
 
     # --- webhook entry point ----------------------------------------------
 
+    async def _maybe_capture_calendar_event(
+        self, event_type: str, data: dict, webhook_delivery_id: str | None
+    ) -> None:
+        """Stage 6A Capture (2026-09-14) -- the one, shared implementation
+        of the temporary schema-discovery capture, factored out so BOTH
+        handle_webhook() (the existing /sync/luma-event route -- kept here
+        purely as defense-in-depth, since that webhook's own Luma-side
+        subscription is not configured to send these event types at all)
+        and handle_calendar_webhook() (the new, dedicated
+        /sync/luma-calendar-event route -- this event type's real, live
+        entry point) can reach the exact same capture behavior without
+        duplicating it. Deliberately a closed, exact check against
+        CALENDAR_EVENT_CAPTURE_TYPES -- never a generic "capture any
+        unsupported event type" mechanism; a caller passing anything else
+        is a silent no-op. Gated by settings.luma_calendar_event_capture_enabled
+        (default False): while False, this is a complete no-op regardless
+        of which route called it. Idempotent and bounded to at most one
+        stored row per event type for the lifetime of this mechanism --
+        see LumaCalendarEventCaptureStore.save_if_first_for_event_type()'s
+        own docstring for the exact, atomic guarantee. Never logs the raw
+        payload. Never touches Contact matching/creation, participant
+        sync, Stage 6B location enrichment, MailSuppression, or the
+        Activity Log -- none of that machinery is reachable from here."""
+        if event_type not in CALENDAR_EVENT_CAPTURE_TYPES:
+            return
+        if settings.luma_calendar_event_capture_enabled and self.calendar_event_capture_store is not None:
+            await self.calendar_event_capture_store.save_if_first_for_event_type(
+                LumaCalendarEventCapture(
+                    event_type=event_type,
+                    delivery_id=webhook_delivery_id,
+                    captured_at=datetime.now(timezone.utc),
+                    raw_payload=data,
+                )
+            )
+
+    async def handle_calendar_webhook(self, event_type: str, data: dict, webhook_delivery_id: str | None) -> None:
+        """Stage 6A Capture (2026-09-14) -- the ONE entry point for the
+        new, dedicated /sync/luma-calendar-event route. A second, distinct
+        webhook URL was required because Luma rejects registering two
+        webhooks with the same URL on one calendar (confirmed live: "A
+        webhook with this URL already exists.") -- this route exists
+        purely so the two calendar-follower event types can be delivered
+        somewhere without touching the existing, working
+        guest/ticket webhook's own URL or event_types at all.
+
+        Structurally isolated from handle_webhook()/process_guest_event():
+        this method calls ONLY _maybe_capture_calendar_event() above and
+        nothing else. It never reaches guest/ticket processing, Contact
+        matching/creation, participant sync, Stage 6B location
+        enrichment, MailSuppression, or the Activity Log -- none of that
+        code is even referenced from this call path. Any event type other
+        than the two exact CALENDAR_EVENT_CAPTURE_TYPES is silently
+        ignored (matching this app's existing "unsupported event type is
+        not an error" convention -- see handle_webhook()'s own docstring),
+        never an error, never processed."""
+        await self._maybe_capture_calendar_event(event_type, data, webhook_delivery_id)
+
     async def handle_webhook(self, event_type: str, data: dict, webhook_delivery_id: str) -> LumaProcessResult | None:
         """Returns None for a webhook type outside Phase 1 scope (ignored,
         not an error) -- e.g. event.created/calendar.person.subscribed.
@@ -1063,32 +1120,20 @@ class LumaSyncService:
         safeguard contract.
 
         Stage 6A Capture (2026-09-14): the temporary schema-discovery
-        capture is checked FIRST, before SUPPORTED_WEBHOOK_TYPES, and
-        returns immediately either way -- it can never fall through into
-        guest/ticket processing, Contact matching/creation, participant
-        sync, Stage 6B location enrichment, MailSuppression, or the
-        Activity Log, all of which live entirely below this block and are
-        never reached from it. Deliberately a closed, exact check against
-        CALENDAR_EVENT_CAPTURE_TYPES -- never a generic "capture any
-        unsupported event type" mechanism. Gated by
-        settings.luma_calendar_event_capture_enabled (default False): while
-        False, these two event types are handled exactly as they are
-        today (silently ignored by the SUPPORTED_WEBHOOK_TYPES check
-        below, zero storage). Idempotent and bounded to at most one
-        stored row per event type for the lifetime of this mechanism --
-        see LumaCalendarEventCaptureStore.save_if_first_for_event_type()'s
-        own docstring for the exact, atomic guarantee. Never logs the raw
-        payload."""
+        capture (see _maybe_capture_calendar_event()) is checked FIRST,
+        before SUPPORTED_WEBHOOK_TYPES, and returns immediately either
+        way -- it can never fall through into guest/ticket processing,
+        Contact matching/creation, participant sync, Stage 6B location
+        enrichment, MailSuppression, or the Activity Log, all of which
+        live entirely below this block and are never reached from it.
+        This route's own Luma-side webhook subscription is NOT configured
+        to send calendar.person.* events (that's what the new, dedicated
+        /sync/luma-calendar-event route and its own separate webhook are
+        for) -- this check remains here purely as defense-in-depth, and
+        is functionally dead code for THIS route unless Luma's
+        configuration for the existing webhook ever changes."""
         if event_type in CALENDAR_EVENT_CAPTURE_TYPES:
-            if settings.luma_calendar_event_capture_enabled and self.calendar_event_capture_store is not None:
-                await self.calendar_event_capture_store.save_if_first_for_event_type(
-                    LumaCalendarEventCapture(
-                        event_type=event_type,
-                        delivery_id=webhook_delivery_id,
-                        captured_at=datetime.now(timezone.utc),
-                        raw_payload=data,
-                    )
-                )
+            await self._maybe_capture_calendar_event(event_type, data, webhook_delivery_id)
             return None
 
         if event_type not in SUPPORTED_WEBHOOK_TYPES:
