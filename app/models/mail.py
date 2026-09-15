@@ -860,6 +860,19 @@ class MailEnrollmentStep(BaseModel):
     gmail_message_id: str | None = None
     gmail_thread_id: str | None = None
     rfc_message_id: str | None = None
+    # 2026-09-15 threading fix -- the EXACT subject line actually
+    # transmitted to Gmail for this SENT message (post-personalization,
+    # post any threaded-subject-inheritance -- see
+    # MailSendingService._resolve_reply_threading()'s own docstring).
+    # Set ONLY on a successful SENT transition (record_send_success()),
+    # deliberately never derived by re-rendering `subject` above -- a
+    # later threaded step's provider-bound subject must match what was
+    # ACTUALLY sent, not a fresh render that could drift if the
+    # contact's data changed in between. None for any row that predates
+    # this field (a real, accepted migration gap -- see that method's
+    # fail-safe behavior for what happens if a later threaded step tries
+    # to inherit from one of these).
+    rendered_subject: str | None = None
 
     attempt_count: int = 0
     last_attempt_at: datetime | None = None

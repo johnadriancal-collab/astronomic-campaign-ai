@@ -518,7 +518,7 @@ async def test_record_send_success_partial_failure_leaves_step_sent_but_next_ste
     send_result = SendResult(provider_message_id="msg-1", provider_thread_id="thr-1", rfc_message_id="<rfc-1>")
     with pytest.raises(BoomError):
         await svc.record_send_success(
-            step=sending_step, send_result=send_result, sequence_steps=steps, enrollment=enrollment,
+            step=sending_step, send_result=send_result, rendered_subject="s1", sequence_steps=steps, enrollment=enrollment,
             windows=all_day_windows(), timezone_name=TZ, now=NOW,
         )
 

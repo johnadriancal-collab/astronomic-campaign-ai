@@ -162,12 +162,14 @@ class MailThreadingDataMissingError(ValueError):
     """Raised by _resolve_reply_threading() when step.reply_in_thread is
     True and a prior SENT MailEnrollmentStep exists for this enrollment,
     but that prior step (or an earlier one needed for the References
-    chain) is missing its persisted rfc_message_id/gmail_thread_id --
-    record_send_success() always persists both together for a SENT row
-    (2026-09-15 threading fix), so this represents a genuine data-
-    integrity gap, never a normal, expected state. Deliberately NEVER
-    treated as "fall back to sending as a new, unthreaded conversation"
-    -- silently dropping threading context would be a worse, harder-to-
+    chain or the conversation subject) is missing its persisted
+    rfc_message_id/gmail_thread_id/rendered_subject -- record_send_
+    success() always persists all three together for a SENT row
+    (2026-09-15 threading + threading-subject fixes), so this represents
+    a genuine data-integrity gap (or a row that predates one of those
+    fixes), never a normal, expected state. Deliberately NEVER treated
+    as "fall back to sending as a new, unthreaded conversation" --
+    silently dropping threading context would be a worse, harder-to-
     notice failure than refusing to send at all. A ValueError subclass on
     purpose: _handle_prepare_failure()'s existing branch D (permanent
     step+enrollment FAILURE, "retrying an identical request against an
@@ -180,7 +182,7 @@ class MailThreadingDataMissingError(ValueError):
         self.missing_step_id = missing_step_id
         super().__init__(
             f"Cannot thread a follow-up for enrollment {enrollment_id}: prior sent step {missing_step_id} "
-            "is missing its persisted rfc_message_id/gmail_thread_id."
+            "is missing its persisted rfc_message_id/gmail_thread_id/rendered_subject."
         )
 
 
@@ -493,11 +495,23 @@ class ReplyThreadingContext:
     In-Reply-To/References a follow-up step's MailSendRequest must carry
     to land in the same Gmail conversation as this enrollment's prior
     sends. See MailSendingService._resolve_reply_threading()'s own
-    docstring for how this is derived; never constructed anywhere else."""
+    docstring for how this is derived; never constructed anywhere else.
+
+    `conversation_subject` (2026-09-15 threading-subject fix) is a
+    SEPARATE finding from the same production proof: Gmail's own
+    documented threading requirement is that the Subject header must
+    MATCH across every message in a thread -- thread_id/In-Reply-To/
+    References alone are not sufficient. This is the EARLIEST SENT
+    step's actual transmitted subject (never re-rendered, never the
+    later step's own independently-authored subject template) -- the
+    provider-bound subject for ANY threaded follow-up, overriding
+    whatever that step's own MailSequenceStep.subject says. See
+    MailEnrollmentStep.rendered_subject's own docstring."""
 
     thread_id: str
     in_reply_to_message_id: str
     references: tuple[str, ...]
+    conversation_subject: str
 
 
 class MailSenderPort(ABC):
@@ -939,6 +953,7 @@ class MailSendingService:
         *,
         step: MailEnrollmentStep,
         send_result: SendResult,
+        rendered_subject: str,
         sequence_steps: list[MailSequenceStep],
         enrollment: MailEnrollment,
         windows: list[MailSendWindow],
@@ -987,6 +1002,7 @@ class MailSendingService:
                 "gmail_message_id": send_result.provider_message_id,
                 "gmail_thread_id": send_result.provider_thread_id,
                 "rfc_message_id": send_result.rfc_message_id,
+                "rendered_subject": rendered_subject,
                 "updated_at": now,
             }
         )
@@ -1628,11 +1644,21 @@ class MailSendingService:
         thread against the wrong (or a nonexistent) message.
 
         FAIL-SAFE, not fail-open: if a prior SENT step exists but is
-        missing its rfc_message_id/gmail_thread_id (or an EARLIER SENT
-        step needed for the References chain is), raises
-        MailThreadingDataMissingError rather than silently returning None
-        and letting the caller start an unexpected new conversation --
-        see that exception's own docstring."""
+        missing its rfc_message_id/gmail_thread_id/rendered_subject (or
+        an EARLIER SENT step needed for the References chain or the
+        conversation subject is), raises MailThreadingDataMissingError
+        rather than silently returning None and letting the caller start
+        an unexpected new conversation -- see that exception's own
+        docstring. `rendered_subject` can be legitimately absent on a row
+        that predates the 2026-09-15 threading-subject fix -- that is
+        exactly the same fail-safe case, not a separate one: a threaded
+        follow-up against pre-fix history is refused, never guessed.
+
+        `conversation_subject` is sourced from the EARLIEST sent step
+        (sent_steps[0]), never the most recent -- Gmail requires the
+        Subject header to MATCH across a whole thread (see this class's
+        own docstring), so the subject that matters is whichever one
+        actually started the conversation, not whichever one sent last."""
         if not step.reply_in_thread:
             return None
 
@@ -1644,14 +1670,16 @@ class MailSendingService:
             return None
 
         for sent_step in sent_steps:
-            if not sent_step.rfc_message_id or not sent_step.gmail_thread_id:
+            if not sent_step.rfc_message_id or not sent_step.gmail_thread_id or not sent_step.rendered_subject:
                 raise MailThreadingDataMissingError(step.enrollment_id, sent_step.enrollment_step_id)
 
+        earliest = sent_steps[0]
         most_recent = sent_steps[-1]
         return ReplyThreadingContext(
             thread_id=most_recent.gmail_thread_id,
             in_reply_to_message_id=most_recent.rfc_message_id,
             references=tuple(s.rfc_message_id for s in sent_steps),  # oldest-first, matches sort order above
+            conversation_subject=earliest.rendered_subject,
         )
 
     async def process_one_due_step(
@@ -1887,7 +1915,21 @@ class MailSendingService:
             threading_context = await self._resolve_reply_threading(step)
             contact = await self.crm_contact_store.get(enrollment.crm_contact_id)
             variables = contact_personalization_variables(contact)
-            rendered_subject = render_mail_template(step.subject, variables)
+            if threading_context is not None:
+                # 2026-09-15 threading-subject fix: Gmail requires the
+                # Subject header to MATCH across a thread (confirmed via
+                # a real production proof -- see ReplyThreadingContext's
+                # own docstring). The provider-bound subject for a
+                # threaded follow-up is the ORIGINAL conversation
+                # subject, verbatim, from whichever step actually started
+                # it -- never re-rendered here, and never this step's own
+                # independently-authored subject template (that template
+                # is preserved on MailEnrollmentStep.subject for
+                # editing/history only; it is deliberately NOT what gets
+                # sent).
+                rendered_subject = threading_context.conversation_subject
+            else:
+                rendered_subject = render_mail_template(step.subject, variables)
             rendered_body = render_mail_template(step.body, variables)
             composed = compose_outbound_email(snapshot_body=rendered_body, recipient_email=enrollment.email_at_enrollment)
         except Exception as e:
@@ -2030,6 +2072,7 @@ class MailSendingService:
         await self.record_send_success(
             step=sending_step,
             send_result=result,
+            rendered_subject=rendered_subject,
             sequence_steps=sequence_steps,
             enrollment=enrollment,
             windows=windows,
@@ -2120,9 +2163,24 @@ class MailSendingService:
             provider_thread_id=provider_thread_id,
             rfc_message_id=step.rfc_message_id or "",
         )
+        # Same subject resolution as the real send path (2026-09-15
+        # threading-subject fix) -- a human confirming an UNKNOWN row was
+        # actually delivered must record the SAME provider-bound subject
+        # prepare_and_send_step() would have used, never a fresh
+        # re-render of this step's own subject template (that would be
+        # wrong for a threaded follow-up, and could drift from what was
+        # truly sent even for an unthreaded one).
+        threading_context = await self._resolve_reply_threading(step)
+        if threading_context is not None:
+            resolved_subject = threading_context.conversation_subject
+        else:
+            contact = await self.crm_contact_store.get(enrollment.crm_contact_id)
+            variables = contact_personalization_variables(contact)
+            resolved_subject = render_mail_template(step.subject, variables)
         applied = await self.record_send_success(
             step=step,
             send_result=send_result,
+            rendered_subject=resolved_subject,
             sequence_steps=sequence_steps,
             enrollment=enrollment,
             windows=windows,

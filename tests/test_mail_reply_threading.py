@@ -117,9 +117,9 @@ def make_campaign() -> MailCampaign:
     )
 
 
-def make_sequence_step(step_id: str, step_number: int, reply_in_thread: bool) -> MailSequenceStep:
+def make_sequence_step(step_id: str, step_number: int, reply_in_thread: bool, subject: str | None = None) -> MailSequenceStep:
     return MailSequenceStep(
-        step_id=step_id, mail_campaign_id="c1", step_number=step_number, subject=f"Subject {step_number}",
+        step_id=step_id, mail_campaign_id="c1", step_number=step_number, subject=subject or f"Subject {step_number}",
         body=f"Body {step_number}.", delay_days=0, reply_in_thread=reply_in_thread, created_at=NOW, updated_at=NOW,
     )
 
@@ -146,6 +146,34 @@ async def svc():
     await campaign_store.create(make_campaign())
     await mailbox_store.create(make_mailbox())
     await channel_store.replace_for_campaign("c1", ["mbx-1"])
+    return service
+
+
+@pytest_asyncio.fixture
+async def svc_with_contact():
+    """Same as `svc`, but with a real MemoryCrmContactStore and one
+    registered contact -- only the subject-personalization test needs
+    this; every other test in this file deliberately avoids
+    personalization as a variable."""
+    from app.models.crm import CrmContact
+    from app.repositories.crm_contact_store import MemoryCrmContactStore
+
+    campaign_store = MemoryMailCampaignStore()
+    mailbox_store = MemoryMailboxStore()
+    channel_store = MemoryMailCampaignMailboxStore()
+    crm_contact_store = MemoryCrmContactStore()
+    service = MailSendingService(
+        campaign_store=campaign_store, enrollment_store=MemoryMailEnrollmentStore(),
+        step_store=MemoryMailEnrollmentStepStore(), mailbox_store=mailbox_store, channel_store=channel_store,
+        policy_store=MemoryMailboxSendPolicyStore(), suppression_store=MemoryMailSuppressionStore(),
+        activity_log=ActivityLogService(MemoryActivityEventStore()), crm_contact_store=crm_contact_store,
+    )
+    await campaign_store.create(make_campaign())
+    await mailbox_store.create(make_mailbox())
+    await channel_store.replace_for_campaign("c1", ["mbx-1"])
+    await crm_contact_store.create(
+        CrmContact(crm_contact_id="contact-e1", created_at=NOW, updated_at=NOW, first_name="Ada")
+    )
     return service
 
 
@@ -457,3 +485,150 @@ async def test_reply_in_thread_false_starts_a_new_thread_even_with_a_prior_sent_
     assert req2.thread_id is None
     assert req2.in_reply_to_message_id is None
     assert req2.references == ()
+
+
+# =====================================================================
+# Threaded-subject inheritance fix (2026-09-15) -- Gmail requires the
+# Subject header to MATCH across a thread (confirmed via a real
+# production proof, not just the API docs -- see ReplyThreadingContext's
+# own docstring). A threaded follow-up's PROVIDER-BOUND subject is the
+# EARLIEST sent step's actual transmitted subject, verbatim -- never
+# that step's own independently-authored subject template.
+# =====================================================================
+
+
+# --- (1) Threaded Step 2 automatically reuses Step 1's rendered subject ---------
+
+
+async def test_step2_reuses_step1_rendered_subject_when_threaded(svc):
+    enrollment = await _enroll(svc)
+    step1 = make_sequence_step("s1", 1, reply_in_thread=True, subject="Private dinner invitation")
+    step2 = make_sequence_step("s2", 2, reply_in_thread=True, subject="A totally different follow-up subject")
+    _, sender1, sent1 = await _send_step(svc, enrollment, 1, step1, all_sequence_steps=[step1, step2])
+    assert sender1.prepare_calls[0].subject == "Private dinner invitation"
+
+    outcome2, sender2, sent2 = await _send_step(
+        svc, enrollment, 2, step2, all_sequence_steps=[step1, step2], now=NOW + PACING_STEP
+    )
+
+    assert outcome2.sent is True
+    assert sender2.prepare_calls[0].subject == "Private dinner invitation"
+    assert sent2.rendered_subject == "Private dinner invitation"
+
+
+# --- (2) Threaded Step 3 still reuses the ORIGINAL conversation subject ---------
+
+
+async def test_step3_still_reuses_original_conversation_subject(svc):
+    enrollment = await _enroll(svc)
+    step1 = make_sequence_step("s1", 1, reply_in_thread=True, subject="Original Subject")
+    step2 = make_sequence_step("s2", 2, reply_in_thread=True, subject="Step 2's own subject, ignored")
+    step3 = make_sequence_step("s3", 3, reply_in_thread=True, subject="Step 3's own subject, also ignored")
+    all_steps = [step1, step2, step3]
+    await _send_step(svc, enrollment, 1, step1, all_sequence_steps=all_steps)
+    await _send_step(svc, enrollment, 2, step2, all_sequence_steps=all_steps, now=NOW + PACING_STEP)
+
+    outcome3, sender3, _ = await _send_step(
+        svc, enrollment, 3, step3, all_sequence_steps=all_steps, now=NOW + 2 * PACING_STEP
+    )
+
+    assert outcome3.sent is True
+    # Points to the ORIGINAL subject (step 1's), not step 2's own -- the
+    # conversation subject never drifts step-to-step.
+    assert sender3.prepare_calls[0].subject == "Original Subject"
+
+
+# --- (3) Personalization stays identical to the original thread subject --------
+
+
+async def test_threaded_subject_personalization_matches_original_never_rerendered(svc_with_contact):
+    svc = svc_with_contact
+    enrollment = await _enroll(svc)
+    step1 = make_sequence_step("s1", 1, reply_in_thread=True, subject="Private dinner invitation, {{first_name}}")
+    step2 = make_sequence_step("s2", 2, reply_in_thread=True, subject="{{first_name}}, a different subject entirely")
+    _, sender1, sent1 = await _send_step(svc, enrollment, 1, step1, all_sequence_steps=[step1, step2])
+    assert sender1.prepare_calls[0].subject == "Private dinner invitation, Ada"
+
+    outcome2, sender2, _ = await _send_step(
+        svc, enrollment, 2, step2, all_sequence_steps=[step1, step2], now=NOW + PACING_STEP
+    )
+
+    assert outcome2.sent is True
+    # Exactly step 1's ALREADY-RENDERED subject, carried over verbatim --
+    # never a fresh render of step 2's own {{first_name}} token.
+    assert sender2.prepare_calls[0].subject == "Private dinner invitation, Ada"
+
+
+# --- (4) reply_in_thread=False may use its own, different subject --------------
+
+
+async def test_reply_in_thread_false_uses_its_own_subject(svc):
+    enrollment = await _enroll(svc)
+    step1 = make_sequence_step("s1", 1, reply_in_thread=True, subject="Original Subject")
+    step2 = make_sequence_step("s2", 2, reply_in_thread=False, subject="Deliberately unrelated new subject")
+    await _send_step(svc, enrollment, 1, step1, all_sequence_steps=[step1, step2])
+
+    outcome2, sender2, _ = await _send_step(
+        svc, enrollment, 2, step2, all_sequence_steps=[step1, step2], now=NOW + PACING_STEP
+    )
+
+    assert outcome2.sent is True
+    assert sender2.prepare_calls[0].subject == "Deliberately unrelated new subject"
+
+
+# --- (5) Stored later-step subject can never alter the threaded provider-bound subject ---
+
+
+async def test_stored_step_subject_never_leaks_into_a_threaded_send(svc):
+    """Same assertion as (1)/(2) from a different angle: prove the
+    stored MailSequenceStep/MailEnrollmentStep.subject is preserved
+    unchanged for editing/history, while the ACTUAL transmitted subject
+    diverges from it entirely once threaded."""
+    enrollment = await _enroll(svc)
+    step1 = make_sequence_step("s1", 1, reply_in_thread=True, subject="Original Subject")
+    step2 = make_sequence_step("s2", 2, reply_in_thread=True, subject="This must never be sent")
+    await _send_step(svc, enrollment, 1, step1, all_sequence_steps=[step1, step2])
+
+    outcome2, sender2, sent2 = await _send_step(
+        svc, enrollment, 2, step2, all_sequence_steps=[step1, step2], now=NOW + PACING_STEP
+    )
+
+    assert outcome2.sent is True
+    assert sender2.prepare_calls[0].subject != "This must never be sent"
+    assert sender2.prepare_calls[0].subject == "Original Subject"
+    # The stored template itself is untouched -- history/editing intact.
+    assert sent2.subject == "This must never be sent"
+
+
+# --- (6) Retry produces identical subject AND threading metadata ---------------
+
+
+async def test_retry_of_threaded_follow_up_keeps_subject_identical_too(svc):
+    enrollment = await _enroll(svc)
+    step1 = make_sequence_step("s1", 1, reply_in_thread=True, subject="Original Subject")
+    step2 = make_sequence_step("s2", 2, reply_in_thread=True, subject="Ignored follow-up subject")
+    _, _, sent1 = await _send_step(svc, enrollment, 1, step1, all_sequence_steps=[step1, step2])
+    row2 = await svc.step_store.get_by_enrollment_and_step(enrollment.enrollment_id, "s2")
+    assert row2 is not None
+
+    sender = RecordingSender()
+    sender.send_prepared_error = FakeRetryableError("rate limited")
+    outcome1 = await svc.prepare_and_send_step(
+        row2, sender=sender, claimed_by="w1", sequence_steps=[step2], windows=all_day_windows(),
+        timezone_name=TZ, now=NOW + PACING_STEP, confirm_leadership=always_leader,
+    )
+    assert outcome1.blocked_reason == SendBlockReason.DEFINITELY_NOT_SENT_RETRY
+    first_req = sender.prepare_calls[0]
+    released_row = await svc.step_store.get(row2.enrollment_step_id)
+
+    sender.send_prepared_error = None
+    outcome2 = await svc.prepare_and_send_step(
+        released_row, sender=sender, claimed_by="w1", sequence_steps=[step2], windows=all_day_windows(),
+        timezone_name=TZ, now=NOW + PACING_STEP, confirm_leadership=always_leader,
+    )
+    assert outcome2.sent is True
+    second_req = sender.prepare_calls[1]
+
+    assert first_req.subject == second_req.subject == "Original Subject"
+    assert first_req.thread_id == second_req.thread_id == sent1.gmail_thread_id
+    assert first_req.in_reply_to_message_id == second_req.in_reply_to_message_id == sent1.rfc_message_id
