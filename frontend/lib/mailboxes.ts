@@ -33,14 +33,29 @@ export const EMAIL_ACCOUNT_TABLE_COLUMNS = [
 ] as const;
 
 // Matches app/google/oauth_client.py's GMAIL_SEND_SCOPE exactly -- the
-// ONE scope string this app ever requests beyond base identity. Kept as
-// a named constant, not inlined at each call site, so a future drift
-// between frontend and backend is a one-line diff to notice, not a
+// FIRST of the two scopes this app ever requests beyond base identity.
+// Kept as a named constant, not inlined at each call site, so a future
+// drift between frontend and backend is a one-line diff to notice, not a
 // silent string mismatch.
 export const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 
+// Matches app/google/oauth_client.py's GMAIL_METADATA_SCOPE exactly
+// (2026-09-15) -- requested in the SAME upgrade flow as GMAIL_SEND_SCOPE
+// above (see MailboxService.begin_gmail_send_upgrade()'s own docstring:
+// one reconnect grants both, no separate flow). Added specifically so a
+// mailbox that already has gmail.send from before this scope existed
+// still shows the upgrade action -- see gmailSendUpgradeState() below;
+// without this, a mailbox already at "enabled" would never re-prompt
+// for the added scope, exactly the gap that caused a real reconnect to
+// silently grant gmail.send-only again.
+export const GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata";
+
 export function hasGmailSendScope(mailbox: Mailbox): boolean {
   return mailbox.granted_scopes.includes(GMAIL_SEND_SCOPE);
+}
+
+export function hasGmailMetadataScope(mailbox: Mailbox): boolean {
+  return mailbox.granted_scopes.includes(GMAIL_METADATA_SCOPE);
 }
 
 // Astronomic Mail Gmail-send upgrade (see components/enable-gmail-
@@ -50,12 +65,16 @@ export function hasGmailSendScope(mailbox: Mailbox): boolean {
 // right now. "needs_reconnect" deliberately takes priority over
 // "enabled": a NEEDS_REAUTH/DISCONNECTED mailbox is not currently usable
 // for sending regardless of what it was once granted, and the UI must
-// never imply otherwise.
+// never imply otherwise. "enabled" requires BOTH scopes -- a mailbox
+// with gmail.send but not yet gmail.metadata is "can_enable", so the
+// SAME upgrade button/modal remains clickable and re-requests the full
+// desired scope set (Google's include_granted_scopes=true keeps
+// gmail.send granted either way).
 export type GmailSendUpgradeState = "enabled" | "can_enable" | "needs_reconnect";
 
 export function gmailSendUpgradeState(mailbox: Mailbox): GmailSendUpgradeState {
   if (mailbox.status !== "connected") return "needs_reconnect";
-  return hasGmailSendScope(mailbox) ? "enabled" : "can_enable";
+  return hasGmailSendScope(mailbox) && hasGmailMetadataScope(mailbox) ? "enabled" : "can_enable";
 }
 
 export function providerLabel(provider: MailboxProvider): string {
