@@ -43,6 +43,7 @@ from app.services.crm_import_service import CrmImportService
 from app.services.crm_service import CrmService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_execution_worker import MailExecutionWorker
+from app.services.mail_reply_detection_service import MailReplyDetectionService
 from app.services.mail_sending_service import MailSenderPort, MailSendingService, SendResult
 from app.services.worker_lease_service import WorkerLeaseService
 
@@ -133,13 +134,16 @@ async def env():
     }
 
 
-async def make_worker(env, holder_id="worker-A", lease_store=None, activity_log=None):
+async def make_worker(env, holder_id="worker-A", lease_store=None, activity_log=None, mail_reply_detection_service=None, reply_poll_interval_seconds=None):
     sender = RecordingSender()
     lease_service = WorkerLeaseService(lease_store or MemoryWorkerLeaseStore(), holder_id=holder_id)
+    kwargs = {}
+    if reply_poll_interval_seconds is not None:
+        kwargs["reply_poll_interval_seconds"] = reply_poll_interval_seconds
     worker = MailExecutionWorker(
         mail_sending_service=env["mail_sending_service"], mail_campaign_service=env["mail_campaign_service"],
         lease_service=lease_service, sender=sender, lease_duration_seconds=90, poll_interval_seconds=45,
-        activity_log=activity_log,
+        activity_log=activity_log, mail_reply_detection_service=mail_reply_detection_service, **kwargs,
     )
     return worker, sender
 
@@ -403,3 +407,145 @@ async def test_start_without_activity_log_does_not_raise(env, monkeypatch):
     worker.start()
     await asyncio.sleep(0)
     await worker.stop()  # must not raise
+
+
+# --- Reply-poll wiring (2026-09-15) ---------------------------------------------
+#
+# tick()'s own cadence gate for the reply poll, plus the resilience/restart
+# guarantees around it. The MATCHING/eligibility logic itself belongs to
+# MailReplyDetectionService and MailSendingService (see
+# tests/test_mail_reply_detection.py) -- these tests only cover tick()'s own
+# responsibility: calling poll_for_replies() on the right cadence, never
+# letting its failure abort due-step processing in the same tick, and
+# proving nothing about that correctness depends on any in-memory worker
+# state (a "restart" -- a brand-new MailExecutionWorker instance -- behaves
+# identically, since every fact it needs lives in the stores).
+
+
+class _CountingReplyDetectionService:
+    """A thin stand-in for MailReplyDetectionService -- records how many
+    times poll_for_replies() was actually invoked (to prove tick()'s own
+    cadence gate, independent of that method's real matching logic,
+    which is covered elsewhere) and can be made to raise on demand."""
+
+    def __init__(self, raise_error: Exception | None = None):
+        self.calls: list[datetime] = []
+        self.raise_error = raise_error
+
+    async def poll_for_replies(self, now: datetime) -> int:
+        self.calls.append(now)
+        if self.raise_error is not None:
+            raise self.raise_error
+        return 0
+
+
+async def test_tick_polls_for_replies_on_its_own_cadence(env):
+    detector = _CountingReplyDetectionService()
+    worker, _ = await make_worker(env, mail_reply_detection_service=detector, reply_poll_interval_seconds=300)
+
+    await worker.tick(NOW)
+    assert len(detector.calls) == 1  # runs immediately on the first tick, like the recovery sweep
+
+    await worker.tick(NOW + timedelta(seconds=30))  # well inside the 300s cadence
+    assert len(detector.calls) == 1  # NOT re-run yet
+
+    await worker.tick(NOW + timedelta(seconds=301))
+    assert len(detector.calls) == 2  # cadence elapsed -- runs again
+
+
+async def test_tick_never_polls_for_replies_when_no_detection_service_configured(env):
+    worker, _ = await make_worker(env)  # mail_reply_detection_service defaults to None
+    result = await worker.tick(NOW)
+    assert result.is_leader is True  # tick() itself must not raise/short-circuit
+
+
+async def test_reply_poll_failure_does_not_abort_due_step_processing_in_the_same_tick(env):
+    """A poll_for_replies() failure must never prevent the rest of THIS
+    tick from reaching and attempting its ordinary due rows -- same
+    isolation discipline as Trigger-processing (see tick()'s own
+    docstring). Asserts due_rows_seen (tick reached and attempted the
+    row), not a completed send -- whether prepare_and_send_step()
+    itself succeeds depends on real wall-clock leadership state
+    unrelated to this test (see
+    test_worker_processes_a_due_row_and_sends's own known flakiness),
+    which is not what this test is about."""
+    detector = _CountingReplyDetectionService(raise_error=RuntimeError("Gmail is down"))
+    worker, sender = await make_worker(env, mail_reply_detection_service=detector)
+    await enroll_and_queue(env)
+
+    result = await worker.tick(NOW)
+
+    assert len(detector.calls) == 1  # the poll really was attempted
+    assert result.is_leader is True
+    assert result.due_rows_seen == 1  # the reply-poll failure never short-circuited due-row processing
+
+
+class _FakeMailboxService:
+    async def refresh_mailbox_access_token(self, mailbox_id: str) -> str:
+        return "tok-1"
+
+
+class _FakeGmailThreadReaderClient:
+    def __init__(self):
+        self.threads: dict[str, dict] = {}
+
+    async def get_thread(self, *, access_token: str, thread_id: str) -> dict:
+        return self.threads.get(thread_id, {"id": thread_id, "messages": []})
+
+
+async def test_reply_poll_survives_worker_restart(env, monkeypatch):
+    """(10) worker restart -- a reply detected by one worker instance
+    stays detected for a brand-new instance (simulating a process
+    restart): nothing about correctness lives in _last_reply_poll_at or
+    any other in-memory worker attribute, only in the stores."""
+    monkeypatch.setattr("app.services.mail_sending_service.settings.mail_sending_mailbox_allowlist", "mbx-1")
+    monkeypatch.setattr("app.services.mail_sending_service.settings.mail_sending_recipient_allowlist", "lead@example.com")
+
+    mail_sending_service = env["mail_sending_service"]
+    # A second MailSequenceStep so the enrollment stays ACTIVE (a next
+    # step materializes) rather than COMPLETED once Step 1 sends --
+    # required for it to remain a real reply-poll candidate at all.
+    step2 = MailSequenceStep(
+        step_id="s2", mail_campaign_id="c1", step_number=2, subject="Subj 2", body="Body 2.",
+        delay_days=0, reply_in_thread=False, created_at=NOW, updated_at=NOW,
+    )
+    await env["mail_campaign_service"].step_store.create(step2)
+
+    async def _always_leader() -> bool:
+        return True
+
+    enrollment, row1 = await enroll_and_queue(env)
+    sender_a = RecordingSender()
+    outcome = await mail_sending_service.prepare_and_send_step(
+        row1, sender=sender_a, claimed_by="worker-A", sequence_steps=[env["step1"], step2],
+        windows=all_day_windows(), timezone_name=TZ, now=NOW, confirm_leadership=_always_leader,
+    )
+    assert outcome.sent is True
+    sent1 = await env["step_store"].get(row1.enrollment_step_id)
+
+    reader = _FakeGmailThreadReaderClient()
+    reader.threads[sent1.gmail_thread_id] = {
+        "id": sent1.gmail_thread_id,
+        "messages": [
+            {"id": "m-out", "payload": {"headers": [{"name": "From", "value": "mbx-1@astronomic.com"}]}},
+            {"id": "m-reply", "payload": {"headers": [{"name": "From", "value": "lead@example.com"}]}},
+        ],
+    }
+    detector = MailReplyDetectionService(
+        sending_service=mail_sending_service, mailbox_service=_FakeMailboxService(), gmail_thread_reader_client=reader
+    )
+
+    # First worker instance polls and detects the reply.
+    worker_a2, _ = await make_worker(env, mail_reply_detection_service=detector)
+    await worker_a2.tick(NOW + timedelta(seconds=1))
+    assert (await env["enrollment_store"].get(enrollment.enrollment_id)).status == MailEnrollmentStatus.REPLIED
+
+    # A brand-new MailExecutionWorker instance -- simulating a full
+    # process restart, with its OWN fresh _last_reply_poll_at=None --
+    # must see the SAME already-terminal state via the stores, and must
+    # never re-detect/re-emit for it (list_reply_poll_candidates()
+    # excludes REPLIED enrollments outright).
+    worker_b, _ = await make_worker(env, mail_reply_detection_service=detector, holder_id="worker-B")
+    assert worker_b._last_reply_poll_at is None
+    detected_again = await detector.poll_for_replies(NOW + timedelta(seconds=2))
+    assert detected_again == 0

@@ -1635,6 +1635,7 @@ class MailCampaignService:
             completed=counts[MailEnrollmentStatus.COMPLETED],
             suppressed=counts[MailEnrollmentStatus.SUPPRESSED],
             failed=counts[MailEnrollmentStatus.FAILED],
+            replied=counts[MailEnrollmentStatus.REPLIED],
         )
 
     async def list_batches(self, mail_campaign_id: str) -> list[MailEnrollmentBatch]:

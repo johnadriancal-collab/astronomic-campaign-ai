@@ -366,6 +366,17 @@ class MailEnrollmentStatus(str, Enum):
     FAILED: reserved for a genuinely unrecoverable enrollment (not wired to
       anything automatic in Phase A -- kept in the enum now so adding real
       logic that sets it later is a one-line change, not an enum migration).
+    REPLIED: (2026-09-15, reply detection V1) the enrolled recipient sent
+      an inbound reply in the known Gmail thread -- see
+      MailSendingService.mark_enrollment_replied()'s own docstring for the
+      exact detection/transition logic. Checked both at MailReply-write
+      time (the poll that detects it) AND live, immediately before every
+      send attempt (the same "early check is an optimization, final
+      check is load-bearing" pattern SUPPRESSED already uses) -- see
+      prepare_and_send_step()'s own docstring. Terminal -- no further
+      step is ever materialized once set, and this status is itself the
+      signal MailReplyDetectionService uses to stop polling this
+      enrollment at all (see that service's own docstring).
     """
 
     PENDING = "pending"
@@ -374,6 +385,7 @@ class MailEnrollmentStatus(str, Enum):
     COMPLETED = "completed"
     SUPPRESSED = "suppressed"
     FAILED = "failed"
+    REPLIED = "replied"
 
 
 class MailEnrollmentPauseReason(str, Enum):
@@ -500,6 +512,11 @@ class MailEnrollment(BaseModel):
     assigned_mailbox_id: str | None = None
     paused_reason: MailEnrollmentPauseReason | None = None
     batch_id: str | None = None
+    # 2026-09-15 reply detection V1 -- set ONLY by MailSendingService.
+    # mark_enrollment_replied(), exactly once, together with status
+    # transitioning to REPLIED (never set independently of that
+    # transition, and never cleared afterward -- REPLIED is terminal).
+    replied_at: datetime | None = None
 
 
 # --- Prospect batches (Phase 2, 2026-09-03) ----------------------------------
@@ -705,10 +722,12 @@ class MailCampaignWorkload(BaseModel):
     Deliberately an explicit, stable field per MailEnrollmentStatus value
     -- never an open-ended/dynamic {status: count} mapping -- so a
     frontend consumer never has to understand enum evolution to render
-    this. `total` is always exactly the sum of the six status fields
+    this. `total` is always exactly the sum of the status fields
     (enforced by MailCampaignService.get_workload(), the only place this
     is constructed); adding it explicitly rather than making callers sum
-    the six fields themselves."""
+    the fields themselves. `replied` (2026-09-15 reply detection V1) is
+    the seventh -- same convention, one explicit field per
+    MailEnrollmentStatus value, never inferred."""
 
     mail_campaign_id: str
     total: int
@@ -718,6 +737,7 @@ class MailCampaignWorkload(BaseModel):
     completed: int
     suppressed: int
     failed: int
+    replied: int
 
 
 # --- Per-step execution (Phase A durable execution model) -------------------
@@ -777,6 +797,16 @@ class MailEnrollmentStepStatus(str, Enum):
       backfill the identifiers) or back to QUEUED (verified NOT sent, safe
       to retry). Duplicate cold emails are worse than a temporarily stuck
       send -- see MailSendingService's module docstring.
+    SKIPPED_REPLIED: terminal (2026-09-15, reply detection V1); the exact
+      SKIPPED_SUPPRESSED sibling for the other reason a not-yet-sent row
+      can be permanently skipped -- always reached from PENDING/QUEUED/
+      CLAIMED, never from SENDING (reply detection is a live-suppression-
+      shaped pre-send check, resolved strictly before the provider-call
+      boundary, same as suppression itself -- see MailSendingService.
+      mark_enrollment_replied()). A separate value from SKIPPED_SUPPRESSED
+      on purpose: "why did this step never send" stays diagnostic, one
+      real reason per value, matching this enum's own established
+      convention.
     """
 
     PENDING = "pending"
@@ -787,6 +817,7 @@ class MailEnrollmentStepStatus(str, Enum):
     SKIPPED_SUPPRESSED = "skipped_suppressed"
     FAILED = "failed"
     UNKNOWN = "unknown"
+    SKIPPED_REPLIED = "skipped_replied"
 
 
 class MailEnrollmentStep(BaseModel):
@@ -988,6 +1019,50 @@ class MailSuppression(BaseModel):
     updated_at: datetime
     active: bool = True
     unsuppressed_at: datetime | None = None
+
+
+class MailReply(BaseModel):
+    """
+    Reply detection V1 (2026-09-15) -- exactly ONE row per enrollment,
+    ever. `enrollment_id` IS the primary key (see mail_reply_store.py),
+    matching MailSuppression's own "the natural key is the primary key,
+    idempotency is structural" convention above. V1 only tracks THAT an
+    enrollment replied, not a full reply history -- a second inbound
+    message in the same thread after REPLIED is already set is simply
+    never looked at again (see MailReplyDetectionService's own docstring
+    for why REPLIED enrollments are excluded from polling entirely).
+
+    Written by MailSendingService.mark_enrollment_replied() ONLY, at the
+    exact same moment the enrollment transitions to REPLIED -- never
+    constructed anywhere else, and never mutated after creation (no
+    "update" method exists on the store; see that store's own
+    docstring). `create()` is idempotent (a no-op, not an error, if a
+    row already exists for this enrollment_id) -- the actual duplicate-
+    processing guard, structurally independent of whatever triggered a
+    second detection attempt.
+
+    `gmail_thread_id`/`gmail_message_id` identify the SPECIFIC inbound
+    reply message that triggered detection (not the enrollment's
+    outbound thread_id, though they're numerically the same Gmail
+    thread -- `gmail_message_id` here is the REPLY's own message id,
+    distinct from every MailEnrollmentStep.gmail_message_id, which are
+    all OUR outbound messages). `reply_email_normalized` is the exact
+    normalized From address matched -- always == the enrollment's own
+    normalized email_at_enrollment by construction (see
+    MailReplyDetectionService's matching rule), kept here anyway as a
+    durable, self-contained audit fact that doesn't require re-deriving
+    from the enrollment row to inspect later.
+    """
+
+    enrollment_id: str
+    mail_campaign_id: str
+    crm_contact_id: str
+    mailbox_id: str
+    gmail_thread_id: str
+    gmail_message_id: str
+    reply_email_normalized: str
+    detected_at: datetime
+    created_at: datetime
 
 
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --

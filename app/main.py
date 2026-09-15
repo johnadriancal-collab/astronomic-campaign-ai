@@ -104,6 +104,7 @@ from app.repositories.sqlite_mail_send_window_store import SQLiteMailSendWindowS
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
 from app.repositories.sqlite_mail_trigger_occurrence_store import SQLiteMailTriggerOccurrenceStore
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
+from app.repositories.sqlite_mail_reply_store import SQLiteMailReplyStore
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
 from app.repositories.sqlite_mailbox_send_policy_store import SQLiteMailboxSendPolicyStore
 from app.repositories.sqlite_mailbox_store import SQLiteMailboxStore
@@ -141,6 +142,7 @@ from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProsp
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_execution_worker import MailExecutionWorker
+from app.services.mail_reply_detection_service import MailReplyDetectionService
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mail_trigger_service import MailTriggerService
@@ -180,6 +182,7 @@ async def lifespan(app: FastAPI):
     mail_sequence_step_store = SQLiteMailSequenceStepStore(settings.database_path)
     mail_enrollment_store = SQLiteMailEnrollmentStore(settings.database_path)
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
+    mail_reply_store = SQLiteMailReplyStore(settings.database_path)
     mail_campaign_mailbox_store = SQLiteMailCampaignMailboxStore(settings.database_path)
     mail_send_window_store = SQLiteMailSendWindowStore(settings.database_path)
     mail_enrollment_step_store = SQLiteMailEnrollmentStepStore(settings.database_path)
@@ -230,6 +233,7 @@ async def lifespan(app: FastAPI):
     await mail_sequence_step_store.connect()
     await mail_enrollment_store.connect()
     await mail_suppression_store.connect()
+    await mail_reply_store.connect()
     await mail_campaign_mailbox_store.connect()
     await mail_send_window_store.connect()
     await mail_enrollment_step_store.connect()
@@ -363,6 +367,7 @@ async def lifespan(app: FastAPI):
         suppression_store=mail_suppression_store,
         activity_log=activity_log_service,
         crm_contact_store=crm_contact_store,
+        reply_store=mail_reply_store,
     )
     app.state.mail_sending_service = mail_sending_service
     app.state.mail_campaign_service = MailCampaignService(
@@ -426,6 +431,16 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
     )
 
+    # Reply Detection V1 (2026-09-15). Read-only, gmail.metadata-scoped
+    # polling -- see MailReplyDetectionService's own module docstring.
+    # Reuses the SAME mail_sending_service/mailbox_service instances as
+    # everything else; never a second implementation of either.
+    mail_reply_detection_service = MailReplyDetectionService(
+        sending_service=mail_sending_service,
+        mailbox_service=app.state.mailbox_service,
+    )
+    app.state.mail_reply_detection_service = mail_reply_detection_service
+
     # Astronomic Mail Phase C (Campaign Execution Worker). Connects Phase
     # A's execution model, B1's OAuth foundation, B2's Gmail sender, and
     # B3's unsubscribe composition -- see app/services/
@@ -447,6 +462,7 @@ async def lifespan(app: FastAPI):
         sender=gmail_sender,
         activity_log=activity_log_service,
         mail_trigger_service=app.state.mail_trigger_service,
+        mail_reply_detection_service=mail_reply_detection_service,
     )
     app.state.mail_execution_worker = mail_execution_worker
     mail_execution_worker.start()
@@ -589,6 +605,7 @@ async def lifespan(app: FastAPI):
     await mail_sequence_step_store.close()
     await mail_enrollment_store.close()
     await mail_suppression_store.close()
+    await mail_reply_store.close()
     await mail_campaign_mailbox_store.close()
     await mail_send_window_store.close()
     await mail_enrollment_step_store.close()

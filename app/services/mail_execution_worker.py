@@ -45,11 +45,13 @@ from app.models.activity import ActivityCategory, ActivitySource
 from app.models.mail import MailCampaignStatus, MailSendWindow, MailSequenceStep
 from app.services.activity_log_service import ActivityLogService
 from app.services.mail_campaign_service import MailCampaignService
+from app.services.mail_reply_detection_service import MailReplyDetectionService
 from app.services.mail_sending_service import (
     WORKER_DUE_ROW_BATCH_SIZE,
     WORKER_LEASE_DURATION_SECONDS,
     WORKER_POLL_INTERVAL_SECONDS,
     WORKER_RECOVERY_INTERVAL_SECONDS,
+    WORKER_REPLY_POLL_INTERVAL_SECONDS,
     MailSenderPort,
     MailSendingService,
 )
@@ -80,9 +82,11 @@ class MailExecutionWorker:
         sender: MailSenderPort,
         activity_log: ActivityLogService | None = None,
         mail_trigger_service: MailTriggerService | None = None,
+        mail_reply_detection_service: MailReplyDetectionService | None = None,
         poll_interval_seconds: int = WORKER_POLL_INTERVAL_SECONDS,
         lease_duration_seconds: int = WORKER_LEASE_DURATION_SECONDS,
         recovery_interval_seconds: int = WORKER_RECOVERY_INTERVAL_SECONDS,
+        reply_poll_interval_seconds: int = WORKER_REPLY_POLL_INTERVAL_SECONDS,
         batch_size: int = WORKER_DUE_ROW_BATCH_SIZE,
     ):
         self.mail_sending_service = mail_sending_service
@@ -97,6 +101,13 @@ class MailExecutionWorker:
         # structurally reachable only under the exact same conditions
         # (leadership held, engine enabled) that already gate every send.
         self.mail_trigger_service = mail_trigger_service
+        # Reply detection V1 (2026-09-15): same optional convention as
+        # mail_trigger_service immediately above. When present, tick()
+        # runs a reply poll on its own cadence (reply_poll_interval_seconds,
+        # NOT the same as recovery_interval_seconds -- see that constant's
+        # own docstring) -- gated by the exact same leadership+engine-
+        # enabled conditions as everything else in this worker.
+        self.mail_reply_detection_service = mail_reply_detection_service
         # Optional (matching MailboxService's own activity_log convention --
         # see that class's docstring) so every existing test/call site that
         # constructs a worker without it keeps working unchanged; every
@@ -105,12 +116,14 @@ class MailExecutionWorker:
         self.poll_interval_seconds = poll_interval_seconds
         self.lease_duration_seconds = lease_duration_seconds
         self.recovery_interval_seconds = recovery_interval_seconds
+        self.reply_poll_interval_seconds = reply_poll_interval_seconds
         self.batch_size = batch_size
 
         self._task: asyncio.Task | None = None
         self._stopping = False
         self._last_tick_at: datetime | None = None
         self._last_recovery_at: datetime | None = None
+        self._last_reply_poll_at: datetime | None = None
 
     async def _log(self, event_type: str, summary: str) -> None:
         """Best-effort structural event for worker lifecycle/leadership
@@ -242,6 +255,19 @@ class MailExecutionWorker:
                 # one level up in _run_forever(), so ordinary sends are
                 # never collaterally delayed by an unrelated Trigger bug.
                 logger.exception("Phase C worker: Trigger occurrence processing failed.")
+
+        if self.mail_reply_detection_service is not None and (
+            self._last_reply_poll_at is None
+            or (now - self._last_reply_poll_at).total_seconds() >= self.reply_poll_interval_seconds
+        ):
+            try:
+                await self.mail_reply_detection_service.poll_for_replies(now)
+            except Exception:
+                # Same isolation discipline as Trigger processing above: a
+                # reply-poll failure must never abort the due-step
+                # processing below in the SAME tick.
+                logger.exception("Phase C worker: reply-poll failed.")
+            self._last_reply_poll_at = now
 
         schedule_cache: dict[str, tuple[list[MailSendWindow], str]] = {}
         steps_cache: dict[str, list[MailSequenceStep]] = {}

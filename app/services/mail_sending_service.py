@@ -60,6 +60,7 @@ from app.models.mail import (
     MailEnrollmentStatus,
     MailEnrollmentStep,
     MailEnrollmentStepStatus,
+    MailReply,
     MailSendWindow,
     MailSequenceStep,
 )
@@ -69,6 +70,7 @@ from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStor
 from app.repositories.mail_campaign_store import MailCampaignStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
+from app.repositories.mail_reply_store import MailReplyStore, MemoryMailReplyStore
 from app.repositories.mail_suppression_store import MailSuppressionStore
 from app.repositories.mailbox_send_policy_store import MailboxSendPolicyStore
 from app.repositories.mailbox_store import MailboxStore
@@ -143,6 +145,13 @@ WORKER_POLL_INTERVAL_SECONDS = 45
 WORKER_DUE_ROW_BATCH_SIZE = 25
 WORKER_RECOVERY_INTERVAL_SECONDS = 300
 WORKER_LEASE_DURATION_SECONDS = 90
+# Reply detection V1 (2026-09-15) -- its own cadence, separate from
+# WORKER_RECOVERY_INTERVAL_SECONDS above: a reply is time-sensitive
+# (stopping a follow-up promptly matters more than the recovery sweep's
+# housekeeping), so it runs more often, but still gently -- one
+# users.threads.get call per eligible enrollment per cycle (see
+# MailReplyDetectionService), never a mailbox-wide sync.
+WORKER_REPLY_POLL_INTERVAL_SECONDS = 120
 
 
 class NoUsableMailboxError(Exception):
@@ -514,6 +523,23 @@ class ReplyThreadingContext:
     conversation_subject: str
 
 
+@dataclass(frozen=True)
+class ReplyPollCandidate:
+    """Reply detection V1 (2026-09-15) -- one enrollment
+    MailReplyDetectionService should poll on this cycle, returned by
+    MailSendingService.list_reply_poll_candidates(). `gmail_thread_id`/
+    `mailbox_id` are sourced from the enrollment's MOST RECENT SENT step
+    (same "most recent, not blindly the first" defensiveness as
+    _resolve_reply_threading() -- though in practice every SENT step for
+    a correctly-threaded enrollment shares the same gmail_thread_id, so
+    this is a robustness choice, not something expected to matter day to
+    day)."""
+
+    enrollment: MailEnrollment
+    mailbox_id: str
+    gmail_thread_id: str
+
+
 class MailSenderPort(ABC):
     """The ONLY boundary through which a message could ever actually be
     sent. Phase A defined this interface with no concrete implementation
@@ -580,6 +606,13 @@ class SendBlockReason(str, Enum):
     LEAD_START_LIMIT_REACHED = "lead_start_limit_reached"
     RECIPIENT_SUPPRESSED = "recipient_suppressed"
     OUTSIDE_SEND_WINDOW = "outside_send_window"
+    # Reply detection V1 (2026-09-15) -- same "the early enrollment.status
+    # check already covers the common case for free; this is the fresh,
+    # load-bearing recheck immediately before SENDING" shape as
+    # RECIPIENT_SUPPRESSED above. See MailSendingService.
+    # mark_enrollment_replied() and prepare_and_send_step()'s own
+    # docstring.
+    RECIPIENT_REPLIED = "recipient_replied"
     # --- Phase C additions ---
     NOT_LEADER = "not_leader"
     CONTROLLED_TEST_NOT_ALLOWED = "controlled_test_not_allowed"
@@ -760,6 +793,7 @@ class MailSendingService:
         suppression_store: MailSuppressionStore,
         activity_log: ActivityLogService,
         crm_contact_store: CrmContactStore | None = None,
+        reply_store: MailReplyStore | None = None,
     ):
         self.campaign_store = campaign_store
         self.enrollment_store = enrollment_store
@@ -769,6 +803,12 @@ class MailSendingService:
         self.policy_store = policy_store
         self.suppression_store = suppression_store
         self.activity_log = activity_log
+        # Reply detection V1 (2026-09-15) -- same optional-with-in-memory-
+        # default convention as crm_contact_store above, for the exact
+        # same reason: every existing test/call site that constructs this
+        # service directly (not exercising reply detection at all) keeps
+        # passing unmodified.
+        self.reply_store = reply_store or MemoryMailReplyStore()
         # P0 personalization fix (2026-09-15) -- the ONLY new dependency
         # this required. Used solely to resolve {{first_name}}/
         # {{last_name}}/{{company}} against the enrolled Contact's
@@ -1202,6 +1242,142 @@ class MailSendingService:
             entity_type="mail_campaign",
             entity_id=enrollment.mail_campaign_id,
         )
+
+    async def mark_enrollment_replied(
+        self,
+        enrollment: MailEnrollment,
+        *,
+        mailbox_id: str,
+        gmail_thread_id: str,
+        gmail_message_id: str,
+        reply_email_normalized: str,
+        now: datetime,
+    ) -> bool:
+        """Reply detection V1 (2026-09-15) -- the SUPPRESSED-shaped sibling
+        for a reply: moves every not-yet-sent, not-in-flight row
+        (PENDING/QUEUED/CLAIMED) to SKIPPED_REPLIED, and the enrollment
+        itself to REPLIED -- terminal, so no further step is ever
+        materialized. A row already in SENDING is left alone, same
+        reasoning as suppress_enrollment() above (resolves to UNKNOWN on
+        its own schedule; this enrollment is already terminal by then).
+        A SENT/FAILED/UNKNOWN/already-terminal row is history and is
+        never touched -- see MailReply's own docstring: "preserve SENT
+        history" is not a suggestion, nothing here ever mutates a SENT
+        row.
+
+        IDEMPOTENT, and this is the ACTUAL duplicate-processing guard,
+        not a courtesy check: `self.reply_store.create()` is a no-op if
+        a MailReply already exists for this enrollment_id (see that
+        store's own docstring). Returns False and does NOTHING ELSE in
+        that case -- no step transitions, no enrollment save, no second
+        Activity Log event -- a caller (MailReplyDetectionService) that
+        somehow attempts this twice for the same enrollment (a raced
+        poll, a retried call) produces exactly one terminal state and
+        exactly one event, never two. Returns True iff this call is the
+        one that actually recorded the reply."""
+        reply = MailReply(
+            enrollment_id=enrollment.enrollment_id,
+            mail_campaign_id=enrollment.mail_campaign_id,
+            crm_contact_id=enrollment.crm_contact_id,
+            mailbox_id=mailbox_id,
+            gmail_thread_id=gmail_thread_id,
+            gmail_message_id=gmail_message_id,
+            reply_email_normalized=reply_email_normalized,
+            detected_at=now,
+            created_at=now,
+        )
+        created = await self.reply_store.create(reply)
+        if not created:
+            return False
+
+        skippable = {
+            MailEnrollmentStepStatus.PENDING,
+            MailEnrollmentStepStatus.QUEUED,
+            MailEnrollmentStepStatus.CLAIMED,
+        }
+        for row in await self.step_store.list_for_enrollment(enrollment.enrollment_id):
+            if row.status in skippable:
+                updated = row.model_copy(update={"status": MailEnrollmentStepStatus.SKIPPED_REPLIED, "updated_at": now})
+                await self.step_store.try_transition(row.enrollment_step_id, row.status, updated)
+
+        updated_enrollment = enrollment.model_copy(update={"status": MailEnrollmentStatus.REPLIED, "replied_at": now})
+        await self.enrollment_store.save(updated_enrollment)
+        await self.activity_log.record(
+            event_type="mail_enrollment.replied",
+            category=ActivityCategory.MAIL,
+            source=ActivitySource.MAIL_SYSTEM,
+            summary="A lead's mail sequence was stopped because they replied.",
+            entity_type="mail_campaign",
+            entity_id=enrollment.mail_campaign_id,
+        )
+        return True
+
+    async def list_reply_poll_candidates(self) -> list[ReplyPollCandidate]:
+        """Reply detection V1 (2026-09-15) -- every enrollment
+        MailReplyDetectionService should poll on this cycle.
+
+        Deliberately does NOT require campaign.status == ACTIVE (a real
+        correction from this feature's own design review): a recipient
+        can reply while their campaign is PAUSED, or while the engine
+        itself is briefly off for maintenance, and that reply must still
+        be recorded so a later-resumed campaign doesn't send a follow-up
+        to someone who already replied. Iterates every campaign
+        regardless of status for exactly this reason -- the same
+        structural shape as resume_mailbox_paused_enrollments() above,
+        MINUS that method's own `if campaign.status != ACTIVE: continue`
+        line, which is deliberately absent here.
+
+        Eligible enrollment.status: ACTIVE or PAUSED only.
+          - REPLIED: excluded -- already terminal; this is the actual
+            "stop polling" signal (a MailReply already exists, so it
+            would be excluded below anyway, but checking status directly
+            here means no per-enrollment reply_store.get() misses for
+            an already-known-terminal enrollment).
+          - SUPPRESSED: excluded -- a suppressed enrollment can never
+            send again regardless of any future campaign state; nothing
+            reply-stop exists to protect.
+          - FAILED: excluded -- reserved for a genuinely unrecoverable
+            enrollment (see MailEnrollmentStatus.FAILED's own docstring:
+            "not wired to anything automatic"); no lifecycle today ever
+            moves a FAILED enrollment back to ACTIVE, so polling it would
+            poll forever for an enrollment that can structurally never
+            send again.
+          - COMPLETED: excluded -- V1 has no automated follow-up
+            sequences at all (see this feature's own product-scoping
+            decision); a COMPLETED enrollment has no MailSequenceStep
+            left to materialize, so there is no future send a reply
+            could ever need to block. Revisit this exclusion ONLY if a
+            future phase adds a way for a COMPLETED enrollment to
+            resume sending.
+
+        Also requires: at least one SENT step exists (with a persisted
+        gmail_thread_id -- see ReplyPollCandidate's own docstring for
+        which one is used when more than one qualifies), and no MailReply
+        already exists for this enrollment."""
+        campaigns = await self.campaign_store.list()
+        candidates: list[ReplyPollCandidate] = []
+        eligible_statuses = {MailEnrollmentStatus.ACTIVE, MailEnrollmentStatus.PAUSED}
+        for campaign in campaigns:
+            enrollments = await self.enrollment_store.list_for_campaign(campaign.mail_campaign_id)
+            for enrollment in enrollments:
+                if enrollment.status not in eligible_statuses:
+                    continue
+                if await self.reply_store.get(enrollment.enrollment_id) is not None:
+                    continue
+                sent_steps = [
+                    s
+                    for s in await self.step_store.list_for_enrollment(enrollment.enrollment_id)
+                    if s.status == MailEnrollmentStepStatus.SENT and s.gmail_thread_id and s.mailbox_id
+                ]
+                if not sent_steps:
+                    continue
+                most_recent = max(sent_steps, key=lambda s: s.step_number)
+                candidates.append(
+                    ReplyPollCandidate(
+                        enrollment=enrollment, mailbox_id=most_recent.mailbox_id, gmail_thread_id=most_recent.gmail_thread_id
+                    )
+                )
+        return candidates
 
     # --- The runtime safety checklist + one send attempt -----------------------
 
@@ -2039,6 +2215,20 @@ class MailSendingService:
         if suppression is not None and suppression.active:
             await self.suppress_enrollment(enrollment, now)
             return ProcessOutcome(sent=False, blocked_reason=SendBlockReason.RECIPIENT_SUPPRESSED)
+
+        # Reply detection V1 -- the SAME load-bearing shape as suppression
+        # immediately above: the early enrollment.status != ACTIVE check
+        # near the top of this method already blocks a REPLIED enrollment
+        # for free once REPLIED is set, but a reply that lands DURING
+        # preparation (between that early check and here) is only caught
+        # by this fresh, independent lookup. If a MailReply exists by
+        # now, this row is released back to QUEUED (not re-marked
+        # replied -- mark_enrollment_replied() already ran, by whatever
+        # detected it) and the send never reaches the provider.
+        reply = await self.reply_store.get(enrollment.enrollment_id)
+        if reply is not None:
+            await self._release_to_queued(step, step.next_send_at or now, now)
+            return ProcessOutcome(sent=False, blocked_reason=SendBlockReason.RECIPIENT_REPLIED)
 
         if not await confirm_leadership():
             await self._release_to_queued(step, step.next_send_at or now, now)
