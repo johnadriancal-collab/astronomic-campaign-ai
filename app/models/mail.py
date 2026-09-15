@@ -929,6 +929,7 @@ class MailExecutionStepView(BaseModel):
 
     mailbox_id: str | None = None
     gmail_message_id: str | None = None
+    gmail_thread_id: str | None = None
     rfc_message_id: str | None = None
 
     updated_at: datetime

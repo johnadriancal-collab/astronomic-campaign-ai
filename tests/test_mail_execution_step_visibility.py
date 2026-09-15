@@ -275,7 +275,7 @@ async def test_execution_steps_never_expose_mailbox_oauth_fields(campaign_servic
         assert set(row.keys()) == {
             "enrollment_step_id", "mail_campaign_id", "enrollment_id", "step_number", "status",
             "prospect_email", "prospect_name", "sent_at", "last_attempt_at", "last_error",
-            "mailbox_id", "gmail_message_id", "rfc_message_id", "updated_at",
+            "mailbox_id", "gmail_message_id", "gmail_thread_id", "rfc_message_id", "updated_at",
         }
 
 

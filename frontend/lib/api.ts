@@ -1344,6 +1344,7 @@ export interface MailExecutionStepView {
   last_error: string | null;
   mailbox_id: string | null;
   gmail_message_id: string | null;
+  gmail_thread_id: string | null;
   rfc_message_id: string | null;
   updated_at: string;
 }

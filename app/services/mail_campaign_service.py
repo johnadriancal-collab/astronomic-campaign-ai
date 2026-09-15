@@ -1604,6 +1604,7 @@ class MailCampaignService:
                     last_error=step.last_error,
                     mailbox_id=step.mailbox_id,
                     gmail_message_id=step.gmail_message_id,
+                    gmail_thread_id=step.gmail_thread_id,
                     rfc_message_id=step.rfc_message_id,
                     updated_at=step.updated_at,
                 )
