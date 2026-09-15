@@ -45,6 +45,19 @@ session cookie:
     recognizes ADMIN_SERVICE_READ_TOKEN/ADMIN_SERVICE_OPERATOR_TOKEN and
     only allows the /crm/ prefix), rejecting a legitimate request before
     this route's own dependency ever ran.
+  - /sync/sale-onboarding: the Sale Bot (astronomic-sale-automation, a
+    separate Render service, no browser, no session cookie possible)
+    calling in once a sale is signed AND paid, to create/update Client
+    CRM records -- its OWN shared-secret bearer-token check
+    (verify_sale_bot_webhook_token in app/dependencies.py), a separate
+    secret from every other token above. Same reason as every other
+    /sync/*//integrations/* entry for being listed here at all: without
+    it, this route's Authorization header would instead be intercepted by
+    the admin/service-token mode below and rejected before this route's
+    own dependency ever ran (this route mutates Client CRM data, which
+    the read-only service token's "/crm/ GET only" scope could never
+    permit anyway, and it isn't in the operator token's explicit allowlist
+    either).
   - /mail/unsubscribe, /mail/unsubscribe/one-click (Phase B3): reached by
     an anonymous recipient (a human clicking a link, or a mail provider's
     infrastructure POSTing List-Unsubscribe-Post) who by definition has
@@ -268,6 +281,7 @@ PUBLIC_PATHS = frozenset(
         "/mail/unsubscribe",
         "/mail/unsubscribe/one-click",
         "/integrations/contacts/photo",
+        "/sync/sale-onboarding",
     }
 )
 

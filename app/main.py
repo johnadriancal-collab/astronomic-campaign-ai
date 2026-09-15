@@ -61,6 +61,7 @@ from app.api.luma import router as luma_router
 from app.api.mail import router as mail_router
 from app.api.mail_unsubscribe import router as mail_unsubscribe_router
 from app.api.mailboxes import router as mailboxes_router
+from app.api.sale_onboarding import router as sale_onboarding_router
 from app.api.sync import router as sync_router
 from app import access_log_filter
 from app.config import settings
@@ -617,6 +618,7 @@ app.include_router(mailboxes_router)
 app.include_router(luma_router)
 app.include_router(luma_mapping_router)
 app.include_router(integrations_router)
+app.include_router(sale_onboarding_router)
 
 HOMEPAGE_HTML = """<!doctype html>
 <html lang="en">

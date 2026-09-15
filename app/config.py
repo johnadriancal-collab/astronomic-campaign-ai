@@ -358,5 +358,18 @@ class Settings(BaseSettings):
     # `Authorization: Bearer <token>`, exactly like the ITF bridge.
     integrations_api_token: str | None = None
 
+    # POST /sync/sale-onboarding -- the Sale Bot (astronomic-sale-automation,
+    # a separate Render service) calling in once a sale's DocuSign contract
+    # is signed AND its Mercury invoice is paid, to create/update the
+    # matching Client/ClientContact/Engagement records. A dedicated shared
+    # secret, independently revocable from itf_webhook_token and
+    # integrations_api_token (different caller, different repo, different
+    # blast radius if ever leaked) -- same "None until Railway is
+    # configured, 503 rather than crashing at startup" precedent as every
+    # other integration credential above. Sent as
+    # `Authorization: Bearer <token>`, same convention as the ITF bridge
+    # and the Leads List Apps Script.
+    sale_bot_webhook_token: str | None = None
+
 
 settings = Settings()

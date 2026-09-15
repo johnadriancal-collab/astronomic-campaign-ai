@@ -34,6 +34,23 @@ class EngagementLumaEventAlreadyLinkedError(Exception):
         super().__init__(f"luma_event_id {luma_event_id} is already linked to another Engagement.")
 
 
+class EngagementExternalIdConflictError(Exception):
+    """Raised by create()/save() when the write would leave two Engagements
+    sharing the same non-null `sale_id` OR the same non-null
+    `docusign_envelope_id` -- the Sale Bot -> AstroHub onboarding
+    integration's own idempotency/traceability invariant (2026-09-15),
+    same enforcement shape as EngagementLumaEventAlreadyLinkedError: a
+    real SQLite partial unique index per field (see
+    sqlite_engagement_store.py), not only a service-layer pre-check, so it
+    holds under concurrent/duplicate requests. `field` is always exactly
+    "sale_id" or "docusign_envelope_id" -- never any other value."""
+
+    def __init__(self, field: str, value: str):
+        self.field = field
+        self.value = value
+        super().__init__(f"{field} {value} is already linked to another Engagement.")
+
+
 class EngagementStore(ABC):
     @abstractmethod
     async def create(self, engagement: Engagement) -> None:
@@ -69,6 +86,22 @@ class EngagementStore(ABC):
         """Returns the Engagement currently linked to this Luma event, or
         None if none is -- Stage 1H-A's own lookup direction (Luma event ->
         Engagement), the one a future registration-sync stage will need."""
+
+    @abstractmethod
+    async def get_by_sale_id(self, sale_id: str) -> Engagement | None:
+        """Returns the Engagement created from this sale, or None -- the
+        Sale Bot -> AstroHub onboarding integration's PRIMARY idempotency
+        lookup (2026-09-15): before creating anything, the onboarding
+        service checks this first, and a hit means "already processed,"
+        never a duplicate-creation attempt."""
+
+    @abstractmethod
+    async def get_by_docusign_envelope_id(self, docusign_envelope_id: str) -> Engagement | None:
+        """Returns the Engagement linked to this DocuSign envelope, or
+        None -- the onboarding integration's SECONDARY safeguard
+        (2026-09-15): a hit under a DIFFERENT sale_id than the one being
+        processed is a conflict the caller must reject, never silently
+        create a second Engagement for the same signed contract."""
 
     @abstractmethod
     async def list_for_clients(self, client_ids: list[str]) -> list[Engagement]:
@@ -114,9 +147,21 @@ class MemoryEngagementStore(EngagementStore):
             e.luma_event_id == luma_event_id and e.engagement_id != exclude_engagement_id for e in self._rows.values()
         )
 
+    def _external_id_conflict(self, engagement: Engagement, exclude_engagement_id: str | None) -> None:
+        for field in ("sale_id", "docusign_envelope_id"):
+            value = getattr(engagement, field)
+            if value is None:
+                continue
+            for e in self._rows.values():
+                if e.engagement_id == exclude_engagement_id:
+                    continue
+                if getattr(e, field) == value:
+                    raise EngagementExternalIdConflictError(field, value)
+
     async def create(self, engagement: Engagement) -> None:
         if self._linked_elsewhere(engagement.luma_event_id, exclude_engagement_id=None):
             raise EngagementLumaEventAlreadyLinkedError(engagement.luma_event_id)
+        self._external_id_conflict(engagement, exclude_engagement_id=None)
         self._rows[engagement.engagement_id] = engagement
 
     async def get(self, engagement_id: str) -> Engagement | None:
@@ -127,6 +172,7 @@ class MemoryEngagementStore(EngagementStore):
             raise EngagementNotFoundError(engagement.engagement_id)
         if self._linked_elsewhere(engagement.luma_event_id, exclude_engagement_id=engagement.engagement_id):
             raise EngagementLumaEventAlreadyLinkedError(engagement.luma_event_id)
+        self._external_id_conflict(engagement, exclude_engagement_id=engagement.engagement_id)
         self._rows[engagement.engagement_id] = engagement
 
     async def list_for_client(self, client_id: str) -> list[Engagement]:
@@ -136,6 +182,18 @@ class MemoryEngagementStore(EngagementStore):
     async def get_by_luma_event_id(self, luma_event_id: str) -> Engagement | None:
         for e in self._rows.values():
             if e.luma_event_id == luma_event_id:
+                return e
+        return None
+
+    async def get_by_sale_id(self, sale_id: str) -> Engagement | None:
+        for e in self._rows.values():
+            if e.sale_id == sale_id:
+                return e
+        return None
+
+    async def get_by_docusign_envelope_id(self, docusign_envelope_id: str) -> Engagement | None:
+        for e in self._rows.values():
+            if e.docusign_envelope_id == docusign_envelope_id:
                 return e
         return None
 

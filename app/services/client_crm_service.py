@@ -68,6 +68,7 @@ from app.models.client_crm import (
     EngagementParticipantView,
     EngagementStatus,
     EngagementType,
+    normalize_company_name,
     ParticipantRsvpStatus,
     ParticipantSource,
 )
@@ -82,7 +83,11 @@ from app.repositories.engagement_participant_store import (
     EngagementParticipantDuplicateError,
     EngagementParticipantStore,
 )
-from app.repositories.engagement_store import EngagementLumaEventAlreadyLinkedError, EngagementStore
+from app.repositories.engagement_store import (
+    EngagementExternalIdConflictError,
+    EngagementLumaEventAlreadyLinkedError,
+    EngagementStore,
+)
 from app.repositories.luma_event_store import LumaEventStore
 from app.services.activity_log_service import ActivityLogService
 from app.services.contact_engagement_signal_service import ContactEngagementSignalService
@@ -307,6 +312,20 @@ class EngagementLumaEventAlreadyLinked(Exception):
         super().__init__(f"luma_event_id {luma_event_id} is already linked to another Engagement.")
 
 
+class EngagementExternalIdConflict(Exception):
+    """Raised when creating/updating an Engagement would leave two
+    Engagements sharing the same non-null sale_id or docusign_envelope_id
+    -- mapped to a clean 409 at the API layer, same shape as
+    EngagementLumaEventAlreadyLinked. Sale Bot -> AstroHub onboarding
+    integration (2026-09-15): `field` is always "sale_id" or
+    "docusign_envelope_id"."""
+
+    def __init__(self, field: str, value: str):
+        self.field = field
+        self.value = value
+        super().__init__(f"{field} {value} is already linked to another Engagement.")
+
+
 class LumaEventNotFound(Exception):
     """Raised by get_luma_event() for a luma_event_id with no stored
     LumaEvent -- mapped to a plain 404 at the API layer. Distinct from
@@ -415,6 +434,34 @@ class ClientCrmService:
 
     async def get_client(self, client_id: str) -> Client:
         return await self._require_client(client_id)
+
+    async def find_client_by_normalized_name(self, name: str) -> Client | None:
+        """Conservative, non-fuzzy Client lookup -- normalize_company_name()
+        (trim, collapse internal whitespace, case-fold; no punctuation
+        stripping, no similarity scoring) applied to both sides before
+        comparing. Two names that merely look alike never match here; only
+        whitespace/case differences that are obviously the same literal
+        name do. Added for the Sale Bot -> AstroHub onboarding integration
+        (2026-09-15) get-or-create-Client step, promoted to a real,
+        reusable service method rather than yet another private
+        list()-and-scan helper duplicated in a one-off script (the pattern
+        every earlier migration stage this quarter had to reinvent for
+        itself -- see austin_forward_event_history_backfill.py and
+        historical_dinner_migration.py's own near-identical private
+        helpers). Archived Clients are never matched -- same "skip
+        archived" convention as list_clients()'s own default. A Client
+        whose OWN name fails to normalize to anything (blank/whitespace-
+        only) is skipped too, since nothing meaningful could ever match
+        it anyway."""
+        target = normalize_company_name(name)
+        if target is None:
+            return None
+        for client in await self.client_store.list():
+            if client.archived:
+                continue
+            if normalize_company_name(client.name) == target:
+                return client
+        return None
 
     async def update_client(self, client_id: str, patch: dict[str, Any]) -> Client:
         """Direct partial update -- every remaining key in `patch` is set
@@ -814,6 +861,8 @@ class ClientCrmService:
             await self.engagement_store.create(engagement)
         except EngagementLumaEventAlreadyLinkedError as exc:
             raise EngagementLumaEventAlreadyLinked(exc.luma_event_id) from exc
+        except EngagementExternalIdConflictError as exc:
+            raise EngagementExternalIdConflict(exc.field, exc.value) from exc
         await self.activity_log.record(
             event_type="engagement.created",
             category=ActivityCategory.CLIENT_CRM,
@@ -860,6 +909,8 @@ class ClientCrmService:
             await self.engagement_store.save(updated)
         except EngagementLumaEventAlreadyLinkedError as exc:
             raise EngagementLumaEventAlreadyLinked(exc.luma_event_id) from exc
+        except EngagementExternalIdConflictError as exc:
+            raise EngagementExternalIdConflict(exc.field, exc.value) from exc
         await self._record_engagement_update_activity(engagement, updated)
         return updated
 

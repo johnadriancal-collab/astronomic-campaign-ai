@@ -70,6 +70,21 @@ class ClientRelationshipClassification(str, Enum):
 DIRECT_EVENTS_CLIENT_NAME = "Astronomic — Direct Events"
 
 
+# Sale Bot -> AstroHub onboarding (2026-09-15): conservative Client-name
+# matching -- trims, collapses internal whitespace runs to one space, and
+# case-folds. Deliberately NOT fuzzy (no punctuation stripping, no
+# abbreviation expansion, no similarity scoring) -- two names that merely
+# look alike must never collapse into one Client; only whitespace/case
+# differences that are obviously the same literal name do. Mirrors
+# app.models.crm.normalize_email's own "one small, explicit, reused
+# everywhere" convention, just for company names instead of emails.
+def normalize_company_name(name: str | None) -> str | None:
+    if not name:
+        return None
+    normalized = " ".join(name.split()).lower()
+    return normalized or None
+
+
 class Client(BaseModel):
     """The durable company/account relationship record -- e.g. "Hive
     ASMBLD". Owns nothing else directly; ClientContact/Engagement/
@@ -321,6 +336,17 @@ class Engagement(BaseModel):
     # entirely and is more descriptive besides.
     engagement_date: date | None = None  # planned/actual dinner date -- nullable: a PLANNED
     # engagement may not have a firm date locked in yet.
+    # event_date_raw (Sale Bot -> AstroHub onboarding, 2026-09-15): the
+    # ORIGINAL human-typed value from the /sale Slack form's "Tentative
+    # event date" field, populated ONLY when the onboarding integration's
+    # own fixed-format parser could not confidently turn it into a real
+    # `engagement_date` -- never a duplicate of a value that WAS parsed
+    # successfully. Exists so a malformed/informal date (e.g. "mid-Q4",
+    # "TBD") is never silently dropped or guessed at; a human resolves it
+    # later and sets engagement_date by hand. Not meaningful for any
+    # Engagement created any other way, same "reserved, not written by
+    # anything else yet" convention as luma_event_id started out with.
+    event_date_raw: str | None = None
     location: str | None = None
     status: EngagementStatus = EngagementStatus.PLANNED
     owner: str | None = None  # free text, no auth-identity system exists yet -- same
@@ -331,6 +357,59 @@ class Engagement(BaseModel):
     signed_date: date | None = None
     payment_status: EngagementPaymentStatus = EngagementPaymentStatus.UNPAID
     luma_event_id: str | None = None
+
+    # --- Sale Bot -> AstroHub onboarding integration (2026-09-15) -------
+    # External identifiers, reserved/nullable, same precedent as
+    # luma_event_id above: `sale_id` is the PRIMARY cross-system
+    # idempotency key (generated once, at /sale Slack modal submission
+    # time, in astronomic-sale-automation -- see that repo's
+    # src/sale-record.js); `docusign_envelope_id` is a SECONDARY unique
+    # safeguard (two different sale_ids must never end up pointing at the
+    # same signed contract); `mercury_invoice_id`/`qb_invoice_id`/
+    # `qb_customer_id` are traceability-only, never looked up by, kept so
+    # a human debugging a specific Engagement can find the matching
+    # QuickBooks/Mercury record without cross-referencing the sale bot's
+    # own logs. Both sale_id and docusign_envelope_id are enforced unique
+    # (when non-null) by a real SQLite partial unique index -- see
+    # sqlite_engagement_store.py -- not only a service-layer pre-check, so
+    # this holds under concurrent/duplicate requests, same pattern as
+    # luma_event_id's own uniqueness enforcement.
+    sale_id: str | None = None
+    docusign_envelope_id: str | None = None
+    mercury_invoice_id: str | None = None
+    qb_invoice_id: str | None = None
+    qb_customer_id: str | None = None
+
+    # The DocuSign signer and the sale's primary contact are NOT assumed
+    # to be the same person (the /sale form already asks for both
+    # separately). The signer is deliberately an Engagement/contract-level
+    # fact ONLY -- this integration does not create a second CrmContact/
+    # ClientContact just because someone signed the contract (that
+    # decision was explicitly deferred). No existing generic metadata
+    # field exists on Engagement to hold this instead, so these are two
+    # small, dedicated, reserved nullable fields, same minimal-field
+    # precedent as everything else in this section.
+    signer_name: str | None = None
+    signer_email: str | None = None
+
+    # service_sold_raw: the ORIGINAL /sale form "Type of dinner" free-text
+    # value, populated ONLY when it could not be confidently normalized
+    # into a known DinnerType (in which case engagement_type is OTHER and
+    # dinner_type stays None) -- never populated when a known DinnerType
+    # WAS matched, so its mere presence already signals "needs a human
+    # look" without a separate flag.
+    service_sold_raw: str | None = None
+
+    # referral_source / special_terms: carried straight from the /sale
+    # form. ClientNote exists as a model but has no service method or API
+    # route yet (confirmed by inspection, 2026-09-15) -- genuinely not
+    # wired for production use -- so these live here directly rather than
+    # building a notes-writing path just for this feature. Revisit once
+    # ClientNote is actually wired; these are plain, low-structure text,
+    # not a design commitment to keep them on Engagement forever.
+    referral_source: str | None = None
+    special_terms: str | None = None
+
     created_at: datetime
     updated_at: datetime
     archived: bool = False

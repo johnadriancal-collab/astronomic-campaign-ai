@@ -227,3 +227,25 @@ async def verify_integrations_api_token(authorization: str | None = Header(defau
     token = authorization.removeprefix("Bearer ").strip()
     if not hmac.compare_digest(token, settings.integrations_api_token):
         raise HTTPException(status_code=401, detail="Invalid token.")
+
+
+async def verify_sale_bot_webhook_token(authorization: str | None = Header(default=None)) -> None:
+    """
+    Shared-secret bearer-token check for POST /sync/sale-onboarding. A
+    SEPARATE secret from itf_webhook_token/integrations_api_token -- a
+    different caller (the Sale Bot, astronomic-sale-automation, a separate
+    Render service), independently revocable. Same discipline as
+    verify_itf_webhook_token/verify_integrations_api_token above: runs as
+    a route dependency so a missing/invalid token is rejected before the
+    route body -- which creates/updates Client CRM records -- ever runs;
+    never logs the token or echoes it back in an error detail; 503 (not
+    401) when SALE_BOT_WEBHOOK_TOKEN itself isn't configured, since that's
+    an operator/deployment gap, not a caller authentication failure.
+    """
+    if not settings.sale_bot_webhook_token:
+        raise HTTPException(status_code=503, detail="Sale onboarding webhook is not configured.")
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or malformed Authorization header.")
+    token = authorization.removeprefix("Bearer ").strip()
+    if not hmac.compare_digest(token, settings.sale_bot_webhook_token):
+        raise HTTPException(status_code=401, detail="Invalid token.")
