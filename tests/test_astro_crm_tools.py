@@ -232,6 +232,140 @@ async def test_get_contact_requires_some_identifying_detail(tools):
     assert result["error"] == "invalid_filter"
 
 
+# --- check size / investor fields (2026-09-15 fix) --------------------------
+#
+# Regression coverage for the bug where get_crm_contact could show Title,
+# Company, Investor Type, etc. but claim a contact had no check size on
+# record even when the real CRM UI showed one -- root cause was that
+# _project_full simply never read check_size_personal/check_size_institutional
+# (or deploying_capital/investment_industry/dinners_attended) off
+# custom_fields at all, not a wrong field name or a serialization bug.
+
+
+async def test_get_contact_returns_check_size_and_investor_fields_when_recorded(tools, crm_service):
+    contact = make_contact(
+        first_name="John",
+        last_name="Adrian",
+        company="Astronomic",
+        custom_fields={
+            "investor_type": ["Angel Investor"],
+            "check_size_personal": ["$1k - $10k", "$10k - $100k"],
+            "investment_industry": ["Fintech", "Healthcare"],
+            "deploying_capital": "Yes, actively",
+            "dinners_attended": ["Startup Soft"],
+        },
+    )
+    await crm_service.contact_store.create(contact)
+
+    result = await tools.dispatch("get_crm_contact", {"first_name": "John", "last_name": "Adrian"})
+
+    assert result["status"] == "found"
+    c = result["contact"]
+    assert c["check_size_personal"] == ["$1k - $10k", "$10k - $100k"]
+    assert c["check_size_institutional"] is None
+    assert c["investment_industry"] == ["Fintech", "Healthcare"]
+    assert c["deploying_capital"] == "Yes, actively"
+    assert c["investor_type"] == ["Angel Investor"]
+    assert c["dinners_attended"] == ["Startup Soft"]
+
+
+async def test_get_contact_keeps_personal_and_institutional_check_size_distinct(tools, crm_service):
+    contact = make_contact(
+        first_name="Dana",
+        last_name="Dual",
+        custom_fields={
+            "check_size_personal": ["$10k - $25k"],
+            "check_size_institutional": ["$1M - $2M"],
+        },
+    )
+    await crm_service.contact_store.create(contact)
+
+    result = await tools.dispatch("get_crm_contact", {"first_name": "Dana", "last_name": "Dual"})
+
+    c = result["contact"]
+    assert c["check_size_personal"] == ["$10k - $25k"]
+    assert c["check_size_institutional"] == ["$1M - $2M"]
+    assert c["check_size_personal"] != c["check_size_institutional"]
+
+
+async def test_get_contact_with_no_investor_data_reports_nothing_never_derives_from_title(tools, crm_service):
+    """A contact whose title/company SOUND like an investor but who has no
+    investor custom_fields at all -- every investor-shaped key must come
+    back None, never guessed from title/company text (Part D #10)."""
+    contact = make_contact(
+        first_name="Pat",
+        last_name="Noinfo",
+        title="Venture Partner",
+        company="Big Capital Ventures",
+    )
+    await crm_service.contact_store.create(contact)
+
+    result = await tools.dispatch("get_crm_contact", {"first_name": "Pat", "last_name": "Noinfo"})
+
+    c = result["contact"]
+    assert c["investor_type"] is None
+    assert c["investor_mode"] is None
+    assert c["check_size_personal"] is None
+    assert c["check_size_institutional"] is None
+    assert c["deploying_capital"] is None
+    assert c["investment_industry"] is None
+    assert c["dinners_attended"] is None
+
+
+async def test_get_contact_company_industry_and_investment_industry_are_never_conflated(tools, crm_service):
+    """These were previously collapsed into one ambiguous "industry" key
+    (contact.industry, an Apollo-style field describing the industry of
+    the company the contact WORKS AT) -- risking a question about what a
+    contact INVESTS in being answered from the wrong field entirely."""
+    contact = make_contact(
+        first_name="Ivy",
+        last_name="Investor",
+        industry="Events & Hospitality",
+        custom_fields={"investment_industry": ["Fintech", "Climate"]},
+    )
+    await crm_service.contact_store.create(contact)
+
+    result = await tools.dispatch("get_crm_contact", {"first_name": "Ivy", "last_name": "Investor"})
+
+    c = result["contact"]
+    assert c["company_industry"] == "Events & Hospitality"
+    assert c["investment_industry"] == ["Fintech", "Climate"]
+    assert "industry" not in c
+
+
+async def test_get_contact_projection_has_no_event_history_or_list_membership_fields(tools):
+    """Documents the current, deliberate boundary: this tool exposes
+    custom_fields.dinners_attended (legacy, free text) but NOT the
+    canonical, EngagementParticipant-derived Contact Event History
+    (attendance/RSVP status, declined events, dates) or CRM list
+    membership -- so Astro can never blend the two or fabricate an
+    attendance/decline/list answer this tool doesn't actually provide
+    (Part D #7)."""
+    result = await tools.dispatch("get_crm_contact", {"first_name": "John", "last_name": "Smith"})
+    assert result["status"] == "found"
+    assert set(result["contact"].keys()) == {
+        "name", "title", "company", "city", "state", "email",
+        "investor_type", "investor_mode", "company_industry", "investment_industry",
+        "check_size_personal", "check_size_institutional", "deploying_capital",
+        "dinners_attended", "linkedin_url", "phone",
+    }
+    for forbidden_key in ("attendance_status", "rsvp_status", "event_history", "lists", "list_memberships"):
+        assert forbidden_key not in result["contact"]
+
+
+async def test_search_minimal_projection_unchanged_by_get_contact_fix(tools):
+    """Regression guard (Part D #9): search_crm_contacts' minimal
+    projection must remain exactly what it was before this fix -- the new
+    investor fields belong only to the single-contact get_crm_contact
+    lookup, never to the multi-result search preview."""
+    result = await tools.dispatch(
+        "search_crm_contacts",
+        {"filters": [{"field": "custom:investor_type", "operator": "contains_any", "value": ["Family Office"]}]},
+    )
+    contact = result["contacts"][0]
+    assert set(contact.keys()) == {"name", "title", "company", "city", "state", "email"}
+
+
 # --- security / validation boundaries --------------------------------------
 
 

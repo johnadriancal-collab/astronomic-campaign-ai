@@ -265,13 +265,39 @@ def _project_summary(contact: CrmContact) -> dict:
 def _project_full(contact: CrmContact) -> dict:
     """A single confirmed contact's answer-relevant fields -- still not the
     full ~39-field record (no source_snapshot, no raw thesis question
-    lists, no custom_fields dump)."""
+    lists, no custom_fields dump).
+
+    check_size_personal/check_size_institutional, deploying_capital, and
+    investment_industry are the real canonical custom_fields (see the
+    2026-08-06 Check Size consolidation in crm_service.py/crm_migration.py)
+    -- previously omitted here entirely, which is why Astro would claim a
+    contact had no check size on record even when the CRM UI showed one.
+    Personal and institutional check sizes are kept as two distinct keys
+    (never merged/prioritized into one) since a contact can have either,
+    both, or neither, exactly like the CRM detail page's own "Check Size
+    (Personal)"/"Check Size (Institutional)" labeling.
+
+    "company_industry" (contact.industry, an Apollo-style field describing
+    the industry of the company the contact WORKS AT) is deliberately kept
+    separate from "investment_industry" (custom_fields, the industries the
+    contact INVESTS in) -- these were previously conflated under one
+    "industry" key, which risked Astro answering an investment-focus
+    question from the wrong field.
+
+    dinners_attended is the legacy free-text custom field (distinct from
+    the canonical, EngagementParticipant-derived Contact Event History,
+    which this tool does not expose)."""
     data = _project_summary(contact)
     data.update(
         {
             "investor_type": contact.custom_fields.get("investor_type"),
             "investor_mode": contact.thesis_investor_mode,
-            "industry": contact.industry,
+            "company_industry": contact.industry,
+            "investment_industry": contact.custom_fields.get("investment_industry"),
+            "check_size_personal": contact.custom_fields.get("check_size_personal"),
+            "check_size_institutional": contact.custom_fields.get("check_size_institutional"),
+            "deploying_capital": contact.custom_fields.get("deploying_capital"),
+            "dinners_attended": contact.custom_fields.get("dinners_attended"),
             "linkedin_url": contact.linkedin_url,
             "phone": contact.phone,
         }
