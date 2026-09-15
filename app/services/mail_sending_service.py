@@ -158,6 +158,32 @@ class NoUsableMailboxError(Exception):
         super().__init__(f"No usable (selected + CONNECTED) mailbox for campaign {mail_campaign_id}")
 
 
+class MailThreadingDataMissingError(ValueError):
+    """Raised by _resolve_reply_threading() when step.reply_in_thread is
+    True and a prior SENT MailEnrollmentStep exists for this enrollment,
+    but that prior step (or an earlier one needed for the References
+    chain) is missing its persisted rfc_message_id/gmail_thread_id --
+    record_send_success() always persists both together for a SENT row
+    (2026-09-15 threading fix), so this represents a genuine data-
+    integrity gap, never a normal, expected state. Deliberately NEVER
+    treated as "fall back to sending as a new, unthreaded conversation"
+    -- silently dropping threading context would be a worse, harder-to-
+    notice failure than refusing to send at all. A ValueError subclass on
+    purpose: _handle_prepare_failure()'s existing branch D (permanent
+    step+enrollment FAILURE, "retrying an identical request against an
+    identical recipient would fail identically") applies unchanged --
+    same zero-new-failure-handling-code precedent as
+    MailPersonalizationError (see mail_personalization.py)."""
+
+    def __init__(self, enrollment_id: str, missing_step_id: str):
+        self.enrollment_id = enrollment_id
+        self.missing_step_id = missing_step_id
+        super().__init__(
+            f"Cannot thread a follow-up for enrollment {enrollment_id}: prior sent step {missing_step_id} "
+            "is missing its persisted rfc_message_id/gmail_thread_id."
+        )
+
+
 class UnknownStepNotFoundError(Exception):
     def __init__(self, enrollment_step_id: str):
         self.enrollment_step_id = enrollment_step_id
@@ -459,6 +485,19 @@ class SendResult:
     provider_message_id: str
     provider_thread_id: str
     rfc_message_id: str
+
+
+@dataclass(frozen=True)
+class ReplyThreadingContext:
+    """2026-09-15 threading fix -- the real Gmail thread_id + RFC
+    In-Reply-To/References a follow-up step's MailSendRequest must carry
+    to land in the same Gmail conversation as this enrollment's prior
+    sends. See MailSendingService._resolve_reply_threading()'s own
+    docstring for how this is derived; never constructed anywhere else."""
+
+    thread_id: str
+    in_reply_to_message_id: str
+    references: tuple[str, ...]
 
 
 class MailSenderPort(ABC):
@@ -1571,6 +1610,50 @@ class MailSendingService:
             return None
         return mailbox
 
+    async def _resolve_reply_threading(self, step: MailEnrollmentStep) -> ReplyThreadingContext | None:
+        """2026-09-15 threading fix. Returns the real Gmail thread_id +
+        RFC In-Reply-To/References this step's MailSendRequest must carry
+        to actually land in the SAME Gmail conversation as this
+        enrollment's prior sends -- or None when starting a fresh,
+        unthreaded conversation is the CORRECT behavior (either
+        step.reply_in_thread is False, or there is no prior SENT step
+        for this enrollment at all -- e.g. this genuinely is the first
+        outbound message, matching MailSendRequest's own "Step 1, or any
+        step whose prior message's identifiers aren't available" case).
+
+        Deliberately finds the MOST RECENT SENT step by step_number, not
+        `step.step_number - 1` -- a step can in principle be skipped
+        without terminating the enrollment, and blindly assuming
+        step_number - 1 was actually the one that sent would silently
+        thread against the wrong (or a nonexistent) message.
+
+        FAIL-SAFE, not fail-open: if a prior SENT step exists but is
+        missing its rfc_message_id/gmail_thread_id (or an EARLIER SENT
+        step needed for the References chain is), raises
+        MailThreadingDataMissingError rather than silently returning None
+        and letting the caller start an unexpected new conversation --
+        see that exception's own docstring."""
+        if not step.reply_in_thread:
+            return None
+
+        sent_steps = sorted(
+            (s for s in await self.step_store.list_for_enrollment(step.enrollment_id) if s.status == MailEnrollmentStepStatus.SENT),
+            key=lambda s: s.step_number,
+        )
+        if not sent_steps:
+            return None
+
+        for sent_step in sent_steps:
+            if not sent_step.rfc_message_id or not sent_step.gmail_thread_id:
+                raise MailThreadingDataMissingError(step.enrollment_id, sent_step.enrollment_step_id)
+
+        most_recent = sent_steps[-1]
+        return ReplyThreadingContext(
+            thread_id=most_recent.gmail_thread_id,
+            in_reply_to_message_id=most_recent.rfc_message_id,
+            references=tuple(s.rfc_message_id for s in sent_steps),  # oldest-first, matches sort order above
+        )
+
     async def process_one_due_step(
         self,
         step: MailEnrollmentStep,
@@ -1794,6 +1877,14 @@ class MailSendingService:
             # NEVER reach sender.prepare()/send_prepared(), so a literal
             # "{{first_name}}" can never be sent. See
             # mail_personalization.py's own module docstring.
+            # 2026-09-15 threading fix: resolve the real Gmail thread_id +
+            # RFC In-Reply-To/References BEFORE composing -- a genuine
+            # data-integrity gap here (MailThreadingDataMissingError, a
+            # ValueError) must fail this attempt exactly like a
+            # personalization failure does, never silently fall through
+            # to sending as an unexpected new conversation. See
+            # _resolve_reply_threading()'s own docstring.
+            threading_context = await self._resolve_reply_threading(step)
             contact = await self.crm_contact_store.get(enrollment.crm_contact_id)
             variables = contact_personalization_variables(contact)
             rendered_subject = render_mail_template(step.subject, variables)
@@ -1810,6 +1901,9 @@ class MailSendingService:
             html_body=composed.html_body,
             rfc_message_id=rfc_message_id,
             reply_in_thread=step.reply_in_thread,
+            in_reply_to_message_id=threading_context.in_reply_to_message_id if threading_context else None,
+            references=threading_context.references if threading_context else (),
+            thread_id=threading_context.thread_id if threading_context else None,
             list_unsubscribe_header=composed.list_unsubscribe_header,
             list_unsubscribe_post_header=composed.list_unsubscribe_post_header,
         )
