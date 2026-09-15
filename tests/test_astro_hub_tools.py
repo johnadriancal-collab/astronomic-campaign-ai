@@ -1,6 +1,6 @@
 """
 AstroHubTools tests -- Astro AI Phase 3's multi-domain composition layer.
-Proves aggregation/routing correctness across all four domains without
+Proves aggregation/routing correctness across all five domains without
 re-testing each domain's own internal logic (that's each astro_*_tools
 test file's job).
 """
@@ -108,14 +108,20 @@ def test_duplicate_tool_name_across_domains_raises_at_construction(monkeypatch, 
         AstroHubTools(crm_tools=crm_tools, mailbox_tools=mailbox_tools)
 
 
-def test_full_registry_contains_exactly_the_fourteen_approved_tools(crm_tools, mailbox_tools, activity_tools):
+def test_full_registry_contains_exactly_the_approved_tools(crm_tools, mailbox_tools, activity_tools):
+    """Astro AI Phase 3 (2026-09-15) added a fifth domain (Client CRM) and
+    a narrow write surface to the CRM domain -- this test's name and
+    expected set changed accordingly (it used to assert exactly fourteen,
+    all read-only)."""
     from app.services.astro_campaign_tools import ASTRO_CAMPAIGN_TOOL_DEFINITIONS
+    from app.services.astro_client_crm_tools import ASTRO_CLIENT_CRM_TOOL_DEFINITIONS
 
     all_names = (
         {t["name"] for t in CRM_TOOL_DEFINITIONS}
         | {t["name"] for t in ASTRO_MAILBOX_TOOL_DEFINITIONS}
         | {t["name"] for t in ASTRO_ACTIVITY_TOOL_DEFINITIONS}
         | {t["name"] for t in ASTRO_CAMPAIGN_TOOL_DEFINITIONS}
+        | {t["name"] for t in ASTRO_CLIENT_CRM_TOOL_DEFINITIONS}
     )
     assert all_names == {
         "count_crm_contacts",
@@ -132,5 +138,12 @@ def test_full_registry_contains_exactly_the_fourteen_approved_tools(crm_tools, m
         "get_campaign",
         "count_campaigns",
         "export_crm_contacts",
+        "get_crm_contact_lists",
+        "add_crm_contact_to_list",
+        "remove_crm_contact_from_list",
+        "update_crm_contact_investor_field",
+        "confirm_astro_action",
+        "get_crm_contact_event_history",
+        "mark_crm_contact_engagement_attendance",
     }
-    assert len(all_names) == 14
+    assert len(all_names) == 21

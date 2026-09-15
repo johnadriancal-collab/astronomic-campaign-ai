@@ -162,6 +162,27 @@ class CrmContactListNotFound(Exception):
         super().__init__(f"CRM contact list not found: {list_id}")
 
 
+class InvestorFieldError(ValueError):
+    """Astro AI Phase 3 -- an unknown investor field, a field/operation
+    mismatch, a missing value/values, or a value outside a closed-
+    vocabulary field's real live options. Never coerced/guessed around."""
+
+
+class InvestorFieldConflict(Exception):
+    """Astro AI Phase 3 -- apply_investor_field_change()'s optimistic-
+    concurrency guard: the contact's current value for `field` no longer
+    matches what a pending action (or add_value's own direct-execute
+    path) expected, meaning something else changed it in between. The
+    caller must recompute and either re-propose or re-report to the user,
+    never blindly retry the stale write."""
+
+    def __init__(self, field: str, expected: Any, actual: Any):
+        self.field = field
+        self.expected = expected
+        self.actual = actual
+        super().__init__(f"'{field}' changed since this action was proposed (expected {expected!r}, now {actual!r}).")
+
+
 class CrmService:
     def __init__(
         self,
@@ -231,7 +252,14 @@ class CrmService:
     async def get_contact(self, crm_contact_id: str) -> CrmContact:
         return await self._require_contact(crm_contact_id)
 
-    async def update_contact(self, crm_contact_id: str, patch: dict[str, Any]) -> CrmContact:
+    async def update_contact(
+        self,
+        crm_contact_id: str,
+        patch: dict[str, Any],
+        source: ActivitySource = ActivitySource.MANUAL_CRM,
+        actor: str | None = None,
+        activity_metadata: dict[str, Any] | None = None,
+    ) -> CrmContact:
         """
         Direct partial update -- every key in `patch` is set as given, no
         merge rule, EXCEPT `custom_fields` itself: since it's a dict
@@ -264,6 +292,15 @@ class CrmService:
         edited. Flipping thesis_investor_mode_manual_override to True
         remains the one explicit, unambiguous way to make this method leave
         the field alone entirely, regardless of any of the above.
+
+        `source`/`actor`/`activity_metadata` (Astro AI Phase 3): attribute
+        the ONE Activity Log event this method already records to whoever
+        actually made the change, and attach whatever detail is meaningful
+        (e.g. {"field": "investment_industry", "before": [...], "after":
+        [...]}), instead of creating a SECOND event just to get a
+        different source -- every existing caller omits all three
+        (defaulting to MANUAL_CRM / no actor / no extra metadata),
+        byte-identical to before these parameters existed.
         """
         contact = await self._require_contact(crm_contact_id)
         if "custom_fields" in patch:
@@ -279,10 +316,19 @@ class CrmService:
                 patch = {**patch, "thesis_investor_mode": derive_investor_mode(effective_custom_fields.get("investor_type"))}
         updated = contact.model_copy(update={**patch, "updated_at": datetime.now(timezone.utc)})
         await self.contact_store.save(updated)
-        await self._record_contact_update_activity(contact, updated)
+        await self._record_contact_update_activity(
+            contact, updated, source=source, actor=actor, extra_metadata=activity_metadata
+        )
         return updated
 
-    async def _record_contact_update_activity(self, before: CrmContact, after: CrmContact) -> None:
+    async def _record_contact_update_activity(
+        self,
+        before: CrmContact,
+        after: CrmContact,
+        source: ActivitySource = ActivitySource.MANUAL_CRM,
+        actor: str | None = None,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> None:
         """Distinguishes archive/unarchive from a plain edit by diffing the
         `archived` flag across the save -- there is no separate
         unarchive_contact() method (unarchiving is just PATCH {"archived":
@@ -296,36 +342,181 @@ class CrmService:
             await self.activity_log.record(
                 event_type="contact.updated",
                 category=ActivityCategory.CONTACTS,
-                source=ActivitySource.MANUAL_CRM,
+                source=source,
                 summary=f"{name} was updated.",
                 entity_type="contact",
                 entity_id=after.crm_contact_id,
                 entity_name=name,
+                metadata=extra_metadata or {},
+                actor=actor,
             )
         elif after.archived:
             await self.activity_log.record(
                 event_type="contact.archived",
                 category=ActivityCategory.CONTACTS,
-                source=ActivitySource.MANUAL_CRM,
+                source=source,
                 summary=f"{name} was archived.",
                 entity_type="contact",
                 entity_id=after.crm_contact_id,
                 entity_name=name,
+                metadata=extra_metadata or {},
+                actor=actor,
             )
         else:
             await self.activity_log.record(
                 event_type="contact.unarchived",
                 category=ActivityCategory.CONTACTS,
-                source=ActivitySource.MANUAL_CRM,
+                source=source,
                 summary=f"{name} was unarchived.",
                 entity_type="contact",
                 entity_id=after.crm_contact_id,
                 entity_name=name,
+                metadata=extra_metadata or {},
+                actor=actor,
             )
 
     async def archive_contact(self, crm_contact_id: str) -> CrmContact:
         """Soft-delete only -- never hard-deleted, matching this app's archive convention."""
         return await self.update_contact(crm_contact_id, {"archived": True})
+
+    # --- Astro AI Phase 3: narrow, field-scoped investor updates -----------
+    #
+    # ONLY these five custom_fields keys -- never a generic patch dict, and
+    # never investor_mode (thesis_investor_mode stays auto-derived from
+    # investor_type via update_contact's existing derive_investor_mode
+    # logic above; Astro cannot set it directly or touch
+    # thesis_investor_mode_manual_override). This is the ONE seam
+    # astro_crm_tools.py's update_crm_contact_investor_field tool is
+    # allowed to call -- it never reaches update_contact() with an
+    # arbitrary patch itself.
+
+    INVESTOR_MULTI_SELECT_FIELDS = frozenset(
+        {"investment_industry", "check_size_personal", "check_size_institutional", "investor_type"}
+    )
+    INVESTOR_SCALAR_FIELDS = frozenset({"deploying_capital"})
+    INVESTOR_FIELDS = INVESTOR_MULTI_SELECT_FIELDS | INVESTOR_SCALAR_FIELDS
+    # investment_industry deliberately has NO enforced closed vocabulary today
+    # (confirmed live in crm_filter_service.py's own filter-validation
+    # comment) -- Decision 5 explicitly keeps it open-text in this phase
+    # rather than introducing a new closed vocabulary as a side effect of
+    # adding write support.
+    INVESTOR_FIELDS_OPEN_VOCAB = frozenset({"investment_industry"})
+
+    @staticmethod
+    def _normalize_open_vocab_value(value: str) -> str:
+        """trim + collapse whitespace + lowercase, comparison-only -- the
+        contact's actual stored/display value is NEVER rewritten to this
+        form (Decision 5: preserve the user's real entered casing)."""
+        return " ".join(value.split()).lower()
+
+    async def _live_options_for_investor_field(self, field: str) -> list[str]:
+        if field in self.INVESTOR_FIELDS_OPEN_VOCAB:
+            return []  # open vocabulary -- any reasonably-formed value is accepted
+        definitions = await self.list_custom_fields(include_inactive=False)
+        for definition in definitions:
+            if definition.field_key == field:
+                return definition.options
+        return []
+
+    async def compute_investor_field_change(
+        self,
+        contact: CrmContact,
+        field: str,
+        operation: str,
+        value: str | None = None,
+        values: list[str] | None = None,
+    ) -> tuple[Any, Any]:
+        """PURE -- no store writes, no Activity Log. Returns (before, after)
+        for `contact`'s CURRENT value of `field`. Used both to compute the
+        proposed change at PROPOSE time (before a pending action is even
+        created) and, identically, at CONFIRM time to re-derive `after`
+        against the contact's then-current state for the optimistic-
+        concurrency check in apply_investor_field_change(). Raises
+        InvestorFieldError for an unknown field, a field/operation
+        mismatch, a missing value/values, or (for a field with real
+        registered options) a value outside those options -- NEVER
+        coerces to the nearest valid option."""
+        if field not in self.INVESTOR_FIELDS:
+            raise InvestorFieldError(f"'{field}' is not one of the investor fields Astro may update.")
+
+        before = contact.custom_fields.get(field)
+        options = await self._live_options_for_investor_field(field)
+
+        if field in self.INVESTOR_SCALAR_FIELDS:
+            if operation != "set_value":
+                raise InvestorFieldError(f"'{field}' only supports operation='set_value'.")
+            if not value:
+                raise InvestorFieldError("set_value needs a single 'value'.")
+            if options and value not in options:
+                raise InvestorFieldError(f"'{value}' is not one of {field}'s allowed options: {options}.")
+            return before, value
+
+        # Multi-select fields below.
+        current = list(before or [])
+
+        if operation == "set_value":
+            if values is None:
+                raise InvestorFieldError(f"'{field}' operation='set_value' needs 'values' (the complete new list).")
+            if options:
+                invalid = [v for v in values if v not in options]
+                if invalid:
+                    raise InvestorFieldError(f"{invalid} are not among {field}'s allowed options: {options}.")
+            return before, list(values)
+
+        if operation not in ("add_value", "remove_value"):
+            raise InvestorFieldError(f"'{field}' only supports operation='add_value', 'remove_value', or 'set_value'.")
+        if not value:
+            raise InvestorFieldError(f"operation='{operation}' needs a single 'value'.")
+        if options and value not in options:
+            raise InvestorFieldError(f"'{value}' is not one of {field}'s allowed options: {options}.")
+
+        open_vocab = field in self.INVESTOR_FIELDS_OPEN_VOCAB
+        if operation == "add_value":
+            if open_vocab:
+                normalized_new = self._normalize_open_vocab_value(value)
+                if any(self._normalize_open_vocab_value(v) == normalized_new for v in current):
+                    return before, before  # already present (case/whitespace-insensitive) -- no_change
+                return before, [*current, value]
+            return (before, current) if value in current else (before, [*current, value])
+
+        # remove_value
+        if open_vocab:
+            normalized_target = self._normalize_open_vocab_value(value)
+            return before, [v for v in current if self._normalize_open_vocab_value(v) != normalized_target]
+        return before, [v for v in current if v != value]
+
+    async def apply_investor_field_change(
+        self,
+        crm_contact_id: str,
+        field: str,
+        expected_before: Any,
+        after: Any,
+        actor: str | None = None,
+    ) -> CrmContact:
+        """Writes `after` for `field` -- but ONLY if the contact's CURRENT
+        value for `field` still equals `expected_before` (optimistic
+        concurrency: guards against the contact having changed between a
+        pending action's PROPOSE and CONFIRM steps, or between
+        add_value's own resolve-then-write for the direct-execute path).
+        Raises InvestorFieldConflict otherwise -- never silently
+        overwrites a value that moved out from under it. A true no-op
+        (`after == expected_before`, e.g. re-adding an already-present
+        value) skips the write AND the Activity Log entirely -- never a
+        misleading "changed" event for something that didn't change."""
+        contact = await self._require_contact(crm_contact_id)
+        current = contact.custom_fields.get(field)
+        if current != expected_before:
+            raise InvestorFieldConflict(field, expected_before, current)
+        if after == expected_before:
+            return contact
+        updated = await self.update_contact(
+            crm_contact_id,
+            {"custom_fields": {field: after}},
+            source=ActivitySource.ASTRO_AI,
+            actor=actor,
+            activity_metadata={"field": field, "before": expected_before, "after": after},
+        )
+        return updated
 
     async def list_contacts(
         self,
@@ -648,15 +839,34 @@ class CrmService:
         items = matching[start : start + page_size]
         return CrmContactPage(items=items, total=total, page=page, page_size=page_size)
 
+    async def get_list_ids_for_contact(self, crm_contact_id: str) -> list[str]:
+        """Astro AI Phase 3 -- the read half of "which Lists is this
+        Contact in" (get_crm_contact_lists) and the idempotency check
+        remove_crm_contact_from_list's confirm step needs (has membership
+        changed since the removal was proposed). Thin passthrough to the
+        store -- no CrmService-level caching or filtering; every other
+        method in this file that touches list_member_store goes through
+        CrmService too, never a store reached directly from a tool file."""
+        return await self.list_member_store.list_ids_for_contact(crm_contact_id)
+
     async def bulk_add_to_list(
-        self, list_id: str, contact_ids: list[str], actor: str | None = None
+        self,
+        list_id: str,
+        contact_ids: list[str],
+        actor: str | None = None,
+        source: ActivitySource = ActivitySource.LISTS,
     ) -> CrmListBulkAddResult:
         """Reports added/already_member/not_found rather than raising on any of
         those -- a bulk action against hundreds or thousands of ids should never
         hard-fail the whole request over one bad id or one repeat. `not_found`
         ids are silently skipped (never create a membership row with no real
         contact behind it). Duplicate ids within `contact_ids` itself are
-        collapsed first, order-preserving."""
+        collapsed first, order-preserving.
+
+        `source` (Astro AI Phase 3): defaults to LISTS (every existing
+        caller, unchanged) -- Astro's add_crm_contact_to_list tool passes
+        ActivitySource.ASTRO_AI instead, so its own single Activity Log
+        event is correctly attributed rather than misfiled under LISTS."""
         contact_list = await self._require_contact_list(list_id)
         added = already_member = not_found = 0
         now = datetime.now(timezone.utc)
@@ -679,7 +889,7 @@ class CrmService:
             await self.activity_log.record(
                 event_type="list.contacts_added",
                 category=ActivityCategory.LISTS,
-                source=ActivitySource.LISTS,
+                source=source,
                 summary=f'{added} contact{"s" if added != 1 else ""} added to "{contact_list.name}".',
                 entity_type="list",
                 entity_id=list_id,
@@ -690,8 +900,14 @@ class CrmService:
         return CrmListBulkAddResult(added=added, already_member=already_member, not_found=not_found)
 
     async def bulk_remove_from_list(
-        self, list_id: str, contact_ids: list[str], actor: str | None = None
+        self,
+        list_id: str,
+        contact_ids: list[str],
+        actor: str | None = None,
+        source: ActivitySource = ActivitySource.LISTS,
     ) -> CrmListBulkRemoveResult:
+        """`source` -- same Astro AI Phase 3 addition as bulk_add_to_list's own,
+        for the identical reason."""
         contact_list = await self._require_contact_list(list_id)
         removed = 0
         for contact_id in dict.fromkeys(contact_ids):
@@ -701,7 +917,7 @@ class CrmService:
             await self.activity_log.record(
                 event_type="list.contacts_removed",
                 category=ActivityCategory.LISTS,
-                source=ActivitySource.LISTS,
+                source=source,
                 summary=f'{removed} contact{"s" if removed != 1 else ""} removed from "{contact_list.name}".',
                 entity_type="list",
                 entity_id=list_id,

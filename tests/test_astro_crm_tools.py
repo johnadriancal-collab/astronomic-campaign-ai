@@ -24,6 +24,7 @@ from app.services.astro_crm_tools import (
     AstroCrmTools,
 )
 from app.services.astro_export_store import AstroExportStore
+from app.services.astro_pending_action_store import AstroPendingActionStore, PendingActionStatus
 from app.services.crm_service import CrmService
 
 pytestmark = pytest.mark.asyncio
@@ -118,6 +119,18 @@ def tools(crm_service):
 @pytest.fixture
 def export_tools(crm_service):
     return AstroCrmTools(crm_service, export_store=AstroExportStore(), activity_log_service=crm_service.activity_log)
+
+
+@pytest.fixture
+def write_tools(crm_service):
+    """AstroCrmTools constructed with a real AstroPendingActionStore -- for
+    Phase 3's write-tool tests (list membership add/remove, investor
+    field updates, confirm_astro_action)."""
+    return AstroCrmTools(
+        crm_service,
+        activity_log_service=crm_service.activity_log,
+        pending_action_store=AstroPendingActionStore(),
+    )
 
 
 # --- count_crm_contacts -----------------------------------------------------
@@ -604,7 +617,11 @@ async def test_get_crm_list_members_requires_list_name(tools):
     assert result["error"] == "invalid_filter"
 
 
-def test_list_tools_present_in_registry_no_write_tools():
+def test_list_tools_present_in_registry_exact_approved_set():
+    """Astro AI Phase 3 (2026-09-15) approved a narrow, explicit write
+    surface -- this test's name and shape changed accordingly (it used to
+    assert NO write tools existed at all). The exact set below IS the
+    reviewed, approved surface; any name outside it is not."""
     from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS
 
     names = {t["name"] for t in CRM_TOOL_DEFINITIONS}
@@ -617,9 +634,27 @@ def test_list_tools_present_in_registry_no_write_tools():
         "get_crm_list_members",
         "count_crm_list_members",
         "export_crm_contacts",
+        "get_crm_contact_lists",
+        "add_crm_contact_to_list",
+        "remove_crm_contact_from_list",
+        "update_crm_contact_investor_field",
+        "confirm_astro_action",
     }
-    for forbidden in ["create", "update", "delete", "bulk_add", "bulk_remove", "remove"]:
-        assert not any(forbidden in name.lower() for name in names)
+
+
+def test_registry_never_gains_a_still_forbidden_write_operation():
+    """The specific, still-prohibited operations Phase 3 explicitly did
+    NOT approve -- archiving/deleting a Contact, creating/deleting a
+    List, bulk operations, or generic contact field updates. A real
+    substring check (not an exact-name check) so a differently-named
+    tool that does one of these can't silently slip past
+    test_list_tools_present_in_registry_exact_approved_set by using a
+    name outside that exact set's string literals."""
+    from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS
+
+    names = {t["name"] for t in CRM_TOOL_DEFINITIONS}
+    for forbidden in ["archive", "delete", "bulk_add", "bulk_remove", "create_list", "delete_list", "update_contact"]:
+        assert not any(forbidden in name.lower() for name in names), forbidden
 
 
 # --- export_crm_contacts -----------------------------------------------------
@@ -800,3 +835,349 @@ async def test_concurrent_exports_never_cross_contaminate(export_tools, crm_serv
     assert b"Carol" not in angel_export.csv_bytes
     assert b"Alice" not in family_export.csv_bytes
     assert b"Bob" not in family_export.csv_bytes
+
+
+# --- Phase 3: get_crm_contact_lists -----------------------------------------
+
+
+async def test_get_contact_lists_returns_real_membership(tools):
+    result = await tools.dispatch("get_crm_contact_lists", {"first_name": "John", "last_name": "Smith"})
+    assert result["status"] == "found"
+    assert [l["name"] for l in result["lists"]] == ["Hotshot"]
+
+
+async def test_get_contact_lists_empty_for_a_contact_in_no_lists(tools):
+    result = await tools.dispatch("get_crm_contact_lists", {"first_name": "Carol", "last_name": "Family"})
+    assert result["status"] == "found"
+    assert result["lists"] == []
+
+
+async def test_get_contact_lists_ambiguous_contact_never_guesses(tools):
+    result = await tools.dispatch("get_crm_contact_lists", {"last_name": "Angel"})
+    assert result["status"] == "ambiguous"
+
+
+async def test_get_contact_lists_not_found(tools):
+    result = await tools.dispatch("get_crm_contact_lists", {"first_name": "Nobody", "last_name": "Nowhere"})
+    assert result == {"status": "not_found"}
+
+
+# --- Phase 3: add_crm_contact_to_list (direct-execute) ----------------------
+
+
+async def test_add_contact_to_list_executes_immediately(write_tools):
+    result = await write_tools.dispatch(
+        "add_crm_contact_to_list", {"first_name": "Carol", "last_name": "Family", "list_name": "Hotshot"}
+    )
+    assert result["status"] == "added"
+    lists = await write_tools.dispatch("get_crm_contact_lists", {"first_name": "Carol", "last_name": "Family"})
+    assert "Hotshot" in [l["name"] for l in lists["lists"]]
+
+
+async def test_add_contact_to_list_twice_is_a_clean_noop(write_tools):
+    """Idempotency (Part E/Phase 12): adding the same Contact to the same
+    List twice must never create a duplicate membership or a misleading
+    second 'added' result."""
+    first = await write_tools.dispatch(
+        "add_crm_contact_to_list", {"first_name": "Carol", "last_name": "Family", "list_name": "Hotshot"}
+    )
+    second = await write_tools.dispatch(
+        "add_crm_contact_to_list", {"first_name": "Carol", "last_name": "Family", "list_name": "Hotshot"}
+    )
+    assert first["status"] == "added"
+    assert second["status"] == "already_member"
+
+
+async def test_add_contact_to_list_logs_astro_ai_attribution(write_tools):
+    await write_tools.dispatch("add_crm_contact_to_list", {"first_name": "Carol", "last_name": "Family", "list_name": "Hotshot"})
+    events = await write_tools.crm_service.activity_log.store.list()
+    added = next(e for e in events if e.event_type == "list.contacts_added")
+    assert added.source.value == "astro_ai"
+    assert added.actor == "astro_ai"
+
+
+async def test_add_contact_to_list_ambiguous_list_name_writes_nothing(write_tools):
+    result = await write_tools.dispatch(
+        "add_crm_contact_to_list", {"first_name": "Carol", "last_name": "Family", "list_name": "Austin Investors"}
+    )
+    assert result["status"] == "ambiguous"
+    lists = await write_tools.dispatch("get_crm_contact_lists", {"first_name": "Carol", "last_name": "Family"})
+    assert lists["lists"] == []
+
+
+async def test_add_contact_to_list_ambiguous_contact_writes_nothing(write_tools):
+    result = await write_tools.dispatch("add_crm_contact_to_list", {"last_name": "Angel", "list_name": "Hotshot"})
+    assert result["status"] == "ambiguous"
+
+
+# --- Phase 3: remove_crm_contact_from_list (pending-action gated) ----------
+
+
+async def test_remove_contact_from_list_does_not_execute_immediately(write_tools):
+    result = await write_tools.dispatch(
+        "remove_crm_contact_from_list", {"first_name": "John", "last_name": "Smith", "list_name": "Hotshot"}
+    )
+    assert result["status"] == "pending_confirmation"
+    assert "pending_action_id" in result
+    # Nothing removed yet.
+    lists = await write_tools.dispatch("get_crm_contact_lists", {"first_name": "John", "last_name": "Smith"})
+    assert "Hotshot" in [l["name"] for l in lists["lists"]]
+
+
+async def test_remove_contact_from_list_confirmed_actually_removes(write_tools):
+    propose = await write_tools.dispatch(
+        "remove_crm_contact_from_list", {"first_name": "John", "last_name": "Smith", "list_name": "Hotshot"}
+    )
+    confirm = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": propose["pending_action_id"]})
+    assert confirm["status"] == "confirmed"
+    assert confirm["result"]["status"] == "removed"
+
+    lists = await write_tools.dispatch("get_crm_contact_lists", {"first_name": "John", "last_name": "Smith"})
+    assert "Hotshot" not in [l["name"] for l in lists["lists"]]
+
+
+async def test_remove_contact_from_list_already_absent_proposes_nothing(write_tools):
+    result = await write_tools.dispatch(
+        "remove_crm_contact_from_list", {"first_name": "Carol", "last_name": "Family", "list_name": "Hotshot"}
+    )
+    assert result["status"] == "already_absent"
+    assert "pending_action_id" not in result
+
+
+async def test_remove_contact_from_list_ambiguous_contact_proposes_nothing(write_tools):
+    result = await write_tools.dispatch("remove_crm_contact_from_list", {"last_name": "Angel", "list_name": "Hotshot"})
+    assert result["status"] == "ambiguous"
+    assert "pending_action_id" not in result
+
+
+async def test_remove_contact_from_list_requires_pending_action_store(tools):
+    """`tools` (the plain fixture) has no pending_action_store."""
+    result = await tools.dispatch(
+        "remove_crm_contact_from_list", {"first_name": "John", "last_name": "Smith", "list_name": "Hotshot"}
+    )
+    assert result == {"error": "tool_failed", "message": "Confirmation isn't available right now -- please try again."}
+
+
+# --- Phase 3: update_crm_contact_investor_field -----------------------------
+
+
+async def test_investor_field_add_value_to_investment_industry_executes_immediately(write_tools):
+    result = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {
+            "first_name": "Carol",
+            "last_name": "Family",
+            "field": "investment_industry",
+            "operation": "add_value",
+            "value": "Robotics",
+        },
+    )
+    assert result["status"] == "updated"
+    assert result["after"] == ["Robotics"]
+
+
+async def test_investor_field_add_value_case_insensitive_duplicate_is_no_change(write_tools):
+    await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "investment_industry", "operation": "add_value", "value": "Robotics"},
+    )
+    result = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "investment_industry", "operation": "add_value", "value": "robotics"},
+    )
+    assert result["status"] == "no_change"
+
+
+async def test_investor_field_remove_value_requires_confirmation(write_tools):
+    await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "investment_industry", "operation": "add_value", "value": "Robotics"},
+    )
+    result = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "investment_industry", "operation": "remove_value", "value": "Robotics"},
+    )
+    assert result["status"] == "pending_confirmation"
+
+    confirm = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": result["pending_action_id"]})
+    assert confirm["result"]["after"] == []
+
+
+async def test_investor_field_set_check_size_requires_confirmation(write_tools):
+    result = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {
+            "first_name": "Carol",
+            "last_name": "Family",
+            "field": "check_size_personal",
+            "operation": "set_value",
+            "values": ["$25k - $100k"],
+        },
+    )
+    assert result["status"] == "pending_confirmation"
+
+    confirm = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": result["pending_action_id"]})
+    assert confirm["result"]["status"] == "updated"
+    assert confirm["result"]["after"] == ["$25k - $100k"]
+
+
+async def test_investor_field_set_deploying_capital_requires_confirmation(write_tools):
+    result = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "deploying_capital", "operation": "set_value", "value": "Selectively"},
+    )
+    assert result["status"] == "pending_confirmation"
+
+
+async def test_investor_field_invalid_operation_for_field_is_rejected(write_tools):
+    result = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "deploying_capital", "operation": "add_value", "value": "Selectively"},
+    )
+    assert result["error"] == "invalid_field_or_value"
+
+
+async def test_investor_field_unknown_field_is_rejected(write_tools):
+    result = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "investor_mode", "operation": "set_value", "value": "Both"},
+    )
+    assert result["error"] == "invalid_field_or_value"
+
+
+async def test_investor_field_unrelated_custom_fields_untouched(write_tools, crm_service):
+    contacts = await crm_service.contact_store.list()
+    carol = next(c for c in contacts if c.first_name == "Carol")
+    # Give Carol an unrelated custom field before touching investment_industry.
+    carol = carol.model_copy(update={"custom_fields": {**carol.custom_fields, "dinners_attended": ["Startup Soft"]}})
+    await crm_service.contact_store.save(carol)
+
+    await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "investment_industry", "operation": "add_value", "value": "Robotics"},
+    )
+
+    updated = await crm_service.contact_store.get(carol.crm_contact_id)
+    assert updated.custom_fields["dinners_attended"] == ["Startup Soft"]
+    assert updated.custom_fields["investor_type"] == ["Family Office"]
+
+
+# --- Phase 3: confirm_astro_action -------------------------------------------
+
+
+async def test_confirm_unknown_pending_action_id(write_tools):
+    result = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": "does-not-exist"})
+    assert result["status"] == "not_found"
+
+
+async def test_confirm_same_pending_action_twice_is_safe_noop(write_tools):
+    propose = await write_tools.dispatch(
+        "remove_crm_contact_from_list", {"first_name": "John", "last_name": "Smith", "list_name": "Hotshot"}
+    )
+    first = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": propose["pending_action_id"]})
+    second = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": propose["pending_action_id"]})
+    assert first["status"] == "confirmed"
+    assert second["status"] == "already_executed"
+
+
+async def test_confirm_expired_pending_action(write_tools):
+    from datetime import timedelta
+
+    from app.services.astro_pending_action_store import PENDING_ACTION_TTL
+
+    propose = await write_tools.dispatch(
+        "remove_crm_contact_from_list", {"first_name": "John", "last_name": "Smith", "list_name": "Hotshot"}
+    )
+    pending_action_id = propose["pending_action_id"]
+    write_tools.pending_action_store._pending[pending_action_id].created_at -= PENDING_ACTION_TTL + timedelta(seconds=1)
+
+    result = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": pending_action_id})
+    assert result["status"] == "not_found"
+
+
+async def test_confirm_requires_pending_action_id(write_tools):
+    result = await write_tools.dispatch("confirm_astro_action", {})
+    assert result["error"] == "invalid_filter"
+
+
+async def test_confirm_when_target_changed_between_propose_and_confirm(write_tools, crm_service):
+    """The optimistic-concurrency guard: if the Contact's field changed
+    (by some OTHER path) after a set_value/remove_value was proposed,
+    confirm must not blindly apply the now-stale diff -- it must report
+    target_changed instead."""
+    contacts = await crm_service.contact_store.list()
+    carol = next(c for c in contacts if c.first_name == "Carol")
+    carol = carol.model_copy(update={"custom_fields": {**carol.custom_fields, "check_size_personal": ["$1k - $10k"]}})
+    await crm_service.contact_store.save(carol)
+
+    set_propose = await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "check_size_personal", "operation": "set_value", "values": ["$25k - $100k"]},
+    )
+    # Field changes again before confirmation.
+    carol = await crm_service.contact_store.get(carol.crm_contact_id)
+    carol = carol.model_copy(update={"custom_fields": {**carol.custom_fields, "check_size_personal": ["$10k - $25k"]}})
+    await crm_service.contact_store.save(carol)
+
+    confirm = await write_tools.dispatch("confirm_astro_action", {"pending_action_id": set_propose["pending_action_id"]})
+    assert confirm["result"]["error"] == "target_changed"
+
+
+# --- Phase 3 security/structural invariants (Part F #23/#24) ---------------
+
+
+def test_investor_field_tool_schema_enum_matches_the_approved_five_fields_exactly():
+    """No suppression/unsubscribe field, and no arbitrary custom_fields
+    key, can ever reach update_crm_contact_investor_field -- the tool's
+    OWN JSON schema enum is a closed, exact list Claude cannot widen."""
+    from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS
+
+    definition = next(t for t in CRM_TOOL_DEFINITIONS if t["name"] == "update_crm_contact_investor_field")
+    field_enum = set(definition["input_schema"]["properties"]["field"]["enum"])
+    assert field_enum == {
+        "investment_industry",
+        "check_size_personal",
+        "check_size_institutional",
+        "deploying_capital",
+        "investor_type",
+    }
+    assert "investor_mode" not in field_enum
+    assert "custom_fields" not in definition["input_schema"]["properties"]
+
+
+def test_investor_field_tool_has_no_generic_patch_parameter():
+    """The tool's input_schema has no free-form 'patch'/'fields'/'data'
+    object parameter -- every accepted key is individually named and
+    typed (field/operation/value/values plus contact resolution)."""
+    from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS
+
+    definition = next(t for t in CRM_TOOL_DEFINITIONS if t["name"] == "update_crm_contact_investor_field")
+    assert set(definition["input_schema"]["properties"].keys()) == {
+        "first_name", "last_name", "company", "email", "field", "operation", "value", "values",
+    }
+
+
+async def test_every_direct_execute_write_emits_exactly_one_activity_log_event(write_tools):
+    """add_crm_contact_to_list and investment_industry add_value (the two
+    direct-execute writes) each emit exactly one Activity Log event."""
+    await write_tools.dispatch("add_crm_contact_to_list", {"first_name": "Carol", "last_name": "Family", "list_name": "Hotshot"})
+    await write_tools.dispatch(
+        "update_crm_contact_investor_field",
+        {"first_name": "Carol", "last_name": "Family", "field": "investment_industry", "operation": "add_value", "value": "Robotics"},
+    )
+    events = await write_tools.crm_service.activity_log.store.list()
+    # Filtered to astro_ai-attributed events -- the crm_service fixture's
+    # own setup already emits one "list.contacts_added" (Hotshot's initial
+    # members), so an unfiltered count would overcount.
+    astro_events = [e for e in events if e.actor == "astro_ai"]
+    assert len([e for e in astro_events if e.event_type == "list.contacts_added"]) == 1
+    assert len([e for e in astro_events if e.event_type == "contact.updated"]) == 1
+
+
+async def test_every_confirmed_write_emits_exactly_one_activity_log_event(write_tools):
+    propose = await write_tools.dispatch(
+        "remove_crm_contact_from_list", {"first_name": "John", "last_name": "Smith", "list_name": "Hotshot"}
+    )
+    await write_tools.dispatch("confirm_astro_action", {"pending_action_id": propose["pending_action_id"]})
+    events = await write_tools.crm_service.activity_log.store.list()
+    assert len([e for e in events if e.event_type == "list.contacts_removed"]) == 1

@@ -1,24 +1,31 @@
 """
-Astro AI Phase 3 -- composes the four per-domain read-only tool surfaces
-(CRM/Lists, Mailboxes, Activity Log, Campaign Manager) into the single
+Astro AI Phase 3 -- composes the five per-domain tool surfaces (CRM/Lists,
+Mailboxes, Activity Log, Campaign Manager, Client CRM) into the single
 `tools` list and single dispatch entry point AstroAiService's tool-use
 loop needs, without merging their implementations into one generic
 "query the Hub" abstraction. Each domain keeps its own file, its own
-allowlisted dispatch, and its own read-only service dependency -- this
-class only routes a tool NAME to the one domain object that owns it.
+allowlisted dispatch, and its own service dependency -- this class only
+routes a tool NAME to the one domain object that owns it.
 
 Every sub-tools object is optional so a caller that only cares about one
-domain (e.g. a Phase-2-only test) doesn't have to construct all four --
-production wiring (app/main.py) always provides all four.
+domain (e.g. a Phase-2-only test) doesn't have to construct all five --
+production wiring (app/main.py) always provides all five.
 
 Raises ValueError at construction time if two domains ever declare the
 same tool name -- a fast, load-time guard against an accidental name
 collision, rather than a silent "whichever domain was registered first
 wins."
-"""
+
+client_crm_tools (Astro AI Phase 3, 2026-09-15) is the one domain whose
+write tool's actual execution is stored in a PendingAstroAction owned by
+a DIFFERENT domain's confirm_astro_action tool (crm_tools') -- this
+works because both domains are constructed sharing the SAME
+AstroPendingActionStore instance (see app/main.py); this router never
+needs to know that to do its own job of routing by tool name."""
 
 from app.services.astro_activity_tools import ASTRO_ACTIVITY_TOOL_DEFINITIONS, AstroActivityTools
 from app.services.astro_campaign_tools import ASTRO_CAMPAIGN_TOOL_DEFINITIONS, AstroCampaignTools
+from app.services.astro_client_crm_tools import ASTRO_CLIENT_CRM_TOOL_DEFINITIONS, AstroClientCrmTools
 from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS, AstroCrmTools
 from app.services.astro_mailbox_tools import ASTRO_MAILBOX_TOOL_DEFINITIONS, AstroMailboxTools
 
@@ -30,11 +37,13 @@ class AstroHubTools:
         mailbox_tools: AstroMailboxTools | None = None,
         activity_tools: AstroActivityTools | None = None,
         campaign_tools: AstroCampaignTools | None = None,
+        client_crm_tools: AstroClientCrmTools | None = None,
     ):
         self.crm_tools = crm_tools
         self.mailbox_tools = mailbox_tools
         self.activity_tools = activity_tools
         self.campaign_tools = campaign_tools
+        self.client_crm_tools = client_crm_tools
 
         domains_and_definitions = []
         if crm_tools is not None:
@@ -45,6 +54,8 @@ class AstroHubTools:
             domains_and_definitions.append((activity_tools, ASTRO_ACTIVITY_TOOL_DEFINITIONS))
         if campaign_tools is not None:
             domains_and_definitions.append((campaign_tools, ASTRO_CAMPAIGN_TOOL_DEFINITIONS))
+        if client_crm_tools is not None:
+            domains_and_definitions.append((client_crm_tools, ASTRO_CLIENT_CRM_TOOL_DEFINITIONS))
 
         self._tool_definitions: list[dict] = []
         self._name_to_domain: dict[str, object] = {}

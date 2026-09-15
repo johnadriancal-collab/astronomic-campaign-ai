@@ -636,10 +636,21 @@ class ParticipantSource(str, Enum):
     a reserved value for a future, dedicated Luma-linkage stage, not
     something Stage 1G reads, writes, or exposes as a create/update
     option. Keeping it in the enum now (rather than adding it later) is
-    harmless and avoids a values migration once that stage exists."""
+    harmless and avoids a values migration once that stage exists.
+
+    ASTRO_AI (Astro AI Phase 3, 2026-09-15): an attendance change made
+    through Astro's chat-driven mark_crm_contact_engagement_attendance
+    tool -- deliberately distinct from MANUAL (a human editing the Client
+    CRM UI directly) so the Activity Log / this field can always tell the
+    two apart, same reasoning as ActivitySource.ASTRO_AI already applies
+    to CRM exports. Purely additive: `role` (see SPONSOR above) already
+    established that extending one of these string enums needs no SQL
+    migration since values are stored inside the participant's own JSON
+    blob, not a DB-level CHECK constraint."""
 
     MANUAL = "manual"
     LUMA = "luma"
+    ASTRO_AI = "astro_ai"
 
 
 class EngagementParticipant(BaseModel):

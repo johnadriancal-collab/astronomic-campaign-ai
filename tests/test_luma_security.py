@@ -47,24 +47,16 @@ def test_luma_client_never_logs_the_api_key(monkeypatch, caplog):
             assert "api_key" not in line
 
 
-async def test_astro_tool_registry_is_completely_unchanged():
-    """This phase explicitly must not touch Astro -- the CRM tool registry
-    (which would be the natural place a "query Luma registrations" tool
-    would eventually live) still has exactly the same 8 CRM tools as
-    before this phase, none of them Luma-related."""
+async def test_astro_tool_registry_has_no_luma_related_tool():
+    """This phase explicitly must not touch Astro for Luma's own sake --
+    the CRM tool registry (which would be the natural place a "query Luma
+    registrations" tool would eventually live) has none of them. The
+    exact tool SET this test originally pinned was superseded by Astro AI
+    Phase 3's separately-approved read+write surface (2026-09-15) -- the
+    Luma-specific invariant below is the part that must still hold."""
     from app.services.astro_crm_tools import CRM_TOOL_DEFINITIONS
 
     names = {t["name"] for t in CRM_TOOL_DEFINITIONS}
-    assert names == {
-        "count_crm_contacts",
-        "search_crm_contacts",
-        "get_crm_contact",
-        "list_crm_lists",
-        "get_crm_list",
-        "get_crm_list_members",
-        "count_crm_list_members",
-        "export_crm_contacts",
-    }
     assert not any("luma" in name.lower() for name in names)
 
 

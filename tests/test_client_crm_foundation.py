@@ -488,8 +488,12 @@ def test_participant_role_has_no_dedicated_moderator_value():
     }
 
 
-def test_participant_source_enum_has_manual_and_luma_but_model_defaults_to_manual():
-    assert {member.value for member in ParticipantSource} == {"manual", "luma"}
+def test_participant_source_enum_has_manual_luma_and_astro_ai_but_model_defaults_to_manual():
+    """ASTRO_AI (Astro AI Phase 3, 2026-09-15) is a purely additive enum
+    value -- see ParticipantSource's own docstring -- for attendance
+    changes made through mark_crm_contact_engagement_attendance. Every
+    plain EngagementParticipant() still defaults to MANUAL, unchanged."""
+    assert {member.value for member in ParticipantSource} == {"manual", "luma", "astro_ai"}
     assert _participant().source == ParticipantSource.MANUAL
 
 

@@ -177,9 +177,14 @@ def test_hub_system_prompt_no_longer_claims_astronomic_mail_cannot_send():
     assert "astronomic mail can send" in lowered or "can send real email" in lowered
     assert "theoretical" in lowered
     assert "execution" in lowered
-    # Astro's OWN tools remain read-only -- this claim is still accurate
-    # and must not be removed by this fix.
-    assert "no write, send, or campaign-building capability" in lowered
+    # Astro AI Phase 3 (2026-09-15) gave Astro a narrow, explicit write
+    # surface (CRM List membership + investor fields + Engagement
+    # attendance) -- the blanket "no write... capability" claim this
+    # assertion used to check is no longer true and was rewritten
+    # accordingly; campaign-building/send/mailbox-connect capability is
+    # still explicitly denied.
+    assert "launch/pause/delete a campaign" in lowered or "campaign-building" in lowered
+    assert "send or schedule email" in lowered
 
 
 async def test_only_user_and_assistant_roles_are_representable():
@@ -548,7 +553,10 @@ async def test_activity_tool_guidance_mandates_date_translation_for_relative_que
     assert "today" in prompt.lower() and "yesterday" in prompt.lower()
 
 
-async def test_no_write_tools_exist_in_the_crm_tool_registry():
+async def test_crm_tool_registry_matches_the_approved_phase_3_write_surface():
+    """Astro AI Phase 3 (2026-09-15) approved a narrow, explicit write
+    surface onto the CRM tool registry -- this test's name and assertion
+    changed accordingly (it used to assert NO write tools existed)."""
     names = {t["name"] for t in CRM_TOOL_DEFINITIONS}
     assert names == {
         "count_crm_contacts",
@@ -559,8 +567,14 @@ async def test_no_write_tools_exist_in_the_crm_tool_registry():
         "get_crm_list_members",
         "count_crm_list_members",
         "export_crm_contacts",
+        "get_crm_contact_lists",
+        "add_crm_contact_to_list",
+        "remove_crm_contact_from_list",
+        "update_crm_contact_investor_field",
+        "confirm_astro_action",
     }
-    for forbidden in ["create", "update", "delete", "archive", "send", "apollo", "campaign", "mailbox"]:
+    # Still-forbidden operations Phase 3 explicitly did NOT approve.
+    for forbidden in ["archive", "send", "apollo", "campaign", "mailbox", "delete", "bulk_add", "bulk_remove"]:
         assert not any(forbidden in name.lower() for name in names)
 
 

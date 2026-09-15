@@ -117,10 +117,12 @@ from app.services.activity_log_service import ActivityLogService
 from app.services.astro_activity_tools import AstroActivityTools
 from app.services.astro_ai_service import AstroAiService, build_default_claude_client
 from app.services.astro_campaign_tools import AstroCampaignTools
+from app.services.astro_client_crm_tools import AstroClientCrmTools
 from app.services.astro_crm_tools import AstroCrmTools
 from app.services.astro_export_store import AstroExportStore
 from app.services.astro_hub_tools import AstroHubTools
 from app.services.astro_mailbox_tools import AstroMailboxTools
+from app.services.astro_pending_action_store import AstroPendingActionStore
 from app.services.auth_service import SESSION_COOKIE_NAME, AuthService
 from app.services.campaign_service import CampaignService
 from app.services.campaign_sync_service import CampaignSyncService
@@ -484,11 +486,25 @@ async def lifespan(app: FastAPI):
     astro_export_store = AstroExportStore()
     app.state.astro_export_store = astro_export_store
 
+    # In-memory, 20-minute-TTL holding area for Astro AI's Phase 3 write
+    # tools' proposed-but-not-yet-confirmed actions (app/services/
+    # astro_pending_action_store.py). ONE shared instance across BOTH
+    # AstroCrmTools and AstroClientCrmTools below, since a pending action
+    # proposed by either domain (e.g. mark_crm_contact_engagement_attendance,
+    # proposed by client_crm_tools) is executed by crm_tools' own
+    # confirm_astro_action -- see astro_hub_tools.py's own docstring for why
+    # that's safe despite the cross-domain call.
+    astro_pending_action_store = AstroPendingActionStore()
+    app.state.astro_pending_action_store = astro_pending_action_store
+
     app.state.astro_ai_service = AstroAiService(
         claude_client=build_default_claude_client(),
         hub_tools=AstroHubTools(
             crm_tools=AstroCrmTools(
-                crm_service, export_store=astro_export_store, activity_log_service=activity_log_service
+                crm_service,
+                export_store=astro_export_store,
+                activity_log_service=activity_log_service,
+                pending_action_store=astro_pending_action_store,
             ),
             mailbox_tools=AstroMailboxTools(mailbox_store),
             activity_tools=AstroActivityTools(activity_log_service),
@@ -497,6 +513,11 @@ async def lifespan(app: FastAPI):
                 mail_campaign_service=app.state.mail_campaign_service,
                 mail_suppression_service=app.state.mail_suppression_service,
                 email_sequence_store=app.state.email_sequence_sync_service.store,
+            ),
+            client_crm_tools=AstroClientCrmTools(
+                client_crm_service=app.state.client_crm_service,
+                crm_service=crm_service,
+                pending_action_store=astro_pending_action_store,
             ),
         ),
     )

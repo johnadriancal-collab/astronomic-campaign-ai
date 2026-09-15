@@ -212,6 +212,19 @@ def _strip_server_owned_fields(fields: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in fields.items() if k not in _SERVER_OWNED_FIELDS}
 
 
+def _normalize_engagement_text(value: str | None) -> str | None:
+    """trim + collapse internal whitespace + lowercase -- used ONLY for
+    find_engagements()'s exact-after-normalization matching (title/
+    location/client_name), never for display. Deliberately NOT
+    normalize_company_name() (same normalization, different name) --
+    that function's name is company-specific and reusing it here for an
+    Engagement title would misdescribe what's happening at the call site."""
+    if not value:
+        return None
+    normalized = " ".join(value.split()).lower()
+    return normalized or None
+
+
 # ClientTouchpoint's own server-owned set -- its PK is named `touchpoint_id`
 # (not `client_id`, the generic set above's PK name), and `contact_name` is
 # ALWAYS server-derived from crm_contact_id (see create_client_touchpoint's
@@ -1099,10 +1112,13 @@ class ClientCrmService:
     # the full architecture (optional crm_contact_id, snapshot fields,
     # two-axis RSVP/attendance status, is_walk_in as provenance not
     # attendance, at-most-one-active-per-Contact-per-Engagement enforced
-    # by a real SQLite partial unique index). `source` is entirely
-    # server-owned here -- Stage 1G creates and updates ONLY MANUAL
-    # participant records; LUMA is a reserved enum value this service
-    # never reads, writes, or exposes as a caller-settable option.
+    # by a real SQLite partial unique index). `source` is server-owned
+    # from the perspective of any HTTP request body -- no route ever
+    # reads a "source" field off what a caller submits. create/update
+    # DO accept an explicit `source` keyword argument (Astro AI Phase 3)
+    # for a caller that isn't a plain request body, e.g.
+    # astro_client_crm_tools.py passing ASTRO_AI -- LUMA remains reserved,
+    # not read/written/exposed by anything today.
     # =====================================================================
 
     @staticmethod
@@ -1278,7 +1294,9 @@ class ClientCrmService:
                 f"{participant.participant_id} -- the participant write itself already succeeded and is unaffected."
             )
 
-    async def create_engagement_participant(self, client_id: str, engagement_id: str, fields: dict[str, Any]) -> EngagementParticipant:
+    async def create_engagement_participant(
+        self, client_id: str, engagement_id: str, fields: dict[str, Any], source: ParticipantSource = ParticipantSource.MANUAL
+    ) -> EngagementParticipant:
         """If `crm_contact_id` is provided, snapshot fields are populated
         FROM the canonical CrmContact (any name/email/etc. also present in
         `fields` is ignored -- the canonical record always wins, exactly
@@ -1331,7 +1349,7 @@ class ClientCrmService:
             decline_origin_is_manual=decline_origin is not None,
             attendance_status=fields.get("attendance_status"),
             is_walk_in=bool(fields.get("is_walk_in", False)),
-            source=ParticipantSource.MANUAL,
+            source=source,
             created_at=now,
             updated_at=now,
         )
@@ -1341,21 +1359,33 @@ class ClientCrmService:
             raise EngagementParticipantDuplicate(exc.engagement_id, exc.crm_contact_id) from exc
 
         display_name = self._participant_display_name(participant)
+        # Activity Log `source` mirrors the participant's own `source` --
+        # an Astro-driven create must be attributable to Astro AI in the
+        # feed, not misfiled under MANUAL_CLIENT_CRM (same reasoning as
+        # ActivitySource.ASTRO_AI already applies to CRM exports).
+        activity_source = ActivitySource.ASTRO_AI if source == ParticipantSource.ASTRO_AI else ActivitySource.MANUAL_CLIENT_CRM
+        activity_actor = "astro_ai" if source == ParticipantSource.ASTRO_AI else None
         await self.activity_log.record(
             event_type="engagement_participant.created",
             category=ActivityCategory.CLIENT_CRM,
-            source=ActivitySource.MANUAL_CLIENT_CRM,
+            source=activity_source,
             summary=f'"{display_name}" was added as a Participant.',
             entity_type="engagement_participant",
             entity_id=participant.participant_id,
             entity_name=display_name,
             metadata={"client_id": client_id, "engagement_id": engagement_id},
+            actor=activity_actor,
         )
         await self._reconcile_engagement_signal(participant)
         return participant
 
     async def update_engagement_participant(
-        self, client_id: str, engagement_id: str, participant_id: str, patch: dict[str, Any]
+        self,
+        client_id: str,
+        engagement_id: str,
+        participant_id: str,
+        patch: dict[str, Any],
+        source: ParticipantSource | None = None,
     ) -> EngagementParticipant:
         """Genuine partial update. Explicitly SUPPORTS linking/relinking
         `crm_contact_id` (unlike ClientContact's own no-relink rule) --
@@ -1375,9 +1405,21 @@ class ClientCrmService:
         crm_contact_id back to null on an already-linked participant) is
         explicitly REJECTED with a ValueError -- once linked to a
         canonical Contact, a participant cannot be turned back into an
-        unresolved one via this PATCH."""
+        unresolved one via this PATCH.
+
+        `source` (Astro AI Phase 3) is a dedicated keyword-only parameter,
+        NOT read from `patch` -- `patch` still only ever carries what a
+        request body can legitimately contain (source stays server-owned
+        for every existing caller, unchanged). Passing it is how
+        mark_crm_contact_engagement_attendance records that THIS specific
+        change came from Astro, even when updating a participant a human
+        originally created manually. None (the default) leaves the
+        participant's existing source untouched, exactly like before this
+        parameter existed."""
         await self._require_engagement(client_id, engagement_id)
         participant = await self._require_engagement_participant(engagement_id, participant_id)
+        if source is not None:
+            patch = {**patch, "source": source}
 
         merged_fields = dict(patch)
         if "crm_contact_id" in merged_fields:
@@ -1438,15 +1480,21 @@ class ClientCrmService:
         else:
             event_type, verb = "engagement_participant.restored", "restored"
         display_name = self._participant_display_name(after)
+        # Attribute to Astro AI whenever THIS save's resulting source is
+        # ASTRO_AI (set via update_engagement_participant's own `source`
+        # kwarg) -- same reasoning as create_engagement_participant above.
+        activity_source = ActivitySource.ASTRO_AI if after.source == ParticipantSource.ASTRO_AI else ActivitySource.MANUAL_CLIENT_CRM
+        activity_actor = "astro_ai" if after.source == ParticipantSource.ASTRO_AI else None
         await self.activity_log.record(
             event_type=event_type,
             category=ActivityCategory.CLIENT_CRM,
-            source=ActivitySource.MANUAL_CLIENT_CRM,
+            source=activity_source,
             summary=f'"{display_name}" was {verb}.',
             entity_type="engagement_participant",
             entity_id=after.participant_id,
             entity_name=display_name,
             metadata={"client_id": after.client_id, "engagement_id": after.engagement_id},
+            actor=activity_actor,
         )
 
     async def list_contact_event_history(self, crm_contact_id: str) -> list[ContactEventHistoryEntry]:
@@ -1530,6 +1578,83 @@ class ClientCrmService:
         entries.sort(key=lambda e: e.participant_id)
         entries.sort(key=lambda e: e.engagement_date or date.min, reverse=True)
         return entries
+
+    async def find_engagements(
+        self,
+        title: str | None = None,
+        engagement_date: date | None = None,
+        location: str | None = None,
+        client_name: str | None = None,
+    ) -> list[Engagement]:
+        """Astro AI Phase 3 -- the first CROSS-CLIENT Engagement lookup in
+        this codebase. Every existing path (UI, API) reaches an Engagement
+        via a specific Client's page (client_id + engagement_id) or an
+        external id (luma_event_id/sale_id/docusign_envelope_id) -- there
+        was previously no way to ask "which Engagement is named X" without
+        already knowing which Client it belongs to, which natural-language
+        commands like "mark John as attended at Austin Forward" never
+        supply. Read-only; never creates anything.
+
+        `title` is REQUIRED (an empty/blank query would otherwise return
+        every Engagement in the CRM). Matching is exact-after-normalization
+        only (trim + collapse internal whitespace + case-insensitive) --
+        never fuzzy/substring/token matching -- so "austin forward" and
+        "Austin  Forward" resolve the same real Engagement, but "Austin"
+        alone does not match "Austin Forward". `engagement_date`/`location`/
+        `client_name` (also normalized the same way) further narrow an
+        already-title-matched set; a caller supplies as many as it has to
+        disambiguate multiple same-titled Engagements (e.g. a recurring
+        series), exactly the same "narrow, don't guess" contract
+        get_crm_contact's ambiguous-result handling already established.
+
+        Full scan across every Client (client_store.list() +
+        engagement_store.list_for_clients(all_ids)) -- same
+        full-scan-is-fine-at-this-scale convention list_contact_event_history()
+        and list_clients() already use; there is no per-title index."""
+        normalized_title = _normalize_engagement_text(title)
+        if not normalized_title:
+            return []
+
+        clients = await self.client_store.list()
+        clients_by_id = {c.client_id: c for c in clients}
+        engagements = await self.engagement_store.list_for_clients([c.client_id for c in clients])
+
+        matches = [e for e in engagements if _normalize_engagement_text(e.title) == normalized_title]
+
+        if engagement_date is not None:
+            matches = [e for e in matches if e.engagement_date == engagement_date]
+
+        normalized_location = _normalize_engagement_text(location)
+        if normalized_location:
+            matches = [e for e in matches if _normalize_engagement_text(e.location) == normalized_location]
+
+        normalized_client_name = _normalize_engagement_text(client_name)
+        if normalized_client_name:
+            matches = [
+                e
+                for e in matches
+                if _normalize_engagement_text(clients_by_id.get(e.client_id).name if clients_by_id.get(e.client_id) else None)
+                == normalized_client_name
+            ]
+
+        return matches
+
+    async def get_active_participant_for_contact(
+        self, engagement_id: str, crm_contact_id: str
+    ) -> EngagementParticipant | None:
+        """The read half of the "if an EngagementParticipant already
+        exists, update it rather than creating a duplicate" rule Astro's
+        mark_crm_contact_engagement_attendance tool needs -- the store's
+        own partial unique index already GUARANTEES at most one ACTIVE
+        match, so returning the first is never a guess. Archived
+        participants are deliberately excluded (matches every other
+        "active" read in this stage) -- an archived relationship is not
+        "the existing relationship" to update."""
+        participants = await self.engagement_participant_store.list_for_engagement(engagement_id)
+        for p in participants:
+            if p.crm_contact_id == crm_contact_id and not p.archived:
+                return p
+        return None
 
     # =====================================================================
     # ClientTouchpoint -- Client CRM Stage 2A (2026-09-11). A persistent,
