@@ -892,6 +892,48 @@ class MailEnrollmentStep(BaseModel):
     updated_at: datetime
 
 
+class MailExecutionStepView(BaseModel):
+    """P0-2 (2026-09-15) -- the minimal read model behind the Campaign
+    Manager's failed/unknown send visibility surface. NOT a new store or
+    a cached projection: MailCampaignService.list_execution_steps()
+    builds this fresh, on every read, by joining one MailEnrollmentStep
+    row with its MailEnrollment (for the recipient email) and a
+    best-effort CrmContact lookup (for a display name only -- absent if
+    the contact was deleted after enrollment, which must never break this
+    view). Deliberately flat and exhaustive-status (every
+    MailEnrollmentStepStatus value can appear, not just failed/unknown --
+    "expose existing send states visibly" is the whole P0-2 ask) rather
+    than a filtered/derived shape, so the frontend never has to reverse
+    what was already computed.
+
+    `last_error` is passed through UNCHANGED from MailEnrollmentStep.
+    last_error -- already sanitized at the point it's written (see that
+    field's own docstring: "Sanitized (error class/code), never the raw
+    provider payload or any message content"). This view adds no new
+    error detail and, just as importantly, never adds a mailbox's OAuth
+    tokens or any other provider secret -- nothing on Mailbox beyond
+    routes already expose reaches this model at all."""
+
+    enrollment_step_id: str
+    mail_campaign_id: str
+    enrollment_id: str
+    step_number: int
+    status: MailEnrollmentStepStatus
+
+    prospect_email: str
+    prospect_name: str | None = None
+
+    sent_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    last_error: str | None = None
+
+    mailbox_id: str | None = None
+    gmail_message_id: str | None = None
+    rfc_message_id: str | None = None
+
+    updated_at: datetime
+
+
 # --- Suppression -------------------------------------------------------------
 
 

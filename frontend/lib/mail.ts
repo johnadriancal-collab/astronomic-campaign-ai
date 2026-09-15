@@ -2,7 +2,7 @@
 // page components so it's unit-testable without rendering React, same
 // split as lib/email-intake.ts and lib/activity.ts.
 
-import type { MailCampaignStatus, MailEnrollmentStatus, MailSuppressionReason } from "@/lib/api";
+import type { MailCampaignStatus, MailEnrollmentStatus, MailExecutionStepStatus, MailSuppressionReason } from "@/lib/api";
 
 export const MAIL_CAMPAIGN_STATUS_OPTIONS: { value: MailCampaignStatus; label: string }[] = [
   { value: "draft", label: "Draft" },
@@ -118,6 +118,54 @@ export function mailEnrollmentStatusBadgeClass(status: MailEnrollmentStatus): st
     case "paused":
       return "bg-amber-100 text-amber-800";
     case "pending":
+    default:
+      return "bg-secondary text-muted-foreground";
+  }
+}
+
+// P0-2 (2026-09-15) -- MailEnrollmentStep's full state machine (see that
+// model's own backend docstring), same "one real label/badge per real
+// value" pattern as mailEnrollmentStatusLabel/mailEnrollmentStatusBadgeClass
+// above. `failed` and `unknown` are the two states this whole visibility
+// surface exists for -- both get the same attention-grabbing treatment as
+// mailEnrollmentStatusBadgeClass's "failed"/"suppressed".
+export function mailExecutionStepStatusLabel(status: MailExecutionStepStatus): string {
+  switch (status) {
+    case "pending":
+      return "Pending";
+    case "queued":
+      return "Queued";
+    case "claimed":
+      return "Claimed";
+    case "sending":
+      return "Sending";
+    case "sent":
+      return "Sent";
+    case "skipped_suppressed":
+      return "Skipped (suppressed)";
+    case "failed":
+      return "Failed";
+    case "unknown":
+      return "Unknown";
+    default:
+      return status;
+  }
+}
+
+export function mailExecutionStepStatusBadgeClass(status: MailExecutionStepStatus): string {
+  switch (status) {
+    case "failed":
+    case "unknown":
+      return "bg-destructive/10 text-destructive";
+    case "sent":
+      return "bg-emerald-100 text-emerald-800";
+    case "sending":
+    case "claimed":
+      return "bg-blue-100 text-blue-800";
+    case "skipped_suppressed":
+      return "bg-amber-100 text-amber-800";
+    case "pending":
+    case "queued":
     default:
       return "bg-secondary text-muted-foreground";
   }

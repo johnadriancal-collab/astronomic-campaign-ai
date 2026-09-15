@@ -32,7 +32,7 @@ directly (no /send, /queue, /dispatch, /worker/run).
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from app.dependencies import (
@@ -52,6 +52,8 @@ from app.models.mail import (
     MailEnrollment,
     MailEnrollmentBatch,
     MailEnrollmentBatchSource,
+    MailEnrollmentStepStatus,
+    MailExecutionStepView,
     MailLeadStartTrigger,
     MailScheduleValidationError,
     MailSequenceStep,
@@ -324,6 +326,24 @@ async def get_campaign_review(
 async def list_enrollments(mail_campaign_id: str, service: MailCampaignService = Depends(get_mail_campaign_service)):
     try:
         return await service.list_enrollments(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/campaigns/{mail_campaign_id}/execution-steps", response_model=list[MailExecutionStepView])
+async def list_execution_steps(
+    mail_campaign_id: str,
+    status: list[MailEnrollmentStepStatus] | None = Query(None),
+    service: MailCampaignService = Depends(get_mail_campaign_service),
+):
+    """P0-2 -- minimal failed/unknown send visibility. `status` filters
+    to specific MailEnrollmentStepStatus values (e.g. `?status=failed&
+    status=unknown`); omitted, every status is returned. See
+    MailCampaignService.list_execution_steps()'s own docstring -- never
+    exposes anything beyond MailExecutionStepView's fields (no OAuth
+    tokens/provider secrets)."""
+    try:
+        return await service.list_execution_steps(mail_campaign_id, statuses=status)
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 

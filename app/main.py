@@ -362,6 +362,7 @@ async def lifespan(app: FastAPI):
         policy_store=mailbox_send_policy_store,
         suppression_store=mail_suppression_store,
         activity_log=activity_log_service,
+        crm_contact_store=crm_contact_store,
     )
     app.state.mail_sending_service = mail_sending_service
     app.state.mail_campaign_service = MailCampaignService(

@@ -1312,6 +1312,72 @@ export function listMailEnrollments(mailCampaignId: string): Promise<MailEnrollm
   return request<MailEnrollment[]>(`/mail/campaigns/${mailCampaignId}/enrollments`);
 }
 
+// --- Execution step visibility (P0-2, 2026-09-15) --------------------------
+//
+// MailEnrollmentStep -- ONE send attempt for one (enrollment, sequence
+// step) pair -- see that model's own backend docstring for the full
+// PENDING -> QUEUED -> CLAIMED -> SENDING -> SENT state machine (plus the
+// SKIPPED_SUPPRESSED/FAILED/UNKNOWN terminal branches). MailExecutionStepView
+// is a read-only, already-joined shape (prospect email/name resolved
+// server-side) -- deliberately never includes anything from Mailbox beyond
+// mailbox_id (no OAuth tokens/provider secrets ever reach this type).
+export type MailExecutionStepStatus =
+  | "pending"
+  | "queued"
+  | "claimed"
+  | "sending"
+  | "sent"
+  | "skipped_suppressed"
+  | "failed"
+  | "unknown";
+
+export interface MailExecutionStepView {
+  enrollment_step_id: string;
+  mail_campaign_id: string;
+  enrollment_id: string;
+  step_number: number;
+  status: MailExecutionStepStatus;
+  prospect_email: string;
+  prospect_name: string | null;
+  sent_at: string | null;
+  last_attempt_at: string | null;
+  last_error: string | null;
+  mailbox_id: string | null;
+  gmail_message_id: string | null;
+  rfc_message_id: string | null;
+  updated_at: string;
+}
+
+/** Omit `statuses` for every status; pass e.g. ["failed", "unknown"] for
+ * just the at-risk view. */
+export function listMailExecutionSteps(
+  mailCampaignId: string,
+  statuses?: MailExecutionStepStatus[]
+): Promise<MailExecutionStepView[]> {
+  const query = statuses && statuses.length > 0 ? `?${statuses.map((s) => `status=${s}`).join("&")}` : "";
+  return request<MailExecutionStepView[]>(`/mail/campaigns/${mailCampaignId}/execution-steps${query}`);
+}
+
+/** A human independently verified (via Gmail directly) that an UNKNOWN
+ * row WAS actually delivered -- only ever valid from UNKNOWN. Never
+ * auto-called; always a deliberate human action. */
+export function resolveMailExecutionStepSent(
+  enrollmentStepId: string,
+  providerMessageId: string,
+  providerThreadId: string
+): Promise<{ applied: boolean }> {
+  return post<{ applied: boolean }>(`/mail/execution/${enrollmentStepId}/resolve-sent`, {
+    provider_message_id: providerMessageId,
+    provider_thread_id: providerThreadId,
+  });
+}
+
+/** A human independently verified an UNKNOWN row was NOT delivered --
+ * requeues it, preserving its persisted rfc_message_id. */
+export function resolveMailExecutionStepNotSent(enrollmentStepId: string): Promise<{ applied: boolean }> {
+  return post<{ applied: boolean }>(`/mail/execution/${enrollmentStepId}/resolve-not-sent`, {});
+}
+
 // --- Workload / prospect batches / Add Prospects (Phase 2, Stage 2-4B) ----
 //
 // Workload is enrollment-status counts, entirely independent of the

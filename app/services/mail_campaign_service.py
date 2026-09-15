@@ -51,6 +51,8 @@ from app.models.mail import (
     MailEnrollmentBatchSource,
     MailEnrollmentBatchStatus,
     MailEnrollmentStatus,
+    MailEnrollmentStepStatus,
+    MailExecutionStepView,
     MailScheduleSource,
     MailScheduleValidationError,
     MailSendWindow,
@@ -1540,6 +1542,73 @@ class MailCampaignService:
     async def list_enrollments(self, mail_campaign_id: str) -> list[MailEnrollment]:
         await self._require_campaign(mail_campaign_id)
         return await self.enrollment_store.list_for_campaign(mail_campaign_id)
+
+    async def list_execution_steps(
+        self, mail_campaign_id: str, statuses: list[MailEnrollmentStepStatus] | None = None
+    ) -> list[MailExecutionStepView]:
+        """P0-2 (2026-09-15) -- the minimal failed/unknown send visibility
+        read. Pure read, computed fresh from MailEnrollmentStepStore on
+        every call; never cached. `statuses`, when given, filters to just
+        those MailEnrollmentStepStatus values (e.g. [FAILED, UNKNOWN] for
+        the operator's at-risk view) -- omitted, every status is returned,
+        matching MailCampaignWorkload's own "expose existing states, don't
+        pre-decide what the operator wants to see" stance.
+
+        Joins each MailEnrollmentStep with its MailEnrollment (for
+        `email_at_enrollment` -- MailEnrollmentStep itself carries no
+        email) and a BEST-EFFORT CrmContact lookup for a display name
+        only. A missing enrollment is skipped (defensive only -- every
+        step row is created from a live enrollment and enrollments are
+        never hard-deleted, so this should be unreachable); a missing
+        contact yields `prospect_name=None`, never an error -- a deleted
+        Contact must not break this view.
+
+        Never includes anything from Mailbox beyond the `mailbox_id`
+        already on the row -- no OAuth tokens or other provider secrets
+        are readable through this method, matching MailExecutionStepView's
+        own docstring."""
+        await self._require_campaign(mail_campaign_id)
+        steps = await self.enrollment_step_store.list_for_campaign(mail_campaign_id)
+        if statuses is not None:
+            wanted = set(statuses)
+            steps = [step for step in steps if step.status in wanted]
+
+        views: list[MailExecutionStepView] = []
+        enrollment_cache: dict[str, MailEnrollment | None] = {}
+        contact_name_cache: dict[str, str | None] = {}
+        for step in steps:
+            if step.enrollment_id not in enrollment_cache:
+                enrollment_cache[step.enrollment_id] = await self.enrollment_store.get(step.enrollment_id)
+            enrollment = enrollment_cache[step.enrollment_id]
+            if enrollment is None:
+                continue
+
+            if step.crm_contact_id not in contact_name_cache:
+                contact = await self.crm_service.contact_store.get(step.crm_contact_id)
+                name = None
+                if contact is not None:
+                    name = " ".join(part for part in [contact.first_name, contact.last_name] if part) or None
+                contact_name_cache[step.crm_contact_id] = name
+
+            views.append(
+                MailExecutionStepView(
+                    enrollment_step_id=step.enrollment_step_id,
+                    mail_campaign_id=step.mail_campaign_id,
+                    enrollment_id=step.enrollment_id,
+                    step_number=step.step_number,
+                    status=step.status,
+                    prospect_email=enrollment.email_at_enrollment,
+                    prospect_name=contact_name_cache[step.crm_contact_id],
+                    sent_at=step.sent_at,
+                    last_attempt_at=step.last_attempt_at,
+                    last_error=step.last_error,
+                    mailbox_id=step.mailbox_id,
+                    gmail_message_id=step.gmail_message_id,
+                    rfc_message_id=step.rfc_message_id,
+                    updated_at=step.updated_at,
+                )
+            )
+        return views
 
     # --- Workload / prospect batches (Phase 2, 2026-09-03) ----------------
 

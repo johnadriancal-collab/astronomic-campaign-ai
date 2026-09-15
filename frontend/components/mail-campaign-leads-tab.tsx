@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { AddProspectsModal } from "@/components/add-prospects-modal";
 import { MailCampaignBatchHistory } from "@/components/mail-campaign-batch-history";
+import { MailCampaignExecutionIssuesPanel } from "@/components/mail-campaign-execution-issues-panel";
 import { MailCampaignWorkloadSummary } from "@/components/mail-campaign-workload-summary";
 import { isAddProspectsEligible } from "@/lib/add-prospects-flow";
 import type { CrmContactListSummary, MailCampaign, MailCampaignWorkload, MailEnrollment, MailEnrollmentBatch } from "@/lib/api";
@@ -52,6 +53,8 @@ export function MailCampaignLeadsTab({
       </div>
 
       {workload && <MailCampaignWorkloadSummary workload={workload} />}
+
+      {campaign.status !== "draft" && <MailCampaignExecutionIssuesPanel campaignId={campaign.mail_campaign_id} />}
 
       {campaign.status === "draft" ? (
         <Card>

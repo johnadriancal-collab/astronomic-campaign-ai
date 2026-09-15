@@ -64,6 +64,7 @@ from app.models.mail import (
     MailSequenceStep,
 )
 from app.models.mailbox import Mailbox, MailboxSendPolicy, MailboxStatus
+from app.repositories.crm_contact_store import CrmContactStore, MemoryCrmContactStore
 from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
@@ -72,6 +73,7 @@ from app.repositories.mail_suppression_store import MailSuppressionStore
 from app.repositories.mailbox_send_policy_store import MailboxSendPolicyStore
 from app.repositories.mailbox_store import MailboxStore
 from app.services.activity_log_service import ActivityLogService
+from app.services.mail_personalization import contact_personalization_variables, render_mail_template
 from app.services.mail_scheduler import compute_eligible_at, is_within_window, resolve_next_send_time
 from app.services.mail_unsubscribe_composition import PublicOriginNotConfiguredError, compose_outbound_email
 from app.services.mailbox_service import MailboxCredentialMissingError, MailboxNotFound
@@ -704,6 +706,7 @@ class MailSendingService:
         policy_store: MailboxSendPolicyStore,
         suppression_store: MailSuppressionStore,
         activity_log: ActivityLogService,
+        crm_contact_store: CrmContactStore | None = None,
     ):
         self.campaign_store = campaign_store
         self.enrollment_store = enrollment_store
@@ -713,6 +716,19 @@ class MailSendingService:
         self.policy_store = policy_store
         self.suppression_store = suppression_store
         self.activity_log = activity_log
+        # P0 personalization fix (2026-09-15) -- the ONLY new dependency
+        # this required. Used solely to resolve {{first_name}}/
+        # {{last_name}}/{{company}} against the enrolled Contact's
+        # CURRENT data at render time (never a stale enrollment-time
+        # snapshot) -- see mail_personalization.py's own docstring.
+        # Optional (defaults to an empty in-memory store, matching this
+        # codebase's existing CrmService()-style convention) so the ~19
+        # existing tests that construct this service directly -- almost
+        # all of them exercising something OTHER than personalization,
+        # with plain token-free step bodies -- keep passing unmodified:
+        # an unresolved contact renders to {} variables, and a template
+        # with no {{tokens}} at all renders unchanged regardless.
+        self.crm_contact_store = crm_contact_store or MemoryCrmContactStore()
 
     # --- Mailbox send policy -------------------------------------------------
 
@@ -1767,14 +1783,29 @@ class MailSendingService:
         step = prepared_step
 
         try:
-            composed = compose_outbound_email(snapshot_body=step.body, recipient_email=enrollment.email_at_enrollment)
+            # P0 personalization fix (2026-09-15): resolve {{first_name}}/
+            # {{last_name}}/{{company}} against the Contact's CURRENT data
+            # -- fresh on every attempt (including a retry), never cached
+            # from an earlier attempt or from enrollment-time. A missing
+            # allowed variable raises MailPersonalizationError (a
+            # ValueError) here, caught by the same except below and
+            # routed by _handle_prepare_failure()'s existing ValueError
+            # branch to a permanent step+enrollment FAILURE -- this can
+            # NEVER reach sender.prepare()/send_prepared(), so a literal
+            # "{{first_name}}" can never be sent. See
+            # mail_personalization.py's own module docstring.
+            contact = await self.crm_contact_store.get(enrollment.crm_contact_id)
+            variables = contact_personalization_variables(contact)
+            rendered_subject = render_mail_template(step.subject, variables)
+            rendered_body = render_mail_template(step.body, variables)
+            composed = compose_outbound_email(snapshot_body=rendered_body, recipient_email=enrollment.email_at_enrollment)
         except Exception as e:
             return await self._handle_prepare_failure(step, enrollment, campaign.mail_campaign_id, e, now)
 
         prep_request = MailSendRequest(
             mailbox=mailbox,
             to_email=enrollment.email_at_enrollment,
-            subject=step.subject,
+            subject=rendered_subject,
             body=composed.body,
             html_body=composed.html_body,
             rfc_message_id=rfc_message_id,
