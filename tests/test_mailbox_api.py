@@ -219,7 +219,9 @@ def test_gmail_send_upgrade_start_requests_base_scopes_plus_gmail_send(client, o
 
     client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
 
-    assert oauth_client.requested_scopes == [("openid", "email", "profile", "https://www.googleapis.com/auth/gmail.send")]
+    assert oauth_client.requested_scopes == [
+        ("openid", "email", "profile", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.metadata")
+    ]
 
 
 def test_gmail_send_upgrade_start_never_mutates_the_mailbox(client):
@@ -320,3 +322,116 @@ def test_connecting_and_disconnecting_never_logs_the_refresh_token(client):
     for message in logged_messages:
         assert "fake-refresh-token" not in message
         assert "fake-access-token" not in message
+
+
+# --- Gmail read-only diagnostics (2026-09-15) --------------------------------
+
+
+class FakeGmailThreadReaderClient:
+    def __init__(self, thread_result=None, message_result=None, raise_error=None):
+        self.thread_result = thread_result
+        self.message_result = message_result
+        self.raise_error = raise_error
+        self.thread_calls: list[dict] = []
+        self.message_calls: list[dict] = []
+
+    async def get_thread(self, *, access_token: str, thread_id: str) -> dict:
+        self.thread_calls.append({"access_token": access_token, "thread_id": thread_id})
+        if self.raise_error is not None:
+            raise self.raise_error
+        return self.thread_result
+
+    async def get_message(self, *, access_token: str, message_id: str) -> dict:
+        self.message_calls.append({"access_token": access_token, "message_id": message_id})
+        if self.raise_error is not None:
+            raise self.raise_error
+        return self.message_result
+
+
+def _message_shape(message_id: str, thread_id: str, headers: dict) -> dict:
+    return {"id": message_id, "threadId": thread_id, "payload": {"headers": [{"name": k, "value": v} for k, v in headers.items()]}}
+
+
+def test_gmail_diagnostic_thread_returns_headers_only_never_body(client, monkeypatch):
+    mailbox = _connect(client)
+    fake_reader = FakeGmailThreadReaderClient(
+        thread_result={
+            "id": "thr-1",
+            "messages": [
+                _message_shape("msg-1", "thr-1", {"Subject": "Hi", "Message-ID": "<a@x.com>"}),
+                _message_shape("msg-2", "thr-1", {"Subject": "Hi", "Message-ID": "<b@x.com>", "In-Reply-To": "<a@x.com>"}),
+            ],
+        }
+    )
+    monkeypatch.setattr("app.api.mailboxes.GmailThreadReaderClient", lambda: fake_reader)
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/gmail-diagnostic/threads/thr-1")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["thread_id"] == "thr-1"
+    assert body["message_count"] == 2
+    assert body["messages"][0]["headers"]["Subject"] == "Hi"
+    assert body["messages"][1]["headers"]["In-Reply-To"] == "<a@x.com>"
+    # Structurally the only keys ever present -- gmail.metadata cannot
+    # return message body/snippet content at all, and extract_headers()
+    # only ever pulls the fixed METADATA_HEADERS allowlist.
+    for message in body["messages"]:
+        assert set(message.keys()) == {"id", "threadId", "headers"}
+    assert fake_reader.thread_calls == [{"access_token": "fake-refreshed-access-token", "thread_id": "thr-1"}]
+
+
+def test_gmail_diagnostic_message_returns_headers_only(client, monkeypatch):
+    mailbox = _connect(client)
+    fake_reader = FakeGmailThreadReaderClient(
+        message_result=_message_shape("msg-2", "thr-1", {"Subject": "Hi", "From": "a@x.com"})
+    )
+    monkeypatch.setattr("app.api.mailboxes.GmailThreadReaderClient", lambda: fake_reader)
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/gmail-diagnostic/messages/msg-2")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"id": "msg-2", "threadId": "thr-1", "headers": {"Subject": "Hi", "From": "a@x.com"}}
+
+
+def test_gmail_diagnostic_missing_mailbox_returns_404(client):
+    resp = client.get("/mailboxes/does-not-exist/gmail-diagnostic/threads/thr-1")
+    assert resp.status_code == 404
+
+
+def test_gmail_diagnostic_invalid_grant_returns_409(client, oauth_client):
+    mailbox = _connect(client)
+    oauth_client.refresh_outcome = "invalid_grant"
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/gmail-diagnostic/threads/thr-1")
+
+    assert resp.status_code == 409
+
+
+def test_gmail_diagnostic_gmail_read_error_returns_502(client, monkeypatch):
+    from app.google.gmail_thread_reader_client import GmailReadNotFoundError
+
+    mailbox = _connect(client)
+    fake_reader = FakeGmailThreadReaderClient(raise_error=GmailReadNotFoundError("no such thread"))
+    monkeypatch.setattr("app.api.mailboxes.GmailThreadReaderClient", lambda: fake_reader)
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/gmail-diagnostic/threads/does-not-exist")
+
+    assert resp.status_code == 502
+
+
+def test_gmail_diagnostic_never_logs_the_access_token(client, monkeypatch):
+    mailbox = _connect(client)
+    fake_reader = FakeGmailThreadReaderClient(thread_result={"id": "thr-1", "messages": []})
+    monkeypatch.setattr("app.api.mailboxes.GmailThreadReaderClient", lambda: fake_reader)
+
+    logged_messages: list[str] = []
+    sink_id = loguru_logger.add(lambda message: logged_messages.append(str(message)), level="DEBUG")
+    try:
+        client.get(f"/mailboxes/{mailbox['mailbox_id']}/gmail-diagnostic/threads/thr-1")
+    finally:
+        loguru_logger.remove(sink_id)
+
+    for message in logged_messages:
+        assert "fake-refreshed-access-token" not in message

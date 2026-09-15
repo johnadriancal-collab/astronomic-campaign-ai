@@ -78,7 +78,7 @@ def test_mail_sending_engine_enabled_still_defaults_false():
     assert Settings.model_fields["mail_sending_engine_enabled"].default is False
 
 
-def test_mailboxes_api_still_declares_only_the_five_approved_routes():
+def test_mailboxes_api_still_declares_only_the_seven_approved_routes():
     """Re-asserted here (duplicate of a B1 check in
     tests/test_mailbox_sending_safety.py) so a future PR that touches
     app/api/mailboxes.py as part of Gmail-sending work trips THIS file
@@ -86,7 +86,13 @@ def test_mailboxes_api_still_declares_only_the_five_approved_routes():
     reviewed, and still incapable of sending anything itself -- see
     start_gmail_send_upgrade()'s own docstring) only ever REQUESTS an
     additional OAuth scope; the actual scope/status change still happens
-    exclusively inside the unchanged callback route below."""
+    exclusively inside the unchanged callback route below. Routes 6-7
+    (2026-09-15, also deliberate and reviewed) are READ-ONLY Gmail
+    diagnostics (gmail-diagnostic/threads/{id}, gmail-diagnostic/
+    messages/{id}) -- see app/google/gmail_thread_reader_client.py's own
+    module docstring for why they exist; neither can send, queue, or
+    activate anything, same "incapable of sending" property as every
+    other route in this file."""
     source = Path("app/api/mailboxes.py").read_text()
     routes = re.findall(r'@router\.(get|post|patch|delete)\("([^"]*)"', source)
     assert set(routes) == {
@@ -95,6 +101,8 @@ def test_mailboxes_api_still_declares_only_the_five_approved_routes():
         ("get", "/{mailbox_id}/google/gmail-send/start"),
         ("get", "/google/callback"),
         ("post", "/{mailbox_id}/disconnect"),
+        ("get", "/{mailbox_id}/gmail-diagnostic/threads/{thread_id}"),
+        ("get", "/{mailbox_id}/gmail-diagnostic/messages/{message_id}"),
     }
 
 
@@ -109,16 +117,26 @@ def test_gmail_send_endpoint_url_appears_only_in_the_gmail_api_client_module():
     """The literal Gmail send endpoint now legitimately exists in this
     codebase (app/google/gmail_api_client.py) -- but ONLY there. Anywhere
     else it appeared would be a second, unaudited path capable of
-    reaching Gmail."""
+    reaching Gmail. app/google/gmail_thread_reader_client.py
+    (2026-09-15) is a SEPARATE, deliberate, reviewed exception -- a
+    read-only client for users.threads.get/users.messages.get, structurally
+    incapable of sending (see that module's own docstring): no method on
+    it constructs or POSTs a message, and the messages/send substring
+    below still catches any actual send capability leaking in anywhere,
+    including that file."""
     hits = []
-    allowed = Path("app/google/gmail_api_client.py")
+    allowed = {Path("app/google/gmail_api_client.py"), Path("app/google/gmail_thread_reader_client.py")}
     for path in Path("app").rglob("*.py"):
-        if path == allowed:
+        if path in allowed:
             continue
         source = path.read_text()
         if "messages/send" in source or "googleapis.com/gmail" in source:
             hits.append(str(path))
     assert hits == []
+    # The one thing that must remain true even for the allowed read
+    # client: it must never contain the send endpoint's own path shape.
+    reader_source = Path("app/google/gmail_thread_reader_client.py").read_text()
+    assert "messages/send" not in reader_source
 
 
 def test_gmail_sender_module_has_no_module_level_instances():

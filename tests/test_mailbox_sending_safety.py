@@ -92,7 +92,10 @@ def test_mailboxes_api_has_no_send_queue_or_activate_route():
         assert forbidden not in source
 
 
-def test_mailboxes_api_declares_only_the_five_approved_routes():
+def test_mailboxes_api_declares_only_the_seven_approved_routes():
+    """Routes 6-7 (2026-09-15) are READ-ONLY Gmail diagnostics -- see
+    tests/test_gmail_sending_safety.py's own copy of this check for the
+    full rationale."""
     source = Path("app/api/mailboxes.py").read_text()
     routes = re.findall(r'@router\.(get|post|patch|delete)\("([^"]*)"', source)
     assert set(routes) == {
@@ -101,6 +104,8 @@ def test_mailboxes_api_declares_only_the_five_approved_routes():
         ("get", "/{mailbox_id}/google/gmail-send/start"),
         ("get", "/google/callback"),
         ("post", "/{mailbox_id}/disconnect"),
+        ("get", "/{mailbox_id}/gmail-diagnostic/threads/{thread_id}"),
+        ("get", "/{mailbox_id}/gmail-diagnostic/messages/{message_id}"),
     }
 
 

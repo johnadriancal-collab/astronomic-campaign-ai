@@ -46,6 +46,24 @@ SCOPES = ("openid", "email", "profile")
 # grants nothing by itself.
 GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 
+# 2026-09-15 -- the ONE read scope this codebase is authorized to ever
+# request, added specifically to settle a real threading-verification
+# contradiction (correct outbound headers + Gmail's own send-response
+# threadId, vs. a persistent two-conversation UI result) that cannot be
+# resolved further without reading Gmail's own server-side thread state.
+# gmail.metadata grants headers/labels only, never message body or
+# attachments -- the narrowest scope that can answer "what does Gmail
+# actually think this thread contains," and deliberately NOT
+# gmail.readonly (broader, reads full content this codebase has no
+# present use for). Google classifies BOTH gmail.metadata and
+# gmail.readonly as Restricted scopes -- a heavier verification tier
+# than gmail.send's Sensitive classification if this app is ever taken
+# to External + Production for it (not pursued right now -- see
+# MailboxService.begin_gmail_send_upgrade()'s own docstring). Requesting
+# it is still entirely MailboxService's decision -- this constant
+# existing here grants nothing by itself.
+GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
+
 
 class GoogleOAuthNotConfiguredError(Exception):
     """GOOGLE_OAUTH_CLIENT_ID/CLIENT_SECRET/REDIRECT_URI aren't all set --

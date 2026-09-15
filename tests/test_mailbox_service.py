@@ -17,6 +17,7 @@ import pytest_asyncio
 from cryptography.fernet import Fernet
 
 from app.google.oauth_client import (
+    GMAIL_METADATA_SCOPE,
     GMAIL_SEND_SCOPE,
     SCOPES,
     GoogleOAuthNotConfiguredError,
@@ -630,7 +631,7 @@ async def test_upgrade_requests_exact_desired_scopes(connected_mailbox_service, 
     service, mailbox = connected_mailbox_service
     await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
 
-    assert oauth_client.requested_scopes == [(*SCOPES, GMAIL_SEND_SCOPE)]
+    assert oauth_client.requested_scopes == [(*SCOPES, GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE)]
 
 
 async def test_upgrade_for_unknown_mailbox_raises(service):
@@ -677,7 +678,7 @@ async def test_upgrade_authorize_url_uses_the_configured_production_redirect_uri
 async def test_upgrade_state_is_single_use(connected_mailbox_service, oauth_client):
     service, mailbox = connected_mailbox_service
     oauth_client.userinfo_response = {"sub": mailbox.google_user_id, "email": mailbox.email, "name": "Victoria Bennett"}
-    oauth_client.token_response = {"access_token": "fake-access-token", "refresh_token": "new-refresh-token", "scope": "openid email profile https://www.googleapis.com/auth/gmail.send"}
+    oauth_client.token_response = {"access_token": "fake-access-token", "refresh_token": "new-refresh-token", "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata"}
 
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]
@@ -710,7 +711,7 @@ async def test_upgrade_succeeds_when_same_google_account_authorizes(connected_ma
     oauth_client.token_response = {
         "access_token": "fake-access-token",
         "refresh_token": "new-refresh-token",
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata",
     }
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]
@@ -729,7 +730,7 @@ async def test_upgrade_with_wrong_google_account_is_rejected_with_zero_mutation(
     oauth_client.token_response = {
         "access_token": "fake-access-token",
         "refresh_token": "new-refresh-token",
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata",
     }
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]
@@ -796,7 +797,7 @@ async def test_upgrade_missing_refresh_token_does_not_destroy_existing_credentia
     oauth_client.token_response = {
         "access_token": "fake-access-token",
         # no refresh_token key at all
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata",
     }
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]
@@ -856,7 +857,7 @@ async def test_upgrade_credential_write_failure_leaves_mailbox_completely_untouc
     oauth_client.token_response = {
         "access_token": "fake-access-token",
         "refresh_token": "new-refresh-token",
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata",
     }
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]
@@ -892,7 +893,7 @@ async def test_upgrade_mailbox_write_failure_leaves_credential_upgraded_but_mail
     oauth_client.token_response = {
         "access_token": "fake-access-token",
         "refresh_token": "new-refresh-token",
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata",
     }
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]
@@ -929,7 +930,7 @@ async def test_successful_upgrade_still_preserves_the_previous_credential_for_re
     oauth_client.token_response = {
         "access_token": "fake-access-token",
         "refresh_token": "new-refresh-token",
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata",
     }
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]
@@ -1134,7 +1135,7 @@ async def test_upgrade_mismatch_error_never_contains_tokens_or_secrets(connected
     oauth_client.token_response = {
         "access_token": "fake-access-token",
         "refresh_token": "new-refresh-token",
-        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata",
     }
     url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
     state = url.split("state=")[1]

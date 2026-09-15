@@ -28,9 +28,21 @@ from fastapi.responses import RedirectResponse
 
 from app.config import settings
 from app.dependencies import get_mailbox_service
-from app.google.oauth_client import GoogleOAuthNotConfiguredError, GoogleTokenExchangeError, GoogleUserinfoError
+from app.google.oauth_client import (
+    GoogleOAuthNotConfiguredError,
+    GoogleRefreshTokenInvalidError,
+    GoogleTokenExchangeError,
+    GoogleTokenRefreshError,
+    GoogleUserinfoError,
+)
+from app.google.gmail_thread_reader_client import (
+    GmailReadError,
+    GmailThreadReaderClient,
+    extract_headers,
+)
 from app.models.mailbox import Mailbox
 from app.services.mailbox_service import (
+    MailboxCredentialMissingError,
     MailboxNotFound,
     MailboxOAuthAccountMismatchError,
     MailboxOAuthDeniedError,
@@ -133,3 +145,65 @@ async def disconnect_mailbox(mailbox_id: str, service: MailboxService = Depends(
         return await service.disconnect_mailbox(mailbox_id)
     except MailboxNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Gmail read-only diagnostics (2026-09-15, temporary) ---------------------
+#
+# Added specifically to settle a real threading-verification contradiction
+# (AstroHub's own outbound pipeline is provably correct end-to-end -- see
+# tests/test_mail_threading_gmail_boundary.py -- yet Gmail's UI persists in
+# showing two separate conversations for a controlled test). These two
+# routes are the ONLY way to ask Gmail's server what it actually persisted,
+# since no reply-detection capability exists yet to do this automatically.
+# Requires the mailbox to have been reconnected with gmail.metadata (see
+# begin_gmail_send_upgrade()) -- MailboxOAuthScopeNotGrantedError-shaped
+# 403s from Gmail itself are the signal that hasn't happened yet. Session-
+# gated like every other route in this router; deliberately NOT reachable
+# via the admin/service operator token (see app/session_auth_middleware.py's
+# own explicit exclusion list: "everything under /mailboxes/* except the
+# bare GET list"). Returns headers only (From/To/Subject/Message-ID/
+# In-Reply-To/References) -- gmail.metadata cannot return body/snippet
+# content even if this code asked for it, and extract_headers() only ever
+# pulls the fixed METADATA_HEADERS allowlist regardless.
+
+
+async def _refresh_access_token_or_502(mailbox_id: str, service: MailboxService) -> str:
+    try:
+        return await service.refresh_mailbox_access_token(mailbox_id)
+    except MailboxNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except MailboxCredentialMissingError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except GoogleRefreshTokenInvalidError:
+        raise HTTPException(status_code=409, detail="This mailbox needs to be reconnected (Google reports its grant is no longer valid).")
+    except GoogleTokenRefreshError:
+        raise HTTPException(status_code=502, detail="Could not refresh a Gmail access token for this mailbox.")
+
+
+@router.get("/{mailbox_id}/gmail-diagnostic/threads/{thread_id}")
+async def gmail_diagnostic_get_thread(mailbox_id: str, thread_id: str, service: MailboxService = Depends(get_mailbox_service)):
+    access_token = await _refresh_access_token_or_502(mailbox_id, service)
+    try:
+        data = await GmailThreadReaderClient().get_thread(access_token=access_token, thread_id=thread_id)
+    except GmailReadError as e:
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
+
+    return {
+        "thread_id": data["id"],
+        "message_count": len(data.get("messages", [])),
+        "messages": [
+            {"id": m.get("id"), "threadId": m.get("threadId"), "headers": extract_headers(m)}
+            for m in data.get("messages", [])
+        ],
+    }
+
+
+@router.get("/{mailbox_id}/gmail-diagnostic/messages/{message_id}")
+async def gmail_diagnostic_get_message(mailbox_id: str, message_id: str, service: MailboxService = Depends(get_mailbox_service)):
+    access_token = await _refresh_access_token_or_502(mailbox_id, service)
+    try:
+        data = await GmailThreadReaderClient().get_message(access_token=access_token, message_id=message_id)
+    except GmailReadError as e:
+        raise HTTPException(status_code=502, detail=f"{type(e).__name__}: {e}")
+
+    return {"id": data["id"], "threadId": data["threadId"], "headers": extract_headers(data)}
