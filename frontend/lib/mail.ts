@@ -100,6 +100,8 @@ export function mailEnrollmentStatusLabel(status: MailEnrollmentStatus): string 
       return "Suppressed";
     case "failed":
       return "Failed";
+    case "replied":
+      return "Replied";
     default:
       return status;
   }
@@ -117,6 +119,8 @@ export function mailEnrollmentStatusBadgeClass(status: MailEnrollmentStatus): st
       return "bg-secondary text-muted-foreground";
     case "paused":
       return "bg-amber-100 text-amber-800";
+    case "replied":
+      return "bg-emerald-100 text-emerald-800";
     case "pending":
     default:
       return "bg-secondary text-muted-foreground";

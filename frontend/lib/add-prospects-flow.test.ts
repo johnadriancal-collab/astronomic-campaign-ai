@@ -69,7 +69,9 @@ test("mailEnrollmentBatchSourceLabel", () => {
 
 test("WORKLOAD_FIELD_LABELS covers exactly the real backend fields, never total/mail_campaign_id, never an invented metric", () => {
   const keys = WORKLOAD_FIELD_LABELS.map((f) => f.key).sort();
-  assert.deepEqual(keys, ["active", "completed", "failed", "paused", "pending", "suppressed"]);
+  // "replied" (2026-09-15 Reply Detection V1) is the seventh real
+  // MailCampaignWorkload field -- see that model's own docstring.
+  assert.deepEqual(keys, ["active", "completed", "failed", "paused", "pending", "replied", "suppressed"]);
 });
 
 // --- CSV flow reducer: idempotency key stability --------------------------

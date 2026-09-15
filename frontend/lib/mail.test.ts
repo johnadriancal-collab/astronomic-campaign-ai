@@ -89,11 +89,12 @@ test("mailEnrollmentStatusLabel", () => {
   assert.equal(mailEnrollmentStatusLabel("completed"), "Completed");
   assert.equal(mailEnrollmentStatusLabel("suppressed"), "Suppressed");
   assert.equal(mailEnrollmentStatusLabel("failed"), "Failed");
+  assert.equal(mailEnrollmentStatusLabel("replied"), "Replied");
 });
 
 test("mailEnrollmentStatusBadgeClass gives every status its own real class, never silently reusing suppressed's", () => {
   const seen = new Set<string>();
-  for (const status of ["pending", "active", "paused", "completed", "suppressed", "failed"] as const) {
+  for (const status of ["pending", "active", "paused", "completed", "suppressed", "failed", "replied"] as const) {
     seen.add(mailEnrollmentStatusBadgeClass(status));
   }
   // Not asserting every value is unique (paused/pending intentionally share
@@ -103,6 +104,9 @@ test("mailEnrollmentStatusBadgeClass gives every status its own real class, neve
   assert.ok(seen.size >= 3);
   assert.equal(mailEnrollmentStatusBadgeClass("suppressed"), mailEnrollmentStatusBadgeClass("failed"));
   assert.notEqual(mailEnrollmentStatusBadgeClass("active"), mailEnrollmentStatusBadgeClass("pending"));
+  // A reply is a distinct, non-negative outcome -- must never collapse into
+  // the same destructive treatment as suppressed/failed.
+  assert.notEqual(mailEnrollmentStatusBadgeClass("replied"), mailEnrollmentStatusBadgeClass("suppressed"));
 });
 
 test("mailSuppressionReasonLabel maps every reason", () => {

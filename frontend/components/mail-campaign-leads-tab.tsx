@@ -81,14 +81,21 @@ export function MailCampaignLeadsTab({
               {enrollments.map((enrollment) => (
                 <div key={enrollment.enrollment_id} className="flex items-center justify-between gap-3 px-6 py-2.5 text-sm">
                   <span className="truncate">{enrollment.email_at_enrollment}</span>
-                  <span
-                    className={cn(
-                      "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
-                      mailEnrollmentStatusBadgeClass(enrollment.status)
-                    )}
-                  >
-                    {mailEnrollmentStatusLabel(enrollment.status)}
-                  </span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {enrollment.status === "replied" && enrollment.replied_at ? (
+                      <span className="text-xs text-muted-foreground">
+                        {new Date(enrollment.replied_at).toLocaleString()}
+                      </span>
+                    ) : null}
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
+                        mailEnrollmentStatusBadgeClass(enrollment.status)
+                      )}
+                    >
+                      {mailEnrollmentStatusLabel(enrollment.status)}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>

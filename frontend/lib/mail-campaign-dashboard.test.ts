@@ -100,8 +100,13 @@ test("the Leads tab gives Draft campaigns an accurate empty state instead of an 
   assert.match(LEADS_TAB_SOURCE, /enrollments is created when this campaign is marked Ready/);
 });
 
-test("the Leads tab never invents a send/open/reply enrollment state", () => {
-  for (const forbidden of [/\bsent\b/i, /\bopened\b/i, /\breplied\b/i, /\bclicked\b/i]) {
+test("the Leads tab never invents a send/open/click enrollment state", () => {
+  // "replied" is deliberately excluded from this forbidden list (2026-09-15
+  // Reply Detection V1) -- it is now a REAL MailEnrollmentStatus value,
+  // backed by a real MailReply row and MailEnrollment.replied_at, never a
+  // fabricated engagement metric. sent/opened/clicked remain genuinely
+  // unimplemented and stay forbidden.
+  for (const forbidden of [/\bsent\b/i, /\bopened\b/i, /\bclicked\b/i]) {
     assert.doesNotMatch(LEADS_TAB_SOURCE, forbidden);
   }
 });

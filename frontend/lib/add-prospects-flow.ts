@@ -57,11 +57,15 @@ export function mailEnrollmentBatchSourceLabel(source: MailEnrollmentBatchSource
 
 // --- Workload -- real backend fields only, `total` shown separately -------
 
-export const WORKLOAD_FIELD_LABELS: { key: "pending" | "active" | "paused" | "completed" | "suppressed" | "failed"; label: string }[] = [
+export const WORKLOAD_FIELD_LABELS: {
+  key: "pending" | "active" | "paused" | "completed" | "suppressed" | "failed" | "replied";
+  label: string;
+}[] = [
   { key: "active", label: "Active" },
   { key: "pending", label: "Pending" },
   { key: "paused", label: "Paused" },
   { key: "completed", label: "Completed" },
+  { key: "replied", label: "Replied" },
   { key: "suppressed", label: "Suppressed" },
   { key: "failed", label: "Failed" },
 ];

@@ -1234,7 +1234,16 @@ export const MAIL_TEMPLATE_VARIABLES = ["first_name", "last_name", "company"] as
 // (exactly what Add Prospects against an ACTIVE/PAUSED campaign produces)
 // would have been mislabeled "Pending" by the old binary label helper --
 // see mailEnrollmentStatusLabel/mailEnrollmentStatusBadgeClass in mail.ts.
-export type MailEnrollmentStatus = "pending" | "active" | "paused" | "completed" | "suppressed" | "failed";
+// "replied" (2026-09-15 reply detection V1) added alongside the backend's
+// MailEnrollmentStatus.REPLIED -- see MailReplyDetectionService's docstring.
+export type MailEnrollmentStatus =
+  | "pending"
+  | "active"
+  | "paused"
+  | "completed"
+  | "suppressed"
+  | "failed"
+  | "replied";
 
 export interface MailEnrollment {
   enrollment_id: string;
@@ -1249,6 +1258,9 @@ export interface MailEnrollment {
   assigned_mailbox_id?: string | null;
   paused_reason?: string | null;
   batch_id?: string | null;
+  // Set once, the moment reply detection records a MailReply for this
+  // enrollment -- see MailEnrollment.replied_at's backend docstring.
+  replied_at?: string | null;
 }
 
 // Pure, read-only -- calling this never enrolls anyone, queues anything, or
@@ -1397,6 +1409,7 @@ export interface MailCampaignWorkload {
   completed: number;
   suppressed: number;
   failed: number;
+  replied: number;
 }
 
 export function getMailCampaignWorkload(mailCampaignId: string): Promise<MailCampaignWorkload> {

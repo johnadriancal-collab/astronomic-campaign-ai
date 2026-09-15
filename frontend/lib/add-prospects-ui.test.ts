@@ -275,7 +275,11 @@ test("no Open/Reply/Bounce/Delivered rate or Journeys UI appears anywhere in the
 test("the Leads tab still renders real MailEnrollment identity/status fields only, no invented ones", () => {
   assert.match(LEADS_TAB_SOURCE, /enrollment\.email_at_enrollment/);
   assert.match(LEADS_TAB_SOURCE, /enrollment\.status/);
-  assert.doesNotMatch(stripComments(LEADS_TAB_SOURCE), /opened_at|replied_at|bounced_at|delivered_at/);
+  // replied_at is deliberately excluded from this forbidden list (2026-09-15
+  // Reply Detection V1) -- it is now a REAL MailEnrollment field, backed by
+  // MailReply. opened_at/bounced_at/delivered_at remain genuinely
+  // unimplemented and stay forbidden.
+  assert.doesNotMatch(stripComments(LEADS_TAB_SOURCE), /opened_at|bounced_at|delivered_at/);
 });
 
 // --- Result counts: real Stage 3 semantics, suppression as subset ---------
