@@ -25,6 +25,15 @@ already used by CSV import/ITF; writing Luma's raw payload there would
 silently evict whichever pipeline wrote it last, destroying THEIR
 provenance). `source` is set (via apply_import_mapping's existing
 create-only rule) only on a brand-new contact, to "luma".
+
+Email verification (2026-09-16): a GENUINE Luma self-registration (the
+guest personally submitted Luma's own registration form for their own
+email -- see _is_genuine_luma_self_registration's own docstring for the
+exact evidence used, since `source == "luma"` by itself is NOT sufficient
+proof of this) sets `email_status = "Verified"` in mapped_fields, which
+then rides the same generic fill-only-if-currently-empty merge as every
+other field here -- never overwrites an already-populated email_status
+(Verified, Invalid, or any other value), on either create or update.
 """
 
 import asyncio
@@ -157,6 +166,77 @@ _INVESTOR_SIGNAL_FIELD_KEYS: tuple[str, ...] = (
 )
 _INVESTOR_ROLE_TARGET_FIELD_KEY = "custom:role"
 _INVESTOR_ROLE_VALUE = "Investor"
+
+# Email verification (2026-09-16) -- see _is_genuine_luma_self_registration's
+# own docstring for the full reasoning. `approval_status` values where Luma
+# has recorded that THIS guest personally submitted its own registration
+# form -- APPROVED/PENDING_APPROVAL/WAITLIST all mean the guest went through
+# Luma's registration flow themselves, differing only in whether/how the
+# host has since acted on it. Deliberately excludes INVITED (a host added
+# this guest; they have not necessarily supplied anything themselves yet),
+# DECLINED (never completed a registration), and SESSION (undocumented in
+# Luma's own API docs -- never guessed at, fails closed).
+_LUMA_SELF_REGISTERED_APPROVAL_STATUSES: frozenset[str] = frozenset(
+    {LumaApprovalStatus.APPROVED.value, LumaApprovalStatus.PENDING_APPROVAL.value, LumaApprovalStatus.WAITLIST.value}
+)
+
+
+def _is_genuine_luma_self_registration(guest: dict) -> bool:
+    """True iff this guest payload represents the ATTENDEE THEMSELVES
+    completing Luma's own registration flow -- not a host adding/inviting
+    them without their own participation. `source == "luma"` alone is NOT
+    sufficient evidence of this (see this module's own docstring: a Contact
+    can carry Luma provenance through more than one path); the strongest
+    signal actually present in a Luma guest payload is `approval_status`
+    (see _LUMA_SELF_REGISTERED_APPROVAL_STATUSES above) combined with a
+    real `registered_at` timestamp -- Luma only stamps that once an actual
+    registration event occurred, so its presence rules out a host-invited
+    guest who was added but never themselves acted."""
+    approval_status = guest.get("approval_status")
+    if approval_status not in _LUMA_SELF_REGISTERED_APPROVAL_STATUSES:
+        return False
+    return bool(guest.get("registered_at"))
+
+
+def _is_genuine_self_registration_record(registration: LumaRegistration) -> bool:
+    """Same rule as _is_genuine_luma_self_registration() above, applied to
+    an already-STORED LumaRegistration (typed `approval_status`/
+    `registered_at`, not a raw guest payload dict) -- used by the email-
+    verification backfill eligibility check below, which reads persisted
+    registrations rather than live webhook payloads."""
+    return registration.approval_status.value in _LUMA_SELF_REGISTERED_APPROVAL_STATUSES and registration.registered_at is not None
+
+
+# Email verification backfill (2026-09-16) -- audit/eligibility ONLY, no
+# write path here. `EMAIL_STATUS_BLANK_LIKE_VALUES` is the safe, unambiguous
+# subset the forward-ingestion fix already upgrades automatically (a truly
+# empty field): the SAME set is used here so a proposed backfill's
+# eligibility exactly matches what the live rule would have done had it
+# existed at the time. A non-blank value the field already holds (e.g.
+# "Unverified", a legacy "valid"/"Valid", or "Invalid") is deliberately NOT
+# included -- upgrading those is a separate, not-yet-approved decision (see
+# this module's own docstring); such contacts must be reported as a
+# distinct category, never silently swept into "eligible."
+EMAIL_STATUS_BLANK_LIKE_VALUES: frozenset[str | None] = frozenset({None, ""})
+
+
+def is_eligible_for_luma_email_verification_backfill(
+    contact: CrmContact, registrations: list[LumaRegistration]
+) -> bool:
+    """Pure, read-only eligibility check for the PROPOSED (not yet
+    approved/run) historical backfill: True iff this contact has a real
+    email on file, its CURRENT email_status is blank/null (see
+    EMAIL_STATUS_BLANK_LIKE_VALUES -- never a non-blank value, however
+    weak), AND at least one of its own LumaRegistration rows is a genuine
+    self-registration (_is_genuine_self_registration_record). Idempotent by
+    construction: once email_status is set to anything non-blank (by this
+    rule or any other), this returns False for that contact forever after
+    -- there is no second condition that could make it eligible again."""
+    if not contact.email:
+        return False
+    if contact.email_status not in EMAIL_STATUS_BLANK_LIKE_VALUES:
+        return False
+    return any(_is_genuine_self_registration_record(r) for r in registrations)
 
 
 def _derive_location_summary(event_payload: dict) -> str | None:
@@ -815,6 +895,19 @@ class LumaSyncService:
         mapped_fields: dict[str, Any] = {"source": "luma"}
         if guest.get("user_email"):
             mapped_fields["email"] = guest["user_email"]
+            # 2026-09-16: a genuine Luma self-registration is authoritative
+            # proof this email address is real and reachable (the attendee
+            # supplied it themselves, through Luma's own registration flow,
+            # to receive event access) -- see _is_genuine_luma_self_
+            # registration's own docstring for exactly what counts as that
+            # evidence. Flows through apply_import_mapping()'s existing
+            # fill-only-if-currently-empty merge like every other field
+            # here: sets email_status on a brand-new contact, upgrades an
+            # EXISTING contact's blank/null email_status, and never touches
+            # an already-populated value (Verified, Invalid, or anything
+            # else) -- no separate/bespoke overwrite logic needed or added.
+            if _is_genuine_luma_self_registration(guest):
+                mapped_fields["email_status"] = "Verified"
         if guest.get("user_first_name"):
             mapped_fields["first_name"] = guest["user_first_name"]
         if guest.get("user_last_name"):

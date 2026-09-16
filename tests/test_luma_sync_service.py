@@ -15,7 +15,7 @@ import pytest_asyncio
 
 from app.models.activity import ActivityCategory
 from app.models.crm import CrmContact, CrmCustomFieldDefinition, CustomFieldType
-from app.models.luma import LumaApprovalStatus, LumaMatchStatus, LumaQuestionMapping
+from app.models.luma import LumaApprovalStatus, LumaMatchStatus, LumaQuestionMapping, LumaRegistration
 from app.repositories.crm_custom_field_store import MemoryCrmCustomFieldStore
 from app.repositories.luma_event_store import MemoryLumaEventStore
 from app.repositories.luma_question_mapping_store import MemoryLumaQuestionMappingStore
@@ -1754,9 +1754,16 @@ async def test_a_registration_whose_answer_already_matches_causes_zero_save_and_
     field_provenance write, and no luma.contact.enriched event -- not even
     a "provenance-only" one."""
     # first/last name pre-set to match the guest's own defaults (Alice
-    # Angel) so the generic mapping's own fill-only enrichment has nothing
-    # blank left to fill -- isolates this test to the self-report path.
-    existing = make_contact(email="alice@example.com", first_name="Alice", last_name="Angel", company="SameCo", title="SameTitle")
+    # Angel), and email_status pre-set to Verified (2026-09-16: this guest's
+    # default approval_status="approved" + registered_at would otherwise
+    # fill a currently-blank email_status, which is real, correct, but
+    # unrelated to what THIS test isolates) so the generic mapping's own
+    # fill-only enrichment has nothing blank left to fill -- isolates this
+    # test to the self-report path.
+    existing = make_contact(
+        email="alice@example.com", first_name="Alice", last_name="Angel", company="SameCo", title="SameTitle",
+        email_status="Verified",
+    )
     await crm_service.contact_store.create(existing)
     guest = make_guest(
         email="alice@example.com",
@@ -2478,3 +2485,214 @@ def test_engagement_linking_code_has_no_awareness_of_luma_registrations_or_parti
     source = (repo_root / "app" / "services" / "client_crm_service.py").read_text()
     for forbidden in ("LumaRegistration", "sync_luma_registration_to_engagement_participant", "LumaEngagementParticipantSyncService"):
         assert forbidden not in source
+
+
+# =====================================================================
+# Email verification (2026-09-16) -- a genuine Luma self-registration with
+# an email sets email_status="Verified", via the exact same generic
+# fill-only-if-currently-empty merge every other field here already uses.
+# Root cause this fixes: Francisco Terpolilli registered through Luma
+# (approval_status="pending_approval", a real registered_at) but his
+# email_status stayed blank, because _build_mapped_fields() never included
+# the key at all -- not a broken rule, a rule that was never wired up.
+# =====================================================================
+
+
+async def test_new_luma_self_registration_with_email_sets_verified_on_creation(luma_service, crm_service):
+    guest = make_guest(email="alice@example.com", approval_status="approved")
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact_outcome == "created"
+    assert result.contact.email_status == "Verified"
+
+
+async def test_existing_contact_with_blank_email_status_gets_upgraded_to_verified(luma_service, crm_service):
+    existing = make_contact(email="alice@example.com", email_status=None)
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(email="alice@example.com", approval_status="approved")
+
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact_outcome == "enriched"
+    assert "email_status" in result.changed_field_keys
+    assert result.contact.email_status == "Verified"
+
+
+async def test_existing_verified_email_status_is_never_rewritten(luma_service, crm_service):
+    existing = make_contact(email="alice@example.com", email_status="Verified")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(email="alice@example.com", approval_status="approved")
+
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "email_status" not in result.changed_field_keys
+    assert result.contact.email_status == "Verified"
+
+
+async def test_missing_email_never_produces_verified(luma_service, crm_service):
+    """A guest payload with no user_email at all can't supply email
+    verification evidence for an email that was never given -- confirmed
+    both on a brand-new contact (nothing to match/create against a blank
+    email at all, so this is a NEEDS_REVIEW/no-contact case) and, more
+    directly, via the pure gate itself never firing without an email
+    present in mapped_fields in the first place (see _build_mapped_fields:
+    the email_status branch is nested inside `if guest.get("user_email")`)."""
+    from app.services.luma_sync_service import _is_genuine_luma_self_registration
+
+    guest_no_email = make_guest(approval_status="approved")
+    guest_no_email["user_email"] = None
+    assert _is_genuine_luma_self_registration(guest_no_email) is True  # registration evidence itself is fine
+    # ...but _build_mapped_fields never even reaches the email_status branch
+    # without an email, since it's nested inside the `if user_email` guard.
+    mapped = await luma_service._build_mapped_fields(guest_no_email)
+    assert "email" not in mapped
+    assert "email_status" not in mapped
+
+
+async def test_non_luma_contact_flow_is_never_touched_by_this_rule(crm_service):
+    """A contact created through a completely different path (manual/CSV/
+    ITF, never through LumaSyncService at all) must never have its
+    email_status touched by anything in this module -- trivially true
+    since nothing in this file's code runs without a Luma guest event, but
+    asserted explicitly as a regression guard."""
+    contact = await crm_service.create_contact({"email": "bob@example.com", "email_status": None})
+    assert contact.email_status is None
+    reloaded = await crm_service.get_contact(contact.crm_contact_id)
+    assert reloaded.email_status is None
+
+
+async def test_generic_source_luma_without_qualifying_registration_evidence_does_not_upgrade(luma_service, crm_service):
+    """A host-INVITED guest (added to the event by the host; the person
+    has not necessarily supplied anything themselves) must NOT be treated
+    as email verification evidence, even though the resulting Contact still
+    gets source="luma" like any other Luma-sourced contact."""
+    guest = make_guest(email="alice@example.com", approval_status="invited")
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert result.contact.source == "luma"
+    assert result.contact.email_status is None
+
+
+async def test_declined_registration_does_not_upgrade_email_status(luma_service, crm_service):
+    guest = make_guest(email="alice@example.com", approval_status="declined")
+    result = await luma_service.process_guest_event(make_event(), guest)
+    assert result.contact.email_status is None
+
+
+async def test_approval_status_without_a_registered_at_timestamp_does_not_upgrade(luma_service, crm_service):
+    """Belt-and-suspenders: even a qualifying approval_status must be
+    paired with a real registered_at -- a payload shape Luma is not
+    expected to produce for a genuine registration, but this module never
+    trusts approval_status alone."""
+    guest = make_guest(email="alice@example.com", approval_status="approved")
+    guest["registered_at"] = None
+    result = await luma_service.process_guest_event(make_event(), guest)
+    assert result.contact.email_status is None
+
+
+async def test_explicit_invalid_email_status_is_never_overwritten_by_a_new_luma_registration(luma_service, crm_service):
+    """Deterministic conflict handling: an explicitly-set 'Invalid' (or any
+    other non-blank value) is a stronger, more specific fact than a fresh
+    Luma registration can override -- the generic fill-only-if-empty rule
+    already guarantees this with zero Luma-specific special-casing, and
+    this test proves it end-to-end for this exact field."""
+    existing = make_contact(email="alice@example.com", email_status="Invalid")
+    await crm_service.contact_store.create(existing)
+    guest = make_guest(email="alice@example.com", approval_status="approved")
+
+    result = await luma_service.process_guest_event(make_event(), guest)
+
+    assert "email_status" not in result.changed_field_keys
+    assert result.contact.email_status == "Invalid"
+
+
+async def test_francisco_terpolilli_production_equivalent_scenario(luma_service, crm_service):
+    """Recreates the exact real-world case that surfaced this bug: a brand
+    new Luma registration, approval_status="pending_approval" (not yet
+    approved by the host), a real registered_at, matching against a
+    contact with no prior email_status -- must end with Verified, not
+    blank."""
+    guest = make_guest(
+        guest_id="gst-francisco", email="frankpablote@gmail.com", first_name="Francisco", last_name="Terpolilli",
+        approval_status="pending_approval",
+    )
+    result = await luma_service.process_guest_event(make_event(event_id="evt-hive-asmbld-sf"), guest)
+
+    assert result.contact_outcome == "created"
+    assert result.contact.email == "frankpablote@gmail.com"
+    assert result.contact.email_status == "Verified"
+    assert result.contact.source == "luma"
+
+
+# --- Backfill eligibility (audit/proposal only -- no write path exists yet) ---
+
+
+def _make_registration(**overrides) -> LumaRegistration:
+    defaults = dict(
+        luma_guest_id="gst-1", luma_event_id="evt-1", approval_status=LumaApprovalStatus.APPROVED,
+        registered_at=_now(), synced_at=_now(), updated_at=_now(),
+    )
+    defaults.update(overrides)
+    return LumaRegistration(**defaults)
+
+
+def test_backfill_eligibility_true_for_blank_email_status_with_a_genuine_registration():
+    from app.services.luma_sync_service import is_eligible_for_luma_email_verification_backfill
+
+    contact = make_contact(email="alice@example.com", email_status=None)
+    registrations = [_make_registration(approval_status=LumaApprovalStatus.PENDING_APPROVAL)]
+    assert is_eligible_for_luma_email_verification_backfill(contact, registrations) is True
+
+
+def test_backfill_eligibility_false_once_email_status_is_already_set_idempotent():
+    from app.services.luma_sync_service import is_eligible_for_luma_email_verification_backfill
+
+    contact = make_contact(email="alice@example.com", email_status="Verified")
+    registrations = [_make_registration()]
+    assert is_eligible_for_luma_email_verification_backfill(contact, registrations) is False
+    # Re-checking after a hypothetical backfill already ran (email_status
+    # now set) proves the SAME check is naturally idempotent -- no separate
+    # "already processed" flag needed.
+    contact_after = contact.model_copy(update={"email_status": "Verified"})
+    assert is_eligible_for_luma_email_verification_backfill(contact_after, registrations) is False
+
+
+def test_backfill_eligibility_false_for_invited_only_registrations():
+    from app.services.luma_sync_service import is_eligible_for_luma_email_verification_backfill
+
+    contact = make_contact(email="alice@example.com", email_status=None)
+    registrations = [_make_registration(approval_status=LumaApprovalStatus.INVITED)]
+    assert is_eligible_for_luma_email_verification_backfill(contact, registrations) is False
+
+
+def test_backfill_eligibility_false_without_email():
+    from app.services.luma_sync_service import is_eligible_for_luma_email_verification_backfill
+
+    contact = make_contact(email=None, email_status=None)
+    registrations = [_make_registration()]
+    assert is_eligible_for_luma_email_verification_backfill(contact, registrations) is False
+
+
+def test_backfill_eligibility_false_for_a_non_blank_legacy_value_deliberately_excluded():
+    """"Unverified"/legacy "valid" are NOT auto-eligible under this
+    proposed rule -- upgrading those is a separate decision this backfill
+    deliberately does not make on its own (see this module's own
+    docstring); confirmed here so the eligibility function can never
+    silently expand its own scope."""
+    from app.services.luma_sync_service import is_eligible_for_luma_email_verification_backfill
+
+    for legacy_value in ("Unverified", "valid", "Valid"):
+        contact = make_contact(email="alice@example.com", email_status=legacy_value)
+        registrations = [_make_registration()]
+        assert is_eligible_for_luma_email_verification_backfill(contact, registrations) is False
+
+
+def test_backfill_eligibility_true_when_any_one_of_several_registrations_qualifies():
+    from app.services.luma_sync_service import is_eligible_for_luma_email_verification_backfill
+
+    contact = make_contact(email="alice@example.com", email_status=None)
+    registrations = [
+        _make_registration(luma_guest_id="gst-a", approval_status=LumaApprovalStatus.INVITED),
+        _make_registration(luma_guest_id="gst-b", approval_status=LumaApprovalStatus.WAITLIST),
+    ]
+    assert is_eligible_for_luma_email_verification_backfill(contact, registrations) is True

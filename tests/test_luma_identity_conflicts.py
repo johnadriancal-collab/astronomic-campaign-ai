@@ -114,7 +114,11 @@ async def test_linkedin_conflict_is_skipped_while_other_fields_still_enrich(luma
     # resolve this same structural question_type=="company" answer and add
     # "custom:field_provenance") stays completely inert here -- this
     # generic-mapping test is unaffected either way.
-    assert set(result.changed_field_keys) == {"company", "title", "custom:investor_type", "custom:role"}
+    # email_status: 2026-09-16 -- this guest's default approval_status=
+    # "approved" + registered_at qualifies as a genuine Luma self-
+    # registration, and `ours` starts with no email_status on file, so it
+    # gets filled to "Verified" like every other currently-blank field here.
+    assert set(result.changed_field_keys) == {"company", "title", "custom:investor_type", "custom:role", "email_status"}
     assert result.identity_conflicts == {"linkedin_url": other.crm_contact_id}
 
     # `other` is completely untouched -- no merge, no overwrite, no deletion.
@@ -272,8 +276,14 @@ async def test_enriched_event_excludes_the_conflicting_field(luma_service, crm_s
     await crm_service.contact_store.create(other)
     # first/last name pre-set to match the guest's defaults (Alice Angel) so
     # ONLY "company" is actually a change -- isolates the assertion to what
-    # this test is actually about.
-    ours = make_contact(email="ours3@example.com", first_name="Alice", last_name="Angel", company=None, linkedin_url=None)
+    # this test is actually about. email_status pre-set to Verified for the
+    # same reason (2026-09-16): this guest's default approval_status=
+    # "approved" + registered_at would otherwise ALSO fill a currently-
+    # blank email_status, a real but unrelated change.
+    ours = make_contact(
+        email="ours3@example.com", first_name="Alice", last_name="Angel", company=None, linkedin_url=None,
+        email_status="Verified",
+    )
     await crm_service.contact_store.create(ours)
 
     await _seed_mapping(mapping_store, question_label="LinkedIn Profile", target_field_key="linkedin_url", normalizer="linkedin_url")
