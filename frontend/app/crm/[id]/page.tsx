@@ -821,6 +821,26 @@ export default function CrmContactDetailPage() {
                       </div>
                     );
                   }
+                  // Dinner Subscriptions (2026-09-16): same searchable picker,
+                  // same reasoning as Dinners Attended above -- sourced from
+                  // this field's LIVE `field.options` (backend
+                  // DINNER_SUBSCRIPTION_OPTIONS, app/models/crm.py, unchanged
+                  // by this pass -- no option added/removed/reordered). Was
+                  // previously the generic checkbox-grid MultiSelect below.
+                  if (field.field_key === "dinner_subscriptions") {
+                    return (
+                      <div key={field.field_key} className="sm:col-span-2">
+                        <SearchableMultiSelect
+                          label={field.label}
+                          options={field.options}
+                          values={(value as string[]) ?? []}
+                          onChange={(v) => setCustomField(field.field_key, v)}
+                          placeholder="Search subscriptions..."
+                          noMatchesLabel="No matching subscriptions"
+                        />
+                      </div>
+                    );
+                  }
                   return (
                     <div key={field.field_key} className="sm:col-span-2">
                       <MultiSelect
