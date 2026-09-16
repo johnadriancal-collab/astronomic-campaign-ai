@@ -277,14 +277,22 @@ def classify_dinner_subscriptions(raw_row: dict[str, str], context: dict[str, An
 def classify_dinners_attended(raw_row: dict[str, str], context: dict[str, Any]) -> dict[str, Any]:
     """
     dinners_attended (custom field) <- CSV `Dinners Attended`, comma-split,
-    trimmed, and order-preserving-deduplicated -- deliberately NO wording
-    normalization, unlike Dinner Subscriptions. Every dated historical
-    entry (e.g. "Savvy [2.25.2025] Austin") must survive verbatim; this is
-    not a stable closed set the way Dinner Subscriptions is, so there is no
-    legacy/delete mapping here, ever.
+    trimmed, and order-preserving-deduplicated, then run through
+    normalize_dinners_attended() (app/models/crm.py) -- the SAME function
+    that powers the one-time contact-value migration (imported directly,
+    not reimplemented), so a freshly-imported contact and a migrated
+    contact always end up with identical normalized values. This is still
+    NOT a stable closed set the way Dinner Subscriptions is -- every dated
+    historical entry not covered by DINNERS_ATTENDED_LEGACY_VALUE_MAP (e.g.
+    a brand-new dinner) survives verbatim; normalization here is narrowly
+    scoped to collapsing the handful of CONFIRMED same-dinner spelling
+    variants (see that map's own docstring), never a general wording
+    cleanup.
     """
+    from app.models.crm import normalize_dinners_attended  # local import, same rationale as classify_investor_mode
+
     tokens = _split_tokens(_find_column(raw_row, "Dinners Attended", "Dinner Attended"))
-    deduped = _ordered_dedup(tokens)
+    deduped = normalize_dinners_attended(_ordered_dedup(tokens))
     return {"custom:dinners_attended": deduped} if deduped else {}
 
 

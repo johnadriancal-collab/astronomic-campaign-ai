@@ -546,7 +546,10 @@ async def test_dinner_subscriptions_small_group_dinners_end_to_end(import_servic
 @pytest.mark.asyncio
 async def test_future_csv_upload_populates_dinners_attended_automatically(import_service):
     """Dinners Attended is deliberately left unmapped -- proves the classification
-    rule fires independent of column_mapping, and dated entries survive verbatim."""
+    rule fires independent of column_mapping, and dated entries survive verbatim
+    EXCEPT the 6 confirmed legacy spellings in DINNERS_ATTENDED_LEGACY_VALUE_MAP
+    (2026-09-16), which normalize to their canonical form -- "Savvy [2.25.2025]
+    Austin" here is one of them."""
     batch = await import_service.upload(
         "future.csv",
         csv_bytes(
@@ -559,7 +562,7 @@ async def test_future_csv_upload_populates_dinners_attended_automatically(import
 
     contact = (await import_service.crm_service.list_contacts()).items[0]
     assert contact.custom_fields["dinners_attended"] == [
-        "Investor Dinners", "Savvy [2.25.2025] Austin", "Fireside Dinners",
+        "Investor Dinners", "Savvy [02.25.2025] Austin", "Fireside Dinners",
     ]
 
 
@@ -911,7 +914,7 @@ async def test_alex_pepe_end_to_end(import_service):
     alex = (await import_service.crm_service.list_contacts()).items[0]
     assert alex.custom_fields["dinner_subscriptions"] == ["Investor Dinners", "Fireside Dinners", "Biz Dev Dinners"]
     assert alex.custom_fields["dinners_attended"] == [
-        "Investor Dinners", "Fireside Dinners", "Savvy [2.25.2025] Austin", "VacayMyWay [08.12.2025] Austin",
+        "Investor Dinners", "Fireside Dinners", "Savvy [02.25.2025] Austin", "VacayMyWay [08.12.2025] Austin",
         "Alpha Rose [08.13.2025] Austin", "Biz Dev Dinners", "Ensitech [11.13.2025] Austin",
         "SharpsAI [12.04.2025] Austin", "Civilization Fund [01.19.2026] Austin", "Predict RX [03.10.2026] Austin",
         "Submersive [04.30.2026] Austin",

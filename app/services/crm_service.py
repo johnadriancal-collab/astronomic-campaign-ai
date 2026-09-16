@@ -234,6 +234,18 @@ class CrmService:
         if not fields.get("thesis_investor_mode_manual_override", False):
             fields = {**fields, "thesis_investor_mode": derive_investor_mode(fields.get("custom_fields", {}).get("investor_type"))}
 
+        custom_fields = fields.get("custom_fields")
+        if custom_fields and "dinners_attended" in custom_fields:
+            from app.models.crm import normalize_dinners_attended  # local import, same rationale as classify_investor_mode
+
+            fields = {
+                **fields,
+                "custom_fields": {
+                    **custom_fields,
+                    "dinners_attended": normalize_dinners_attended(custom_fields["dinners_attended"] or []),
+                },
+            }
+
         now = datetime.now(timezone.utc)
         contact = CrmContact(crm_contact_id=str(uuid.uuid4()), created_at=now, updated_at=now, **fields)
         await self.contact_store.create(contact)
@@ -271,6 +283,14 @@ class CrmService:
         service layer too, not just a property of how the UI happens to
         submit its state today.
 
+        `dinners_attended` (2026-09-16) additionally gets run through
+        normalize_dinners_attended() (app/models/crm.py) whenever the
+        patch touches it -- the same narrow legacy-spelling collapse the
+        CSV-import path applies, so a manual edit can never reintroduce
+        one of the confirmed legacy variants (a non-zero-padded date, the
+        pre-bracket "Austin Forward" string). Every other custom field is
+        left exactly as sent, no normalization.
+
         thesis_investor_mode gets similar treatment, but recomputes ONLY
         when there's an actual reason to -- either (a) the effective
         (post-merge) `investor_type` value genuinely differs from what the
@@ -304,7 +324,14 @@ class CrmService:
         """
         contact = await self._require_contact(crm_contact_id)
         if "custom_fields" in patch:
-            patch = {**patch, "custom_fields": {**contact.custom_fields, **patch["custom_fields"]}}
+            merged_custom_fields = {**contact.custom_fields, **patch["custom_fields"]}
+            if "dinners_attended" in patch["custom_fields"]:
+                from app.models.crm import normalize_dinners_attended  # local import, same rationale as classify_investor_mode
+
+                merged_custom_fields["dinners_attended"] = normalize_dinners_attended(
+                    merged_custom_fields["dinners_attended"] or []
+                )
+            patch = {**patch, "custom_fields": merged_custom_fields}
         manual_override = patch.get("thesis_investor_mode_manual_override", contact.thesis_investor_mode_manual_override)
         if not manual_override:
             effective_custom_fields = patch.get("custom_fields", contact.custom_fields)

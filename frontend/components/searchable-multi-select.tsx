@@ -26,12 +26,14 @@ export function SearchableMultiSelect({
   onChange,
   label,
   placeholder = "Search...",
+  noMatchesLabel = "No matching options",
 }: {
   values: string[];
   options: readonly string[];
   onChange: (values: string[]) => void;
   label?: string;
   placeholder?: string;
+  noMatchesLabel?: string;
 }) {
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState(false);
@@ -160,7 +162,7 @@ export function SearchableMultiSelect({
             className="absolute z-10 mt-1 max-h-56 w-full overflow-y-auto rounded-md border border-border/60 bg-popover p-1 shadow-md"
           >
             {filtered.length === 0 ? (
-              <li className="px-2 py-1.5 text-sm text-muted-foreground">No matching industries</li>
+              <li className="px-2 py-1.5 text-sm text-muted-foreground">{noMatchesLabel}</li>
             ) : (
               filtered.map((option, index) => (
                 <li

@@ -383,7 +383,12 @@ def test_dinner_subscriptions_small_group_dinners_maps_to_investor_dinners():
 
 def test_dinners_attended_dated_entries_preserved_verbatim():
     # Real values from Alex Pepe's row in Contacts 2 (ITF).csv -- must survive
-    # exactly, in order, with no normalization or collapsing into categories.
+    # exactly, in order, with no collapsing into categories. "Savvy
+    # [2.25.2025] Austin" is the one exception (2026-09-16): it's one of the
+    # 6 CONFIRMED legacy spelling variants in DINNERS_ATTENDED_LEGACY_VALUE_MAP
+    # (app/models/crm.py), so it now normalizes to its canonical zero-padded
+    # form on import -- see test_dinners_attended_normalizes_confirmed_legacy_
+    # values_only below for the narrower, precise scope of that change.
     row = {
         "Dinners Attended": (
             "Investor Dinners, Fireside Dinners, Savvy [2.25.2025] Austin, "
@@ -395,7 +400,7 @@ def test_dinners_attended_dated_entries_preserved_verbatim():
     }
     result = classify_dinners_attended(row, NO_CONTEXT)
     assert result["custom:dinners_attended"] == [
-        "Investor Dinners", "Fireside Dinners", "Savvy [2.25.2025] Austin",
+        "Investor Dinners", "Fireside Dinners", "Savvy [02.25.2025] Austin",
         "VacayMyWay [08.12.2025] Austin", "Alpha Rose [08.13.2025] Austin", "Biz Dev Dinners",
         "Ensitech [11.13.2025] Austin", "SharpsAI [12.04.2025] Austin",
         "Civilization Fund [01.19.2026] Austin", "Predict RX [03.10.2026] Austin",
@@ -403,12 +408,32 @@ def test_dinners_attended_dated_entries_preserved_verbatim():
     ]
 
 
-def test_dinners_attended_never_normalizes_dated_names():
+def test_dinners_attended_only_normalizes_confirmed_legacy_values_not_dated_names_generally():
     # Unlike Dinner Subscriptions, a dated dinner name is never rewritten,
-    # collapsed, or dropped -- there is no legacy/delete map for this field.
+    # collapsed, or dropped based on its SHAPE -- there is still no general
+    # legacy/delete map for this field (2026-09-16: only DINNERS_ATTENDED_
+    # LEGACY_VALUE_MAP's small, individually-confirmed set of exact strings
+    # is ever rewritten; everything else, including another dated/bracketed
+    # name that merely LOOKS similar, survives untouched).
     row = {"Dinners Attended": "Retreats, Astronomic General Subscriber [01.01.2025] Austin"}
     result = classify_dinners_attended(row, NO_CONTEXT)
     assert result["custom:dinners_attended"] == ["Retreats", "Astronomic General Subscriber [01.01.2025] Austin"]
+
+
+def test_dinners_attended_normalizes_confirmed_legacy_values_only():
+    row = {
+        "Dinners Attended": (
+            "Savvy [2.25.2025] Austin, It's Skinny [7.16.2025] LA, It's Skinny [7.15.2025] Miami, "
+            "Laundris [4.15.2025] Dallas, Meghani Capital [3.19.2025] Houston, "
+            "Austin Forward - 09.10.2026 - Austin"
+        )
+    }
+    result = classify_dinners_attended(row, NO_CONTEXT)
+    assert result["custom:dinners_attended"] == [
+        "Savvy [02.25.2025] Austin", "It's Skinny [07.16.2025] LA", "It's Skinny [07.15.2025] Miami",
+        "Laundris [04.15.2025] Dallas", "Meghani Capital [03.19.2025] Houston",
+        "Austin Forward [09.10.2026] Austin",
+    ]
 
 
 def test_dinners_attended_deduplicates_exact_repeats_preserving_order():
@@ -1050,7 +1075,7 @@ def test_apply_classification_rules_runs_the_full_registry():
     assert result["thesis_investor_mode"] == "Privately"
     assert result["custom:role"] == ["Investor"]  # VP dropped
     assert result["custom:dinner_subscriptions"] == ["Investor Dinners", "Founder Dinners"]  # normalized, Retreats dropped
-    assert result["custom:dinners_attended"] == ["Investor Dinners", "Savvy [2.25.2025] Austin"]  # verbatim, not normalized
+    assert result["custom:dinners_attended"] == ["Investor Dinners", "Savvy [02.25.2025] Austin"]  # confirmed legacy value normalized
     assert result["custom:chris_degree_connection"] == "1st degree"
     assert result["custom:age_range"] == "31-40"
     assert result["custom:gender"] == "Male"

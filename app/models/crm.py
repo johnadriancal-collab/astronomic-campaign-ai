@@ -351,6 +351,118 @@ def normalize_dinner_subscriptions(tokens: list[str]) -> list[str]:
     return result
 
 
+# Dinners Attended (2026-09-16) -- the single source of truth for this
+# field's canonical option list, imported by crm_migration.py's
+# LEGACY_FIELD_SEEDS AND CUSTOM_FIELD_CORRECTIONS["dinners_attended"] (a
+# CrmCustomFieldDefinition's options get set from this same list both times,
+# so the two can never drift out of sync the way two independently-typed
+# copies previously could). NOT a closed/enforced set -- see
+# normalize_dinners_attended()'s own docstring below: a stored value outside
+# this list is never rejected or dropped, only left un-searchable until
+# added here. 2026-09-16 audit against real production data deliberately
+# excludes 13 confirmed-real values (Exodus/Regulus/Sigma Librae Dinners,
+# and 10 "FD ..." Founder Dinner sub-events) -- kept OUT of this list on
+# purpose for now; they remain fully intact wherever already stored (see
+# normalize_dinners_attended()) and are not lost, just not yet surfaced as
+# selectable options.
+DINNERS_ATTENDED_OPTIONS = [
+    "Investor Dinners",
+    "Fireside Dinners",
+    "Founder Dinners",
+    "Biz Dev Dinners",
+    "Donor Dinner",
+    "Radius Development Group [07.07.2026] Raleigh",
+    "Innovosens [06.23.2026] Austin",
+    "Talent Stream [06.16.2026] SF",
+    "Growth Channel [05.28.2026] Austin",
+    "Submersive [04.30.2026] Austin",
+    "Startup Soft [04.23.2026] SF",
+    "GrowthChannel [04.16.2026] Chicago",
+    "Realize Music - [04.15.2026] Austin",
+    "American Ventures [04.07.2026] Austin",
+    "Dripping Springs [03.24.2026] Austin",
+    "Valorem Capital [03.12.26] Austin",
+    "Predict RX [03.10.2026] Austin",
+    "RIoT Technology [03.05.2026] Austin",
+    "Valorem Capital [02.18.26] SF",
+    "Snyk [02.11.2026] Chicago",
+    "Civilization Fund [01.19.2026] Austin",
+    "Raveum [01.12.2026] Austin",
+    "Snyk [12.10.2025] NYC",
+    "Rush [12.08.2025] Austin",
+    "SharpsAI [12.04.2025] Austin",
+    "Ensitech [11.13.2025] Austin",
+    "Metropolitan Development Co [11.13.2025] Austin",
+    "Quantum Mobility [11.12.2025] Austin",
+    "Leon Y Sol [11.06.2025] Austin",
+    "Lake Hour [10.20.2025] Austin",
+    "Livestrong [10.14.2025] NYC",
+    "Flex Radio [10.09.2025] Austin",
+    "Quantum Mobility [10.08.2025] Austin",
+    "Hive ASMBLD [10.06.2025] Austin",
+    "Leon Y Sol [10.02.2025] SF",
+    "Meghani Capital [09.24.2025] Austin",
+    "Alpha Rose [09.18.2025] Boston",
+    "Colony Hills Capital [09.16.2025] Austin",
+    "Hybrid Advisors [09.12.2025] Miami",
+    "GeneSilico [08.21.2025] Austin",
+    "Alpha Rose [08.13.2025] Austin",
+    "DWG Capital Group [08.12.2025] Miami",
+    "VacayMyWay [08.12.2025] Austin",
+    "New Stack Ventures [08.06.2025] Boston",
+    "It's Skinny [07.16.2025] LA",
+    "It's Skinny [07.15.2025] Miami",
+    "Offerd [06.25.2025] Austin",
+    "Laundris [04.15.2025] Dallas",
+    "Meghani Capital [03.19.2025] Houston",
+    "Savvy [02.25.2025] Austin",
+    "Ristretto [04.20.2023] Austin",
+]
+
+# DINNERS_ATTENDED_LEGACY_VALUE_MAP is narrower and deliberately
+# different in kind from DINNER_SUBSCRIPTION_LEGACY_MAP: it exists ONLY to
+# collapse a handful of CONFIRMED same-dinner spelling variants (a
+# non-zero-padded date, or the pre-bracket-format "Austin Forward" string)
+# into the one canonical value -- never to re-map one dinner's name into a
+# different dinner or tier the way Dinner Subscriptions' legacy map does.
+# Every entry here was verified against real production data (2026-09-16
+# audit) before being added -- nothing here is guessed, and this map must
+# never be extended with a guess either.
+DINNERS_ATTENDED_LEGACY_VALUE_MAP = {
+    "Savvy [2.25.2025] Austin": "Savvy [02.25.2025] Austin",
+    "It's Skinny [7.16.2025] LA": "It's Skinny [07.16.2025] LA",
+    "It's Skinny [7.15.2025] Miami": "It's Skinny [07.15.2025] Miami",
+    "Laundris [4.15.2025] Dallas": "Laundris [04.15.2025] Dallas",
+    "Meghani Capital [3.19.2025] Houston": "Meghani Capital [03.19.2025] Houston",
+    "Austin Forward - 09.10.2026 - Austin": "Austin Forward [09.10.2026] Austin",
+}
+
+
+def normalize_dinners_attended(tokens: list[str]) -> list[str]:
+    """
+    Rewrites any DINNERS_ATTENDED_LEGACY_VALUE_MAP entry to its canonical
+    form and deduplicates while preserving first-seen order -- so a contact
+    that somehow already carries both the legacy and canonical spelling of
+    the same dinner ends up with the canonical one exactly once, not twice.
+    Every other token -- including a value that isn't in this map AND isn't
+    in the current canonical options list (e.g. a real but not-yet-surfaced
+    dinner name) -- is preserved verbatim, never dropped: this field is an
+    open vocabulary by design (see this function's own module comment
+    above), so "unrecognized" must never mean "delete." Idempotent: running
+    this again on its own output is always a no-op, since every legacy key
+    maps to a value that is not itself a legacy key.
+    """
+    result: list[str] = []
+    for raw in tokens:
+        token = raw.strip()
+        if not token:
+            continue
+        mapped = DINNERS_ATTENDED_LEGACY_VALUE_MAP.get(token, token)
+        if mapped not in result:
+            result.append(mapped)
+    return result
+
+
 # Stage NP-2 (2026-09-14) -- Notes/Personal Notes consolidation. Shared by both
 # the one-time production migration (app/services/notes_personal_notes_merge.py,
 # for Contacts that already had personal_notes populated before this stage) and

@@ -790,6 +790,33 @@ export default function CrmContactDetailPage() {
                           values={(value as string[]) ?? []}
                           onChange={(v) => setCustomField(field.field_key, v)}
                           placeholder="Search industries..."
+                          noMatchesLabel="No matching industries"
+                        />
+                      </div>
+                    );
+                  }
+                  // Dinners Attended (2026-09-16): same searchable picker as
+                  // Investment Industry, but sourced from this field's LIVE
+                  // `field.options` (backend DINNERS_ATTENDED_OPTIONS, app/models/
+                  // crm.py) rather than a second frontend-duplicated constant --
+                  // unlike Investment Industry, this field's backend options were
+                  // never empty, so there's no reason to bypass them. Was
+                  // previously the generic checkbox-grid MultiSelect below, which
+                  // silently renders no checkbox at all for a stored value outside
+                  // `options` (e.g. a legacy/unlisted dinner) -- SearchableMultiSelect
+                  // instead always renders a chip for every stored value, so a
+                  // contact's existing selection is never invisible again even if
+                  // the option list is momentarily incomplete.
+                  if (field.field_key === "dinners_attended") {
+                    return (
+                      <div key={field.field_key} className="sm:col-span-2">
+                        <SearchableMultiSelect
+                          label={field.label}
+                          options={field.options}
+                          values={(value as string[]) ?? []}
+                          onChange={(v) => setCustomField(field.field_key, v)}
+                          placeholder="Search dinners..."
+                          noMatchesLabel="No matching dinners"
                         />
                       </div>
                     );

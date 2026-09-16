@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from app.models.crm import CrmContact, CrmImportBatch, CustomFieldType
+from app.models.crm import CrmContact, CrmImportBatch, CustomFieldType, DINNERS_ATTENDED_LEGACY_VALUE_MAP, DINNERS_ATTENDED_OPTIONS
 from app.services.crm_migration import (
     CUSTOM_FIELD_CORRECTIONS,
     DIRECT_DUPLICATE_MIGRATIONS,
@@ -20,8 +20,10 @@ from app.services.crm_migration import (
     apply_custom_field_corrections,
     migrate_all_contacts,
     migrate_all_dinner_subscriptions,
+    migrate_all_dinners_attended_legacy_values,
     migrate_all_funding_stage_corruption,
     migrate_contact_dinner_subscriptions,
+    migrate_contact_dinners_attended_legacy_values,
     migrate_contact_funding_stage_corruption,
     migrate_contact_legacy_fields,
     reconcile_legacy_fields,
@@ -295,6 +297,154 @@ async def test_reconcile_legacy_fields_applies_corrections_too(service):
     assert "investor_type" in report["corrected"]
     field = await service.custom_field_store.get_by_field_key("dinners_attended")
     assert field.field_type == CustomFieldType.MULTI_SELECT
+
+
+@pytest.mark.asyncio
+async def test_corrections_fix_dinners_attended_to_the_full_canonical_option_list(service):
+    """2026-09-16 Dinners Attended option-list completeness fix -- the root
+    cause of "Hive ASMBLD [10.06.2025] Austin" being unselectable on Cory
+    Gulotta's contact despite already being correctly stored: it was simply
+    never in this options list. Asserts the corrected live field matches
+    DINNERS_ATTENDED_OPTIONS exactly (both LEGACY_FIELD_SEEDS and
+    CUSTOM_FIELD_CORRECTIONS now source from that one constant, so this one
+    assertion proves both stay in sync)."""
+    await seed_legacy_custom_fields(service)
+    await apply_custom_field_corrections(service)
+
+    field = await service.custom_field_store.get_by_field_key("dinners_attended")
+    assert field.field_type == CustomFieldType.MULTI_SELECT
+    assert field.options == DINNERS_ATTENDED_OPTIONS
+    assert "Hive ASMBLD [10.06.2025] Austin" in field.options
+    assert len(field.options) == 51
+    # The 6 confirmed legacy spelling variants must never appear as their
+    # OWN option -- only their canonical form does.
+    for legacy_value in DINNERS_ATTENDED_LEGACY_VALUE_MAP:
+        assert legacy_value not in field.options
+    # The 13 confirmed-real values deliberately kept off the visible list
+    # for now (per the approved plan) must not appear either.
+    for hidden_value in (
+        "Exodus Dinners", "Regulus Dinners", "Sigma Librae Dinners",
+        "FD Agency 1 [04.30.2025] Rose Gose Austin", "FD Agency 2 [04.30.2025] Rose Gose Austin",
+        "FD Coaching [07.30.2025] P.F. Chang's Austin", "FD Community [06.25.2025] Cipollina Austin",
+        "FD Consulting [04.30.2025] The Salty Sow Austin", "FD E-Commerce [04.30.2025] The Salty Sow Austin",
+        "FD Hardware [07.30.2025] P.F. Chang's Austin", "FD Real Estate [04.30.2025] The Salty Sow Austin",
+        "FD Real Estate [06.25.2025] Café No Sé Austin", "FD SaaS [04.30.2025] The Salty Sow Austin",
+        "FD SaaS [06.25.2025] Café No Sé Austin",
+    ):
+        assert hidden_value not in field.options
+
+
+# --- Dinners Attended legacy-spelling normalization (list -> normalized list) ---
+
+
+def test_dinners_attended_unrecognized_value_preserved_not_discarded():
+    """Root-cause regression test: a value not in the legacy map (e.g. an
+    unlisted-but-real dinner, or one of the 13 deliberately-hidden values)
+    must survive verbatim -- this field is open vocabulary by design."""
+    contact = make_contact(custom_fields={"dinners_attended": ["Investor Dinners", "Hive ASMBLD [10.06.2025] Austin"]})
+    updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+    assert changed is False
+    assert updated is contact
+    assert updated.custom_fields["dinners_attended"] == ["Investor Dinners", "Hive ASMBLD [10.06.2025] Austin"]
+
+
+def test_dinners_attended_legacy_date_variant_maps_to_canonical_value():
+    contact = make_contact(custom_fields={"dinners_attended": ["Savvy [2.25.2025] Austin"]})
+    updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+    assert changed is True
+    assert updated.custom_fields["dinners_attended"] == ["Savvy [02.25.2025] Austin"]
+
+
+def test_dinners_attended_legacy_austin_forward_maps_to_canonical_bracket_format():
+    contact = make_contact(custom_fields={"dinners_attended": ["Austin Forward - 09.10.2026 - Austin"]})
+    updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+    assert changed is True
+    assert updated.custom_fields["dinners_attended"] == ["Austin Forward [09.10.2026] Austin"]
+
+
+def test_dinners_attended_preserves_all_other_selections_on_the_same_contact():
+    contact = make_contact(
+        custom_fields={
+            "dinners_attended": [
+                "Investor Dinners", "Savvy [2.25.2025] Austin", "Hive ASMBLD [10.06.2025] Austin", "Exodus Dinners",
+            ]
+        }
+    )
+    updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+    assert changed is True
+    assert updated.custom_fields["dinners_attended"] == [
+        "Investor Dinners", "Savvy [02.25.2025] Austin", "Hive ASMBLD [10.06.2025] Austin", "Exodus Dinners",
+    ]
+
+
+def test_dinners_attended_does_not_create_a_duplicate_if_both_forms_already_present():
+    contact = make_contact(
+        custom_fields={"dinners_attended": ["Savvy [2.25.2025] Austin", "Savvy [02.25.2025] Austin"]}
+    )
+    updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+    assert changed is True
+    assert updated.custom_fields["dinners_attended"] == ["Savvy [02.25.2025] Austin"]  # collapsed to one, first-seen position
+
+
+def test_dinners_attended_already_normalized_list_is_a_noop():
+    contact = make_contact(custom_fields={"dinners_attended": ["Investor Dinners", "Savvy [02.25.2025] Austin"]})
+    updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+    assert changed is False
+    assert updated is contact
+
+
+def test_dinners_attended_missing_value_is_a_noop():
+    contact = make_contact(custom_fields={})
+    updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+    assert changed is False
+    assert "dinners_attended" not in updated.custom_fields
+
+
+def test_dinners_attended_never_touches_other_custom_fields():
+    contact = make_contact(
+        custom_fields={"dinners_attended": ["Savvy [2.25.2025] Austin"], "gender": "Female", "notes": "some notes"}
+    )
+    updated, _ = migrate_contact_dinners_attended_legacy_values(contact)
+    assert updated.custom_fields["gender"] == "Female"
+    assert updated.custom_fields["notes"] == "some notes"
+
+
+@pytest.mark.asyncio
+async def test_migrate_all_dinners_attended_legacy_values_only_saves_contacts_that_changed(service):
+    # Inserted directly at the store layer (bypassing create_contact(), which
+    # now normalizes on write) to simulate real pre-existing legacy
+    # production data from before this fix shipped.
+    a = await service.contact_store.create(make_contact(crm_contact_id="a", first_name="Ada"))
+    b = await service.contact_store.create(
+        make_contact(crm_contact_id="b", first_name="Grace", custom_fields={"dinners_attended": ["Savvy [2.25.2025] Austin"]})
+    )
+    c = await service.contact_store.create(
+        make_contact(
+            crm_contact_id="c", first_name="Hedy",
+            custom_fields={"dinners_attended": ["Hive ASMBLD [10.06.2025] Austin"]},  # already canonical
+        )
+    )
+
+    report = await migrate_all_dinners_attended_legacy_values(service.contact_store)
+    assert report["dinners_attended_contacts_scanned"] == 3
+    assert report["dinners_attended_contacts_updated"] == 1
+    assert report["dinners_attended_legacy_count[Savvy [2.25.2025] Austin]"] == 1
+    assert report["dinners_attended_legacy_count[Austin Forward - 09.10.2026 - Austin]"] == 0
+
+    assert "dinners_attended" not in (await service.get_contact("a")).custom_fields
+    assert (await service.get_contact("b")).custom_fields["dinners_attended"] == ["Savvy [02.25.2025] Austin"]
+    assert (await service.get_contact("c")).custom_fields["dinners_attended"] == ["Hive ASMBLD [10.06.2025] Austin"]
+
+
+@pytest.mark.asyncio
+async def test_migrate_all_dinners_attended_legacy_values_is_idempotent(service):
+    await service.contact_store.create(
+        make_contact(custom_fields={"dinners_attended": ["Investor Dinners", "Austin Forward - 09.10.2026 - Austin"]})
+    )
+    first = await migrate_all_dinners_attended_legacy_values(service.contact_store)
+    second = await migrate_all_dinners_attended_legacy_values(service.contact_store)
+    assert first["dinners_attended_contacts_updated"] == 1
+    assert second["dinners_attended_contacts_updated"] == 0
 
 
 # --- Dinner Subscriptions value migration (text -> multi-select) ---

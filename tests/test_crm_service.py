@@ -727,6 +727,86 @@ async def test_multi_select_custom_field_merge_fills_from_empty(service):
     assert merged.custom_fields["dinners_attended"] == ["Investor Dinners"]
 
 
+# --- Dinners Attended write-time legacy normalization (2026-09-16) --------
+
+
+@pytest.mark.asyncio
+async def test_update_contact_normalizes_a_legacy_dinners_attended_value_on_save(service):
+    """A manual edit (the frontend contact page's save path) can never
+    reintroduce one of the confirmed legacy spellings -- same guarantee as
+    the CSV-import path (see test_crm_classification_rules.py) and the
+    one-time migration (see test_crm_migration.py), all three powered by
+    the SAME normalize_dinners_attended() function."""
+    contact = await service.create_contact({})
+    updated = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"dinners_attended": ["Savvy [2.25.2025] Austin"]}}
+    )
+    assert updated.custom_fields["dinners_attended"] == ["Savvy [02.25.2025] Austin"]
+
+
+@pytest.mark.asyncio
+async def test_create_contact_normalizes_a_legacy_dinners_attended_value(service):
+    contact = await service.create_contact(
+        {"custom_fields": {"dinners_attended": ["Austin Forward - 09.10.2026 - Austin"]}}
+    )
+    assert contact.custom_fields["dinners_attended"] == ["Austin Forward [09.10.2026] Austin"]
+
+
+@pytest.mark.asyncio
+async def test_update_contact_dinners_attended_normalization_preserves_a_value_not_in_the_legacy_map(service):
+    """Root-cause regression coverage: Cory Gulotta's real "Hive ASMBLD
+    [10.06.2025] Austin" selection (already correct, not a legacy spelling)
+    must survive a save completely untouched, alongside a genuinely legacy
+    value elsewhere in the same list -- normalization only ever rewrites an
+    exact DINNERS_ATTENDED_LEGACY_VALUE_MAP key, never anything else."""
+    contact = await service.create_contact({})
+    updated = await service.update_contact(
+        contact.crm_contact_id,
+        {"custom_fields": {"dinners_attended": ["Investor Dinners", "Hive ASMBLD [10.06.2025] Austin", "Savvy [2.25.2025] Austin"]}},
+    )
+    assert updated.custom_fields["dinners_attended"] == [
+        "Investor Dinners", "Hive ASMBLD [10.06.2025] Austin", "Savvy [02.25.2025] Austin",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_update_contact_dinners_attended_normalization_never_touches_other_custom_fields(service):
+    contact = await service.create_contact({"custom_fields": {"gender": "Female", "notes": "some notes"}})
+    updated = await service.update_contact(
+        contact.crm_contact_id, {"custom_fields": {"dinners_attended": ["Savvy [2.25.2025] Austin"]}}
+    )
+    assert updated.custom_fields["gender"] == "Female"
+    assert updated.custom_fields["notes"] == "some notes"
+
+
+@pytest.mark.asyncio
+async def test_update_contact_leaves_non_dinners_attended_saves_completely_unaffected(service):
+    """A save that never touches dinners_attended must never run the
+    normalizer at all -- same discipline as this method's existing
+    thesis_investor_mode recompute guard."""
+    contact = await service.create_contact(
+        {"custom_fields": {"dinners_attended": ["Savvy [2.25.2025] Austin"]}}  # already normalized by create_contact
+    )
+    updated = await service.update_contact(contact.crm_contact_id, {"custom_fields": {"notes": "hello"}})
+    assert updated.custom_fields["dinners_attended"] == ["Savvy [02.25.2025] Austin"]
+    assert updated.custom_fields["notes"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_dinners_attended_selection_survives_a_save_and_reload_round_trip(service):
+    """Item 11: a save followed by a fresh read (simulating the frontend's
+    save -> reload cycle) returns exactly the same selection, including a
+    value outside the current canonical options list -- nothing is dropped
+    just because it isn't (yet) a recognized option."""
+    contact = await service.create_contact({})
+    await service.update_contact(
+        contact.crm_contact_id,
+        {"custom_fields": {"dinners_attended": ["Investor Dinners", "Exodus Dinners"]}},  # Exodus Dinners: not in options
+    )
+    reloaded = await service.get_contact(contact.crm_contact_id)
+    assert reloaded.custom_fields["dinners_attended"] == ["Investor Dinners", "Exodus Dinners"]
+
+
 @pytest.mark.asyncio
 async def test_investment_industry_union_merges_itf_values_into_existing_contact(service):
     """The generic multi-select custom-field union-merge rule (already proven above

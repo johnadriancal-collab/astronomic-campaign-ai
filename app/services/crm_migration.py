@@ -84,6 +84,15 @@ re-run:
     funding_stage is cleared, the exact-match precondition can never fire
     again for that contact.
 
+    migrate_all_dinners_attended_legacy_values() -- 2026-09-16 targeted
+    normalization: rewrites ONLY the confirmed legacy spellings in
+    DINNERS_ATTENDED_LEGACY_VALUE_MAP (app/models/crm.py -- a handful of
+    non-zero-padded dates and the pre-bracket "Austin Forward" string) to
+    their canonical form, on every contact that has one. Idempotent, never
+    touches any other dinners_attended value (including the 13 confirmed-
+    real values deliberately kept off DINNERS_ATTENDED_OPTIONS for now),
+    never touches Event History.
+
 Old single-value fields with no explicit "(Institutional)" counterpart
 default to the PRIVATE thesis variant, mirroring "Check Size" (no suffix)
 vs "Check Size (Institutional)" already being two distinct fields.
@@ -97,7 +106,10 @@ from app.models.crm import (
     CrmImportBatch,
     CustomFieldType,
     DINNER_SUBSCRIPTION_OPTIONS,
+    DINNERS_ATTENDED_LEGACY_VALUE_MAP,
+    DINNERS_ATTENDED_OPTIONS,
     normalize_dinner_subscriptions,
+    normalize_dinners_attended,
 )
 from app.repositories.crm_contact_store import CrmContactStore
 from app.services.crm_service import CrmService
@@ -131,17 +143,9 @@ LEGACY_FIELD_SEEDS: list[tuple[str, str, CustomFieldType, str | None, list[str]]
      "Explicit exclusions -- the Thesis Form only captures what they DO invest in.", []),
     ("dinner_subscriptions", "Dinner Subscriptions", CustomFieldType.MULTI_SELECT, None, DINNER_SUBSCRIPTION_OPTIONS),
     ("dinners_attended", "Dinners Attended", CustomFieldType.MULTI_SELECT,
-     "Not a stable closed set -- every new dinner adds a value. Options need manual upkeep over time.",
-     ["Investor Dinners", "Fireside Dinners", "Founder Dinners", "Biz Dev Dinners",
-      "Alpha Rose [08.13.2025] Austin", "Civilization Fund [01.19.2026] Austin",
-      "Colony Hills Capital [09.16.2025] Austin", "Dripping Springs [03.24.2026] Austin",
-      "Ensitech [11.13.2025] Austin", "Flex Radio [10.09.2025] Austin", "GeneSilico [08.21.2025] Austin",
-      "Innovosens [06.23.2026] Austin", "Lake Hour [10.20.2025] Austin", "Leon Y Sol [11.06.2025] Austin",
-      "Meghani Capital [09.24.2025] Austin", "Offerd [06.25.2025] Austin", "Predict RX [03.10.2026] Austin",
-      "Quantum Mobility [10.08.2025] Austin", "RIoT Technology [03.05.2026] Austin",
-      "Raveum [01.12.2026] Austin", "Realize Music - [04.15.2026] Austin", "Rush [12.08.2025] Austin",
-      "Savvy [2.25.2025] Austin", "Submersive [04.30.2026] Austin", "Talent Stream [06.16.2026] SF",
-      "Valorem Capital [02.18.26] SF", "Valorem Capital [03.12.26] Austin"]),
+     "Not a stable closed set -- every new dinner adds a value. Options need manual upkeep over time. "
+     "See DINNERS_ATTENDED_OPTIONS (app/models/crm.py) for the single source of truth.",
+     DINNERS_ATTENDED_OPTIONS),
     ("referred_to_constellation_dinners_by", "Who were you referred to Constellation Dinners by?",
      CustomFieldType.TEXT, None, []),
     ("chris_knows_personally", "Chris Knows Personally", CustomFieldType.BOOLEAN, None, []),
@@ -189,18 +193,7 @@ CUSTOM_FIELD_CORRECTIONS: dict[str, tuple[CustomFieldType, list[str]]] = {
         "Invest with group of Angels", "Participate in syndicated investments", "Private Equity",
         "Private Investor", "Venture Capital",
     ]),
-    "dinners_attended": (CustomFieldType.MULTI_SELECT, [
-        "Investor Dinners", "Fireside Dinners", "Founder Dinners", "Biz Dev Dinners",
-        "Alpha Rose [08.13.2025] Austin", "Civilization Fund [01.19.2026] Austin",
-        "Colony Hills Capital [09.16.2025] Austin", "Dripping Springs [03.24.2026] Austin",
-        "Ensitech [11.13.2025] Austin", "Flex Radio [10.09.2025] Austin", "GeneSilico [08.21.2025] Austin",
-        "Innovosens [06.23.2026] Austin", "Lake Hour [10.20.2025] Austin", "Leon Y Sol [11.06.2025] Austin",
-        "Meghani Capital [09.24.2025] Austin", "Offerd [06.25.2025] Austin", "Predict RX [03.10.2026] Austin",
-        "Quantum Mobility [10.08.2025] Austin", "RIoT Technology [03.05.2026] Austin",
-        "Raveum [01.12.2026] Austin", "Realize Music - [04.15.2026] Austin", "Rush [12.08.2025] Austin",
-        "Savvy [2.25.2025] Austin", "Submersive [04.30.2026] Austin", "Talent Stream [06.16.2026] SF",
-        "Valorem Capital [02.18.26] SF", "Valorem Capital [03.12.26] Austin",
-    ]),
+    "dinners_attended": (CustomFieldType.MULTI_SELECT, DINNERS_ATTENDED_OPTIONS),
     "how_early_do_you_invest": (CustomFieldType.MULTI_SELECT, [
         "Great team, no revenue", "Great team, some revenue", "$10k-$50k MRR / GMV",
         "$50k-$100k MRR / GMV", "$100k-$1M MRR / GMV", "$1M+ MRR / GMV",
@@ -474,6 +467,73 @@ async def migrate_all_dinner_subscriptions(contact_store: CrmContactStore) -> di
             contacts_updated += 1
 
     return {"dinner_subscriptions_contacts_scanned": len(contacts), "dinner_subscriptions_contacts_updated": contacts_updated}
+
+
+def migrate_contact_dinners_attended_legacy_values(contact: CrmContact) -> tuple[CrmContact, bool]:
+    """
+    Pure function -- does not save. 2026-09-16 targeted normalization: a
+    contact's `dinners_attended` is ALREADY a `list[str]` (unlike Dinner
+    Subscriptions above, which started life as a comma-joined string) --
+    this only rewrites the exact legacy spellings in
+    DINNERS_ATTENDED_LEGACY_VALUE_MAP to their canonical form via
+    normalize_dinners_attended() (the SAME function the CSV-import
+    classification rule and update_contact()/create_contact() use), and
+    dedupes if a contact happens to already carry both spellings. Every
+    other value on the contact -- including one of the 13 confirmed-real
+    values deliberately kept OFF DINNERS_ATTENDED_OPTIONS (see that
+    constant's own docstring) -- is preserved completely untouched; this
+    function never drops or rewrites anything outside the legacy map.
+    Idempotent: if normalize_dinners_attended() produces the same list
+    that's already stored, this is a no-op (`changed=False`), so re-running
+    the driver below is always safe.
+    """
+    raw = contact.custom_fields.get("dinners_attended")
+    if not isinstance(raw, list) or not raw:
+        return contact, False
+
+    normalized = normalize_dinners_attended(raw)
+    if normalized == raw:
+        return contact, False
+
+    new_custom_fields = dict(contact.custom_fields)
+    new_custom_fields["dinners_attended"] = normalized
+    updated = contact.model_copy(
+        update={"custom_fields": new_custom_fields, "updated_at": datetime.now(timezone.utc)}
+    )
+    return updated, True
+
+
+async def migrate_all_dinners_attended_legacy_values(contact_store: CrmContactStore) -> dict[str, int]:
+    """
+    One-time, idempotent, additive-only driver for
+    migrate_contact_dinners_attended_legacy_values() -- see that function's
+    own docstring for exactly what is and isn't touched. Reports a
+    per-legacy-value count (computed BEFORE any writes, by scanning the
+    stored data directly) alongside the usual scanned/updated totals, so a
+    caller can verify e.g. "68 contacts carried a legacy date-format
+    variant, all 68 were updated" without a second pass.
+    """
+    contacts = await contact_store.list()
+    legacy_value_counts = {value: 0 for value in DINNERS_ATTENDED_LEGACY_VALUE_MAP}
+    contacts_updated = 0
+
+    for contact in contacts:
+        raw = contact.custom_fields.get("dinners_attended")
+        if isinstance(raw, list):
+            for value in raw:
+                if value in legacy_value_counts:
+                    legacy_value_counts[value] += 1
+
+        updated, changed = migrate_contact_dinners_attended_legacy_values(contact)
+        if changed:
+            await contact_store.save(updated)
+            contacts_updated += 1
+
+    return {
+        "dinners_attended_contacts_scanned": len(contacts),
+        "dinners_attended_contacts_updated": contacts_updated,
+        **{f"dinners_attended_legacy_count[{value}]": count for value, count in legacy_value_counts.items()},
+    }
 
 
 # funding_stage values that are shaped like an engagement_stage answer, not a real
