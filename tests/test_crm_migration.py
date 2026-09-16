@@ -315,7 +315,7 @@ async def test_corrections_fix_dinners_attended_to_the_full_canonical_option_lis
     assert field.field_type == CustomFieldType.MULTI_SELECT
     assert field.options == DINNERS_ATTENDED_OPTIONS
     assert "Hive ASMBLD [10.06.2025] Austin" in field.options
-    assert len(field.options) == 51
+    assert len(field.options) == 52
     # The 6 confirmed legacy spelling variants must never appear as their
     # OWN option -- only their canonical form does.
     for legacy_value in DINNERS_ATTENDED_LEGACY_VALUE_MAP:

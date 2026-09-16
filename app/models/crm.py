@@ -371,6 +371,7 @@ DINNERS_ATTENDED_OPTIONS = [
     "Founder Dinners",
     "Biz Dev Dinners",
     "Donor Dinner",
+    "Austin Forward [09.10.2026] Austin",
     "Radius Development Group [07.07.2026] Raleigh",
     "Innovosens [06.23.2026] Austin",
     "Talent Stream [06.16.2026] SF",
