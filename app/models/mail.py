@@ -1312,6 +1312,33 @@ class MailCampaignMailboxNextSend(BaseModel):
     next_send_at: datetime | None
 
 
+# --- Campaign stats strip (2026-09-17) -- reply rate / unsub rate only ------
+#
+# See MailCampaignStatsService's own module docstring for the full
+# investigation this is based on: Astronomic Mail has NO open-tracking or
+# real provider-bounce tracking anywhere (confirmed absent, not merely
+# unwired) -- this model deliberately has no open_rate_percent/
+# bounce_rate_percent fields at all, rather than a field that's always
+# fabricated to some placeholder value. The frontend renders "Not tracked"
+# for those two as static copy, never derived from this model.
+
+
+class MailCampaignStats(BaseModel):
+    mail_campaign_id: str
+    total: int
+    replied: int
+    # (replied / total) * 100, rounded to 1 decimal -- same convention as
+    # MailCampaignListItem.progress_percent (0.0 when total == 0, never a
+    # divide-by-zero, never fabricated).
+    reply_rate_percent: float
+    # Enrollments whose email_at_enrollment matches an ACTIVE
+    # MailSuppression row with reason == UNSUBSCRIBED specifically -- never
+    # every suppression reason lumped together (manual/hard_bounce/
+    # complaint are each a different thing; see MailCampaignStatsService).
+    unsubscribed: int
+    unsub_rate_percent: float
+
+
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --
 
 

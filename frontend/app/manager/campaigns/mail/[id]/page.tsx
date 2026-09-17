@@ -29,6 +29,7 @@ import {
   getMailCampaignMailboxNextSend,
   getMailCampaignReview,
   getMailCampaignSchedule,
+  getMailCampaignStats,
   getMailCampaignWorkload,
   listCrmLists,
   listMailboxes,
@@ -49,6 +50,7 @@ import {
   type MailCampaignMailboxNextSend,
   type MailCampaignReview,
   type MailCampaignSharing,
+  type MailCampaignStats,
   type MailCampaignWorkload,
   type MailEnrollment,
   type MailEnrollmentBatch,
@@ -69,6 +71,7 @@ export default function MailCampaignDetailPage() {
   const [campaign, setCampaign] = useState<MailCampaign | null>(null);
   const [steps, setSteps] = useState<MailSequenceStep[]>([]);
   const [review, setReview] = useState<MailCampaignReview | null>(null);
+  const [stats, setStats] = useState<MailCampaignStats | null>(null);
   const [enrollments, setEnrollments] = useState<MailEnrollment[]>([]);
   const [workload, setWorkload] = useState<MailCampaignWorkload | null>(null);
   const [batches, setBatches] = useState<MailEnrollmentBatch[]>([]);
@@ -198,6 +201,15 @@ export default function MailCampaignDetailPage() {
     // health banner doesn't render, never an error for the whole page.
     getMailCampaignMailboxNextSend(campaignId)
       .then(setMailboxNextSend)
+      .catch(() => {});
+  }, [campaignId]);
+
+  useEffect(() => {
+    // Stats strip (2026-09-17) -- best-effort, non-blocking: a failure
+    // here just means the strip keeps showing its loading state, never an
+    // error for the whole page.
+    getMailCampaignStats(campaignId)
+      .then(setStats)
       .catch(() => {});
   }, [campaignId]);
 
@@ -627,17 +639,17 @@ export default function MailCampaignDetailPage() {
       )}
 
       <Tabs defaultValue="dashboard">
-        <TabsList>
-          <TabsTab value="dashboard">Dashboard</TabsTab>
-          <TabsTab value="leads">Leads</TabsTab>
-          <TabsTab value="steps">Steps</TabsTab>
-          <TabsTab value="channels">Channels</TabsTab>
-          <TabsTab value="schedule">Schedule</TabsTab>
-          <TabsTab value="settings">Settings</TabsTab>
+        <TabsList className="w-full overflow-x-auto">
+          <TabsTab value="dashboard" className="min-w-fit flex-1 whitespace-nowrap text-center">Dashboard</TabsTab>
+          <TabsTab value="leads" className="min-w-fit flex-1 whitespace-nowrap text-center">Leads</TabsTab>
+          <TabsTab value="steps" className="min-w-fit flex-1 whitespace-nowrap text-center">Steps</TabsTab>
+          <TabsTab value="channels" className="min-w-fit flex-1 whitespace-nowrap text-center">Channels</TabsTab>
+          <TabsTab value="schedule" className="min-w-fit flex-1 whitespace-nowrap text-center">Schedule</TabsTab>
+          <TabsTab value="settings" className="min-w-fit flex-1 whitespace-nowrap text-center">Settings</TabsTab>
         </TabsList>
 
         <TabsPanel value="dashboard">
-          <MailCampaignDashboardTab campaign={campaign} review={review} enrollments={enrollments} />
+          <MailCampaignDashboardTab campaign={campaign} review={review} enrollments={enrollments} stats={stats} />
         </TabsPanel>
 
         <TabsPanel value="leads">

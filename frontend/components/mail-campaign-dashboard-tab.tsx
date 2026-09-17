@@ -1,15 +1,16 @@
 import { AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import type { MailCampaign, MailCampaignReview, MailEnrollment } from "@/lib/api";
+import { MailCampaignStatsStrip } from "@/components/mail-campaign-stats-strip";
+import type { MailCampaign, MailCampaignReview, MailCampaignStats, MailEnrollment } from "@/lib/api";
 
-// The command-center tab -- real planning/progress data only. No email
-// engagement percentages appear anywhere here: this dashboard has no open/
-// click/reply/bounce/unsubscribe tracking built yet, even though sending
-// itself now exists (Phase C). Showing five "Not available yet"
-// placeholders would be as much visual noise as fake 0% values, so this
-// tab omits that strip entirely rather than including it in either form --
-// see this feature's investigation report for the full reasoning.
+// The command-center tab. The stats strip (2026-09-17, see
+// MailCampaignStatsStrip) shows two real metrics computed from actual
+// MailEnrollment/MailSuppression data; the other two positions in that
+// strip render static "not tracked" copy, since neither has any backing
+// data anywhere for Astronomic Mail (confirmed by investigation, not
+// assumed -- see MailCampaignStatsService's own module docstring). Never
+// a fabricated percentage for either.
 //
 // Two genuinely different kinds of "suppressed"/audience numbers are both
 // surfaced here, deliberately kept in two separate stat groups rather than
@@ -27,10 +28,12 @@ export function MailCampaignDashboardTab({
   campaign,
   review,
   enrollments,
+  stats,
 }: {
   campaign: MailCampaign;
   review: MailCampaignReview | null;
   enrollments: MailEnrollment[];
+  stats: MailCampaignStats | null;
 }) {
   const pendingCount = enrollments.filter((e) => e.status === "pending").length;
   const suppressedCount = enrollments.filter((e) => e.status === "suppressed").length;
@@ -38,6 +41,8 @@ export function MailCampaignDashboardTab({
 
   return (
     <div className="space-y-6">
+      <MailCampaignStatsStrip stats={stats} />
+
       {review && review.readiness_warnings.length > 0 && (
         <Alert variant="destructive">
           <AlertTriangle />
@@ -74,8 +79,9 @@ export function MailCampaignDashboardTab({
             <Stat label="Theoretical total sends" value={review?.theoretical_total_sends ?? 0} emphasize />
           </dl>
           <p className="mt-3 text-xs text-muted-foreground/70">
-            Theoretical total sends is a planning statistic (eligible recipients &times; sequence steps) -- Astronomic
-            Mail has no scheduler yet, so this is not a projected send date or a guarantee.
+            Theoretical total sends is a planning statistic (eligible recipients &times; sequence steps) -- actual
+            sends still depend on the campaign&apos;s schedule, mailbox pacing, and real replies/suppressions along
+            the way, so this is not a projected send date or a guarantee.
           </p>
         </CardContent>
       </Card>

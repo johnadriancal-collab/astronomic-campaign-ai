@@ -23,11 +23,18 @@ test("the campaign detail page renders all six required tabs", () => {
 });
 
 test("the Channels tab sits between Steps and Schedule", () => {
-  const stepsIndex = PAGE_SOURCE.indexOf('value="steps">Steps<');
-  const channelsIndex = PAGE_SOURCE.indexOf('value="channels">Channels<');
-  const scheduleIndex = PAGE_SOURCE.indexOf('value="schedule">Schedule<');
+  // Matches `value="steps"` regardless of what other props (e.g. the
+  // 2026-09-17 full-width-distribution className) sit between it and the
+  // tab's own `>Steps<` text -- same relative-ordering check, just not
+  // pinned to an exact adjacent substring any more.
+  const stepsIndex = PAGE_SOURCE.indexOf('value="steps"');
+  const channelsIndex = PAGE_SOURCE.indexOf('value="channels"');
+  const scheduleIndex = PAGE_SOURCE.indexOf('value="schedule"');
   assert.ok(stepsIndex !== -1 && channelsIndex !== -1 && scheduleIndex !== -1);
   assert.ok(stepsIndex < channelsIndex && channelsIndex < scheduleIndex);
+  assert.match(PAGE_SOURCE.slice(stepsIndex, stepsIndex + 100), />Steps</);
+  assert.match(PAGE_SOURCE.slice(channelsIndex, channelsIndex + 100), />Channels</);
+  assert.match(PAGE_SOURCE.slice(scheduleIndex, scheduleIndex + 100), />Schedule</);
 });
 
 test("the campaign detail page preserves every native handler (nothing dropped in the split)", () => {
@@ -53,14 +60,19 @@ test("the campaign detail page still fetches enrollments, steps, review, and CRM
   assert.match(PAGE_SOURCE, /listCrmLists/);
 });
 
-test("the Dashboard tab never fabricates an engagement metric", () => {
+test("the Dashboard tab never fabricates an engagement metric it can't back with real data", () => {
+  // Reply rate / Unsub rate are excluded from this forbidden list
+  // (2026-09-17 stats strip) -- they are now REAL, computed from
+  // MailEnrollment/MailSuppression data via MailCampaignStatsService/
+  // MailCampaignStatsStrip (see mail-campaign-stats-strip.test.ts for
+  // that component's own coverage). Open/Click/Connection/Bounce rate
+  // remain forbidden here -- nothing tracks any of them for Astronomic
+  // Mail, so they must never appear as a computed value on this tab.
   for (const forbidden of [
     /Open Rate/i,
     /Click Rate/i,
-    /Reply Rate/i,
-    /Unsubscribe Rate/i,
-    /Bounce Rate/i,
     /Connection Rate/i,
+    /Bounce Rate/i,
     /email touches/i,
     /send activity/i,
   ]) {

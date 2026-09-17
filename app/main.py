@@ -144,6 +144,7 @@ from app.services.mail_batch_reconciliation_worker import MailBatchReconciliatio
 from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_campaign_list_service import MailCampaignListService
 from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
+from app.services.mail_campaign_stats_service import MailCampaignStatsService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
@@ -483,6 +484,15 @@ async def lifespan(app: FastAPI):
         campaign_store=mail_campaign_store,
         channel_store=mail_campaign_mailbox_store,
         enrollment_step_store=mail_enrollment_step_store,
+    )
+
+    # Campaign stats strip (2026-09-17) -- reply rate / unsub rate only,
+    # read-only. See MailCampaignStatsService's own module docstring for
+    # why open/bounce rate have no field at all here.
+    app.state.mail_campaign_stats_service = MailCampaignStatsService(
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        suppression_store=mail_suppression_store,
     )
 
     # Reply Detection V1 (2026-09-15). Read-only, gmail.metadata-scoped

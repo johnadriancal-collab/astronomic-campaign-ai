@@ -40,6 +40,7 @@ from app.dependencies import (
     get_mail_campaign_list_service,
     get_mail_campaign_mailbox_next_send_service,
     get_mail_campaign_service,
+    get_mail_campaign_stats_service,
     get_mail_inbox_service,
     get_mail_leads_service,
     get_mail_sending_service,
@@ -53,6 +54,7 @@ from app.models.mail import (
     MailCampaignReview,
     MailCampaignSchedule,
     MailCampaignSharing,
+    MailCampaignStats,
     MailCampaignWorkload,
     MailContactSuppressionStatus,
     MailEnrollment,
@@ -92,6 +94,7 @@ from app.services.mail_campaign_service import (
 )
 from app.services.mail_campaign_list_service import MailCampaignListService
 from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
+from app.services.mail_campaign_stats_service import MailCampaignStatsService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_sending_service import (
@@ -512,6 +515,25 @@ async def get_campaign_mailbox_next_send(
     MailCampaignMailboxNextSendService's own module docstring."""
     try:
         return await service.get_next_send_by_mailbox(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/campaigns/{mail_campaign_id}/stats", response_model=MailCampaignStats)
+async def get_campaign_stats(
+    mail_campaign_id: str,
+    service: MailCampaignStatsService = Depends(get_mail_campaign_stats_service),
+):
+    """Campaign detail stats strip (2026-09-17) -- Reply rate and Unsub
+    rate ONLY, computed fresh from real MailEnrollment/MailSuppression
+    data. Deliberately no open_rate/bounce_rate fields at all -- neither
+    is tracked anywhere for Astronomic Mail (see
+    MailCampaignStatsService's own module docstring for the investigation
+    behind that); the frontend renders "Not tracked" for those two as
+    static copy rather than this route ever returning a fabricated
+    number."""
+    try:
+        return await service.get_stats(mail_campaign_id)
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 

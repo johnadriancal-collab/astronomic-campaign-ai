@@ -2037,6 +2037,27 @@ export function getMailCampaignMailboxNextSend(mailCampaignId: string): Promise<
   return request<MailCampaignMailboxNextSend[]>(`/mail/campaigns/${mailCampaignId}/mailbox-next-send`);
 }
 
+// --- Campaign stats strip (2026-09-17) -- Reply rate / Unsub rate only ----
+//
+// Deliberately no open_rate/bounce_rate fields -- neither is tracked
+// anywhere for Astronomic Mail (see MailCampaignStatsService's own
+// docstring for the investigation this is based on). The Dashboard tab
+// renders "Not tracked" for those two as static copy, never derived from
+// this type.
+
+export interface MailCampaignStats {
+  mail_campaign_id: string;
+  total: number;
+  replied: number;
+  reply_rate_percent: number;
+  unsubscribed: number;
+  unsub_rate_percent: number;
+}
+
+export function getMailCampaignStats(mailCampaignId: string): Promise<MailCampaignStats> {
+  return request<MailCampaignStats>(`/mail/campaigns/${mailCampaignId}/stats`);
+}
+
 // --- Internal Hub login ------------------------------------------------
 //
 // A single shared email+password account guards the whole application --
