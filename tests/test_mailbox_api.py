@@ -220,7 +220,12 @@ def test_gmail_send_upgrade_start_requests_base_scopes_plus_gmail_send(client, o
     client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
 
     assert oauth_client.requested_scopes == [
-        ("openid", "email", "profile", "https://www.googleapis.com/auth/gmail.send", "https://www.googleapis.com/auth/gmail.metadata")
+        (
+            "openid", "email", "profile",
+            "https://www.googleapis.com/auth/gmail.send",
+            "https://www.googleapis.com/auth/gmail.metadata",
+            "https://www.googleapis.com/auth/gmail.readonly",
+        )
     ]
 
 

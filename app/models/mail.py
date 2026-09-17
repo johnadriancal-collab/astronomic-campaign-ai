@@ -1103,6 +1103,42 @@ class MailInboxReplyView(BaseModel):
     skipped_step_numbers: list[int]
 
 
+MailInboxReplyBodyStatus = Literal["ok", "scope_missing", "needs_reauth", "not_found", "provider_error"]
+
+
+class MailInboxReplyBody(BaseModel):
+    """Inbox V2 (2026-09-17) -- the on-demand reply-body fetch behind
+    GET /mail/inbox/replies/{enrollment_id}/body. Never persisted: this
+    is fetched fresh from Gmail every time a reply's detail view is
+    opened, under `gmail.readonly` (see GMAIL_READONLY_SCOPE's own
+    docstring), anchored to that ONE reply's existing MailReply.
+    gmail_message_id -- there is no way to reach any other message
+    through this type or its route.
+
+    `status` is always present and is the ONLY thing a caller should
+    branch on; `body_text`/`body_source` are set only when
+    status=="ok". Every other status is an expected, handleable outcome
+    (never an exception the API layer has to translate) so the
+    metadata-only Inbox list is never at risk from a body-fetch
+    failure:
+      - "scope_missing": this mailbox has never been granted
+        gmail.readonly.
+      - "needs_reauth": the mailbox's Google grant is confirmed invalid
+        (GoogleRefreshTokenInvalidError) -- reconnect required.
+      - "not_found": Gmail reports no such message (a genuinely
+        unusual case for a message this system itself detected a reply
+        from).
+      - "provider_error": a transient Gmail-side or network failure --
+        safe to retry.
+    `message` is a short, human-readable detail for any non-"ok"
+    status, never a raw provider payload."""
+
+    status: MailInboxReplyBodyStatus
+    body_text: str | None = None
+    body_source: Literal["plain", "html_converted"] | None = None
+    message: str | None = None
+
+
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --
 
 

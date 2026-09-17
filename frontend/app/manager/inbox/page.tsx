@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Inbox as InboxIcon } from "lucide-react";
+import { AlertTriangle, Inbox as InboxIcon, RefreshCw } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -13,25 +13,128 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { ApiError, listInboxReplies, type MailInboxReplyView } from "@/lib/api";
+import {
+  ApiError,
+  getInboxReplyBody,
+  listInboxReplies,
+  type MailInboxReplyBody,
+  type MailInboxReplyView,
+} from "@/lib/api";
 import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel } from "@/lib/mail";
 import { cn } from "@/lib/utils";
 
 // Inbox V1 (2026-09-17) -- a real, unified reply inbox across every
-// Astronomic Mail campaign, sourced entirely from GET /mail/inbox/replies
-// (itself a read-only join over the existing MailReply/MailEnrollment/
+// Astronomic Mail campaign, sourced from GET /mail/inbox/replies (a
+// read-only join over the existing MailReply/MailEnrollment/
 // MailCampaign/CrmContact/Mailbox/MailEnrollmentStep data -- no second
-// reply model, no fabricated state). Deliberately shows metadata only:
-// this system has reply detection under the gmail.metadata scope, which
-// never carries body/snippet content -- see MailInboxReplyView's backend
-// docstring. There is no unread/read model anywhere in this codebase, so
-// this page never invents one.
+// reply model, no fabricated state).
+//
+// Inbox V2 (2026-09-17) -- the detail view additionally fetches the
+// actual reply text on demand (GET /mail/inbox/replies/{id}/body, under
+// gmail.readonly) the moment it opens -- never eagerly for the whole
+// list, never persisted. `status` on that response is the only thing
+// this page branches on; every non-"ok" status is a normal, expected UI
+// state (reconnect needed, Gmail hiccup), not an error that breaks the
+// rest of the Inbox. There is no unread/read model anywhere in this
+// codebase, so this page never invents one.
 
 function formatDateTime(iso: string): string {
   return new Date(iso).toLocaleString(undefined, {
     dateStyle: "medium",
     timeStyle: "short",
   });
+}
+
+function ReplyBody({ enrollmentId }: { enrollmentId: string }) {
+  const [state, setState] = useState<{ loading: boolean; result: MailInboxReplyBody | null; error: string | null }>({
+    loading: true,
+    result: null,
+    error: null,
+  });
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, result: null, error: null });
+    getInboxReplyBody(enrollmentId)
+      .then((result) => {
+        if (!cancelled) setState({ loading: false, result, error: null });
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setState({
+            loading: false,
+            result: null,
+            error: err instanceof ApiError ? `Couldn't load the reply (${err.status}): ${err.message}` : "Couldn't reach the backend.",
+          });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrollmentId, attempt]);
+
+  if (state.loading) {
+    return <p className="text-sm text-muted-foreground">Loading reply…</p>;
+  }
+
+  if (state.error) {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-destructive">{state.error}</p>
+        <button
+          type="button"
+          onClick={() => setAttempt((n) => n + 1)}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground underline hover:no-underline"
+        >
+          <RefreshCw className="h-3 w-3" /> Try again
+        </button>
+      </div>
+    );
+  }
+
+  const result = state.result!;
+
+  if (result.status === "scope_missing" || result.status === "needs_reauth") {
+    return (
+      <p className="rounded-md bg-secondary/40 px-3 py-2 text-sm text-muted-foreground">
+        Reconnect this mailbox to enable reply-content viewing.
+      </p>
+    );
+  }
+
+  if (result.status === "not_found") {
+    return <p className="text-sm text-muted-foreground">Gmail no longer has this specific message.</p>;
+  }
+
+  if (result.status === "provider_error") {
+    return (
+      <div className="space-y-2">
+        <p className="text-sm text-muted-foreground">Couldn&apos;t load the reply right now.</p>
+        <button
+          type="button"
+          onClick={() => setAttempt((n) => n + 1)}
+          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground underline hover:no-underline"
+        >
+          <RefreshCw className="h-3 w-3" /> Try again
+        </button>
+      </div>
+    );
+  }
+
+  if (!result.body_text) {
+    return <p className="text-sm text-muted-foreground">(This message has no readable text.)</p>;
+  }
+
+  return (
+    <div>
+      <p className="whitespace-pre-wrap text-sm leading-relaxed">{result.body_text}</p>
+      {result.body_source === "html_converted" && (
+        <p className="mt-2 text-xs text-muted-foreground/70">Converted from an HTML-only message.</p>
+      )}
+    </div>
+  );
 }
 
 export default function InboxPage() {
@@ -197,10 +300,16 @@ export default function InboxPage() {
             <>
               <DialogHeader>
                 <DialogTitle>{selected.contact_name ?? selected.email}</DialogTitle>
-                <DialogDescription>{selected.email}</DialogDescription>
+                <DialogDescription>
+                  {selected.email} · {selected.campaign_name} · {formatDateTime(selected.replied_at)}
+                </DialogDescription>
               </DialogHeader>
-              <div className="space-y-4 px-6 pb-6 text-sm">
-                <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
+              <div className="space-y-4 px-6 pb-6">
+                <div className="rounded-md border border-border bg-secondary/20 p-4">
+                  <ReplyBody enrollmentId={selected.enrollment_id} />
+                </div>
+
+                <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
                   <span className="text-muted-foreground">Campaign</span>
                   <span className="flex items-center gap-2">
                     <Link href={`/manager/campaigns/mail/${selected.mail_campaign_id}`} className="underline hover:no-underline">
@@ -241,11 +350,6 @@ export default function InboxPage() {
                     </>
                   )}
                 </div>
-                <p className="rounded-md bg-secondary/40 px-3 py-2 text-xs text-muted-foreground">
-                  Metadata only — this Inbox shows who replied and when, not the reply&apos;s content. Full
-                  message-body viewing would require a separate Gmail scope decision (this mailbox currently
-                  has gmail.metadata, not gmail.readonly).
-                </p>
               </div>
             </>
           )}

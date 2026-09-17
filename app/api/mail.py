@@ -55,6 +55,7 @@ from app.models.mail import (
     MailEnrollmentBatchSource,
     MailEnrollmentStepStatus,
     MailExecutionStepView,
+    MailInboxReplyBody,
     MailInboxReplyView,
     MailLeadStartTrigger,
     MailScheduleValidationError,
@@ -362,6 +363,20 @@ async def list_inbox_replies(service: MailInboxService = Depends(get_mail_inbox_
     docstring for exactly what's joined in and what falls back to None on
     a lookup miss."""
     return await service.list_replies()
+
+
+@router.get("/inbox/replies/{enrollment_id}/body", response_model=MailInboxReplyBody)
+async def get_inbox_reply_body(enrollment_id: str, service: MailInboxService = Depends(get_mail_inbox_service)):
+    """Inbox V2 (2026-09-17) -- on-demand only, never bulk, never
+    persisted. `enrollment_id` is the ONLY input; the actual Gmail
+    message_id fetched is resolved server-side from that enrollment's
+    existing MailReply row, so this route can never be used to read an
+    arbitrary Gmail message (no message_id/thread_id ever accepted from
+    the caller). Always 200 -- see MailInboxReplyBody's own docstring
+    for why every outcome (including "can't show this right now") is a
+    typed `status` field, never an HTTP error the frontend has to
+    special-case to keep the rest of the Inbox working."""
+    return await service.get_reply_body(enrollment_id)
 
 
 # --- Workload / prospect batches (Phase 2, 2026-09-03) ---------------------

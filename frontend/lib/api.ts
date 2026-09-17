@@ -1424,6 +1424,28 @@ export function listInboxReplies(): Promise<MailInboxReplyView[]> {
   return request<MailInboxReplyView[]>("/mail/inbox/replies");
 }
 
+// --- Inbox V2 (2026-09-17): on-demand reply-body reading --------------------
+//
+// Always 200 -- `status` is the ONLY thing to branch on. "ok" carries
+// body_text/body_source; every other status is an expected, handleable
+// outcome (missing gmail.readonly grant, needs reconnect, Gmail 404, a
+// transient provider failure), never an exception this call throws. See
+// MailInboxReplyBody's backend docstring for the full contract.
+export type MailInboxReplyBodyStatus = "ok" | "scope_missing" | "needs_reauth" | "not_found" | "provider_error";
+
+export interface MailInboxReplyBody {
+  status: MailInboxReplyBodyStatus;
+  body_text: string | null;
+  body_source: "plain" | "html_converted" | null;
+  message: string | null;
+}
+
+/** On-demand only -- call this when a reply's detail view opens, not
+ * eagerly for the whole list. Never persisted server-side either. */
+export function getInboxReplyBody(enrollmentId: string): Promise<MailInboxReplyBody> {
+  return request<MailInboxReplyBody>(`/mail/inbox/replies/${enrollmentId}/body`);
+}
+
 // --- Workload / prospect batches / Add Prospects (Phase 2, Stage 2-4B) ----
 //
 // Workload is enrollment-status counts, entirely independent of the

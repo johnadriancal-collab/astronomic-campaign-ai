@@ -398,19 +398,6 @@ async def lifespan(app: FastAPI):
         mail_campaign_service=app.state.mail_campaign_service,
         link_store=mail_campaign_csv_prospect_link_store,
     )
-    # Inbox V1 (2026-09-17) -- reuses the SAME store instances everything
-    # above already holds (mail_reply_store in particular is the one
-    # MailSendingService.mark_enrollment_replied() writes to), never a
-    # second set of connections/state.
-    app.state.mail_inbox_service = MailInboxService(
-        reply_store=mail_reply_store,
-        campaign_store=mail_campaign_store,
-        enrollment_store=mail_enrollment_store,
-        enrollment_step_store=mail_enrollment_step_store,
-        contact_store=crm_contact_store,
-        mailbox_store=mailbox_store,
-    )
-
     # Trigger feature (Stage 5D, 2026-09-04) -- Trigger CRUD + occurrence
     # discovery/freeze/reconciliation. The occurrence-execution HALF of
     # this is only ever invoked from MailExecutionWorker.tick() below
@@ -442,6 +429,23 @@ async def lifespan(app: FastAPI):
         credential_store=mailbox_credential_store,
         oauth_client=GoogleOAuthClient(),
         activity_log=activity_log_service,
+    )
+
+    # Inbox V1 (2026-09-17) + V2 reply-body reading (2026-09-17) -- reuses
+    # the SAME store instances everything above already holds
+    # (mail_reply_store in particular is the one
+    # MailSendingService.mark_enrollment_replied() writes to) and the SAME
+    # mailbox_service instance (for refresh_mailbox_access_token() only --
+    # this never calls anything that mutates a mailbox), never a second
+    # set of connections/state.
+    app.state.mail_inbox_service = MailInboxService(
+        reply_store=mail_reply_store,
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        contact_store=crm_contact_store,
+        mailbox_store=mailbox_store,
+        mailbox_service=app.state.mailbox_service,
     )
 
     # Reply Detection V1 (2026-09-15). Read-only, gmail.metadata-scoped

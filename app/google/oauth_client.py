@@ -53,16 +53,34 @@ GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send"
 # resolved further without reading Gmail's own server-side thread state.
 # gmail.metadata grants headers/labels only, never message body or
 # attachments -- the narrowest scope that can answer "what does Gmail
-# actually think this thread contains," and deliberately NOT
-# gmail.readonly (broader, reads full content this codebase has no
-# present use for). Google classifies BOTH gmail.metadata and
-# gmail.readonly as Restricted scopes -- a heavier verification tier
-# than gmail.send's Sensitive classification if this app is ever taken
-# to External + Production for it (not pursued right now -- see
-# MailboxService.begin_gmail_send_upgrade()'s own docstring). Requesting
-# it is still entirely MailboxService's decision -- this constant
-# existing here grants nothing by itself.
+# actually think this thread contains." Google classifies BOTH
+# gmail.metadata and gmail.readonly (below) as Restricted scopes -- a
+# heavier verification tier than gmail.send's Sensitive classification
+# if this app is ever taken to External + Production for either of
+# them (see GMAIL_READONLY_SCOPE's own docstring for the 2026-09-17
+# follow-up that actually requests gmail.readonly). Requesting it is
+# still entirely MailboxService's decision -- this constant existing
+# here grants nothing by itself.
 GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata"
+
+# 2026-09-17 (Inbox V2) -- the ONE additional read scope this codebase is
+# authorized to request, specifically so Campaign Manager's Inbox can
+# show the actual text a lead replied with, not metadata alone. This is
+# the narrowest scope Google offers for message BODY access at all --
+# gmail.metadata (above) structurally cannot return body/snippet content
+# no matter what's asked of it, and every scope narrower than
+# gmail.readonly still only covers headers/labels/settings, never
+# content. Google classifies gmail.readonly as a Restricted scope, same
+# tier as gmail.metadata -- see this constant's own report to the user
+# (2026-09-17 Inbox V2 scope investigation) for whether this app's
+# current OAuth consent-screen configuration (Internal vs External,
+# Testing vs Production) means that tier is actually reachable today;
+# that is a Google Cloud Console setting this codebase cannot see or
+# change. Every caller of this scope (GmailMessageBodyClient) fetches
+# ONE already-known message_id anchored to an existing MailReply row --
+# never a list/search call -- so holding this scope never enables
+# browsing a mailbox beyond replies Campaign Manager already knows about.
+GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 
 
 class GoogleOAuthNotConfiguredError(Exception):

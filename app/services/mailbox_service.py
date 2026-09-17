@@ -70,6 +70,7 @@ from loguru import logger
 
 from app.google.oauth_client import (
     GMAIL_METADATA_SCOPE,
+    GMAIL_READONLY_SCOPE,
     GMAIL_SEND_SCOPE,
     SCOPES,
     GoogleOAuthClient,
@@ -245,18 +246,20 @@ class MailboxService:
 
     async def begin_gmail_send_upgrade(self, mailbox_id: str) -> str:
         """Returns the URL to send the browser to for upgrading an
-        EXISTING, already-connected mailbox to also grant `gmail.send`
-        AND `gmail.metadata` (2026-09-15 -- added specifically to enable
-        read-only Gmail thread-state diagnostics; see GMAIL_METADATA_
-        SCOPE's own docstring). One reconnect grants both -- there is no
-        separate "gmail metadata upgrade" flow. Requests the FULL desired
-        scope set (`openid email profile gmail.send gmail.metadata`), not
-        just the delta -- `include_granted_scopes=true` (set
-        unconditionally in build_authorize_url()) is Google's own
-        documented incremental-authorization mechanism and remains the
-        safety net, but requesting the complete set explicitly is the
-        primary, unambiguous path (see GoogleOAuthClient.
-        build_authorize_url()'s docstring).
+        EXISTING, already-connected mailbox to also grant `gmail.send`,
+        `gmail.metadata`, AND (2026-09-17, Inbox V2) `gmail.readonly` --
+        see GMAIL_READONLY_SCOPE's own docstring for why Inbox reply-body
+        reading needs it. One reconnect grants all three -- there is no
+        separate "gmail readonly upgrade" flow, same reasoning as
+        gmail.metadata riding along with gmail.send when this method was
+        first written. Requests the FULL desired scope set (`openid email
+        profile gmail.send gmail.metadata gmail.readonly`), not just the
+        delta -- `include_granted_scopes=true` (set unconditionally in
+        build_authorize_url()) is Google's own documented incremental-
+        authorization mechanism and remains the safety net, but
+        requesting the complete set explicitly is the primary,
+        unambiguous path (see GoogleOAuthClient.build_authorize_url()'s
+        docstring).
 
         Raises MailboxNotFound if `mailbox_id` doesn't exist. Does NOT
         require the mailbox to currently be CONNECTED -- an upgrade
@@ -272,7 +275,7 @@ class MailboxService:
         self._prune_expired_states()
         state = generate_state()
         authorize_url = self.oauth_client.build_authorize_url(
-            state, scopes=(*SCOPES, GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE)
+            state, scopes=(*SCOPES, GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE, GMAIL_READONLY_SCOPE)
         )
         self._pending_states[state] = _PendingState(
             created_at=datetime.now(timezone.utc),
@@ -361,12 +364,13 @@ class MailboxService:
                 raise MailboxNotFound(pending.expected_mailbox_id)
             if google_user_id != target.google_user_id:
                 raise MailboxOAuthAccountMismatchError(pending.expected_mailbox_id, target.google_user_id, google_user_id)
-            # Both required -- see begin_gmail_send_upgrade()'s own
-            # docstring for why gmail.metadata rides along with
-            # gmail.send in this one flow rather than a separate upgrade.
-            # Checked in a fixed order so a caller only ever sees ONE
-            # missing-scope error per failed attempt, not a random pick.
-            for required_scope in (GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE):
+            # All three required -- see begin_gmail_send_upgrade()'s own
+            # docstring for why gmail.metadata and gmail.readonly ride
+            # along with gmail.send in this one flow rather than
+            # separate upgrades. Checked in a fixed order so a caller
+            # only ever sees ONE missing-scope error per failed attempt,
+            # not a random pick.
+            for required_scope in (GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE, GMAIL_READONLY_SCOPE):
                 if required_scope not in granted_scopes:
                     raise MailboxOAuthScopeNotGrantedError(pending.expected_mailbox_id, required_scope, granted_scopes)
             if not refresh_token:

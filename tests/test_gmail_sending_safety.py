@@ -117,15 +117,21 @@ def test_gmail_send_endpoint_url_appears_only_in_the_gmail_api_client_module():
     """The literal Gmail send endpoint now legitimately exists in this
     codebase (app/google/gmail_api_client.py) -- but ONLY there. Anywhere
     else it appeared would be a second, unaudited path capable of
-    reaching Gmail. app/google/gmail_thread_reader_client.py
-    (2026-09-15) is a SEPARATE, deliberate, reviewed exception -- a
-    read-only client for users.threads.get/users.messages.get, structurally
-    incapable of sending (see that module's own docstring): no method on
-    it constructs or POSTs a message, and the messages/send substring
-    below still catches any actual send capability leaking in anywhere,
-    including that file."""
+    reaching Gmail. app/google/gmail_thread_reader_client.py (2026-09-15)
+    and app/google/gmail_message_body_client.py (2026-09-17, Inbox V2
+    reply-body reading) are SEPARATE, deliberate, reviewed exceptions --
+    read-only clients (threads.get/messages.get metadata-only, and
+    messages.get?format=full respectively), structurally incapable of
+    sending (see each module's own docstring): no method on either
+    constructs or POSTs a message, and the messages/send substring below
+    still catches any actual send capability leaking in anywhere,
+    including those two files."""
     hits = []
-    allowed = {Path("app/google/gmail_api_client.py"), Path("app/google/gmail_thread_reader_client.py")}
+    allowed = {
+        Path("app/google/gmail_api_client.py"),
+        Path("app/google/gmail_thread_reader_client.py"),
+        Path("app/google/gmail_message_body_client.py"),
+    }
     for path in Path("app").rglob("*.py"):
         if path in allowed:
             continue
@@ -134,9 +140,12 @@ def test_gmail_send_endpoint_url_appears_only_in_the_gmail_api_client_module():
             hits.append(str(path))
     assert hits == []
     # The one thing that must remain true even for the allowed read
-    # client: it must never contain the send endpoint's own path shape.
-    reader_source = Path("app/google/gmail_thread_reader_client.py").read_text()
-    assert "messages/send" not in reader_source
+    # clients: neither may ever contain the send endpoint's own path shape.
+    for allowed_read_client in (
+        "app/google/gmail_thread_reader_client.py",
+        "app/google/gmail_message_body_client.py",
+    ):
+        assert "messages/send" not in Path(allowed_read_client).read_text()
 
 
 def test_gmail_sender_module_has_no_module_level_instances():

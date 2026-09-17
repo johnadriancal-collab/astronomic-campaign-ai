@@ -26,6 +26,11 @@ import { mailboxDisplayName } from "@/lib/mailboxes";
 // MailboxService.begin_gmail_send_upgrade()'s own docstring) and changes
 // nothing, but a user who doesn't expect that failure would otherwise
 // have no idea why it happened.
+//
+// One reconnect through this same modal now grants all three of
+// gmail.send/gmail.metadata/gmail.readonly (2026-09-17, Inbox V2) -- see
+// that same docstring for why there's still only one upgrade flow, not
+// three.
 export function EnableGmailSendingModal({
   mailbox,
   onOpenChange,
@@ -62,8 +67,9 @@ export function EnableGmailSendingModal({
             Enable Gmail sending
           </DialogTitle>
           <DialogDescription>
-            {mailbox && `Grants Astronomic Mail permission to send campaign email as ${mailboxDisplayName(mailbox)}. `}
-            You&apos;ll be sent to Google to approve the additional permission.
+            {mailbox &&
+              `Grants Astronomic Mail permission to send campaign email as ${mailboxDisplayName(mailbox)}, and to read the content of replies in Campaign Manager's Inbox. `}
+            You&apos;ll be sent to Google to approve the additional permissions.
           </DialogDescription>
         </DialogHeader>
 
