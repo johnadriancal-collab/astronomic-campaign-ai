@@ -23,6 +23,8 @@ could actually see, and never a redirect carrying token/code details in its
 own query string (only a short, opaque error code, if any).
 """
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 
@@ -40,13 +42,15 @@ from app.google.gmail_thread_reader_client import (
     GmailThreadReaderClient,
     extract_headers,
 )
-from app.models.mailbox import Mailbox
+from app.models.mailbox import Mailbox, MailboxListItem
+from app.services.mailbox_authorization_health import compute_authorization_health
 from app.services.mailbox_service import (
     MailboxCredentialMissingError,
     MailboxNotFound,
     MailboxOAuthAccountMismatchError,
     MailboxOAuthDeniedError,
     MailboxOAuthMissingCodeError,
+    MailboxOAuthReconnectMissingRefreshTokenError,
     MailboxOAuthScopeNotGrantedError,
     MailboxOAuthStateError,
     MailboxOAuthUpgradeMissingRefreshTokenError,
@@ -62,9 +66,28 @@ def _frontend_url(path: str) -> str:
     return f"{base}{path}"
 
 
-@router.get("", response_model=list[Mailbox])
+@router.get("", response_model=list[MailboxListItem])
 async def list_mailboxes(service: MailboxService = Depends(get_mailbox_service)):
-    return await service.list_mailboxes()
+    """Every field on the underlying Mailbox row, plus the derived
+    authorization-health fields (see MailboxListItem's own docstring and
+    app/services/mailbox_authorization_health.py) -- computed fresh on
+    every call, never cached or persisted."""
+    mailboxes = await service.list_mailboxes()
+    now = datetime.now(timezone.utc)
+    items = []
+    for mailbox in mailboxes:
+        health = compute_authorization_health(mailbox, now)
+        items.append(
+            MailboxListItem(
+                **mailbox.model_dump(),
+                authorization_health=health.state,
+                authorized_at=health.authorized_at,
+                authorized_at_is_estimated=health.authorized_at_is_estimated,
+                authorized_age_seconds=health.age_seconds,
+                estimated_expires_at=health.estimated_expires_at,
+            )
+        )
+    return items
 
 
 @router.get("/google/start")
@@ -88,6 +111,23 @@ async def start_gmail_send_upgrade(mailbox_id: str, service: MailboxService = De
     itself navigates to directly)."""
     try:
         return {"authorize_url": await service.begin_gmail_send_upgrade(mailbox_id)}
+    except MailboxNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except GoogleOAuthNotConfiguredError as e:
+        raise HTTPException(status_code=503, detail=str(e))
+
+
+@router.get("/{mailbox_id}/google/gmail-reconnect/start")
+async def start_gmail_reconnect(mailbox_id: str, service: MailboxService = Depends(get_mailbox_service)):
+    """Begins the GMAIL_RECONNECT flow (2026-09-17, proactive OAuth
+    expiration warnings) for an EXISTING mailbox -- see
+    MailboxService.begin_gmail_reconnect()'s own docstring. Renews
+    EXACTLY this mailbox's current scopes, never escalates. Works on a
+    mailbox that is still fully CONNECTED today -- this is the routine
+    "Reconnect" action shown for a Day-6 "Reconnect soon" warning, not
+    only for an already-broken one."""
+    try:
+        return {"authorize_url": await service.begin_gmail_reconnect(mailbox_id)}
     except MailboxNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
     except GoogleOAuthNotConfiguredError as e:
@@ -137,6 +177,8 @@ async def google_oauth_callback(
         return RedirectResponse(_frontend_url("/manager/emails?error=scope_not_granted"))
     except MailboxOAuthUpgradeMissingRefreshTokenError:
         return RedirectResponse(_frontend_url("/manager/emails?error=upgrade_needs_retry"))
+    except MailboxOAuthReconnectMissingRefreshTokenError:
+        return RedirectResponse(_frontend_url("/manager/emails?error=reconnect_needs_retry"))
 
 
 @router.post("/{mailbox_id}/disconnect", response_model=Mailbox)

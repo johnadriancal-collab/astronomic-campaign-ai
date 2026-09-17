@@ -78,7 +78,7 @@ def test_mail_sending_engine_enabled_still_defaults_false():
     assert Settings.model_fields["mail_sending_engine_enabled"].default is False
 
 
-def test_mailboxes_api_still_declares_only_the_seven_approved_routes():
+def test_mailboxes_api_still_declares_only_the_eight_approved_routes():
     """Re-asserted here (duplicate of a B1 check in
     tests/test_mailbox_sending_safety.py) so a future PR that touches
     app/api/mailboxes.py as part of Gmail-sending work trips THIS file
@@ -90,15 +90,20 @@ def test_mailboxes_api_still_declares_only_the_seven_approved_routes():
     (2026-09-15, also deliberate and reviewed) are READ-ONLY Gmail
     diagnostics (gmail-diagnostic/threads/{id}, gmail-diagnostic/
     messages/{id}) -- see app/google/gmail_thread_reader_client.py's own
-    module docstring for why they exist; neither can send, queue, or
-    activate anything, same "incapable of sending" property as every
-    other route in this file."""
+    module docstring for why they exist. Route 8 (2026-09-17, proactive
+    OAuth expiration warnings) is start_gmail_reconnect() -- same shape
+    as route 3: GET-only, registers a pending state, requests only the
+    mailbox's OWN already-granted scopes (never escalates), and the
+    actual write still happens exclusively inside the unchanged callback
+    route. Every route here remains incapable of sending, queuing, or
+    activating anything."""
     source = Path("app/api/mailboxes.py").read_text()
     routes = re.findall(r'@router\.(get|post|patch|delete)\("([^"]*)"', source)
     assert set(routes) == {
         ("get", ""),
         ("get", "/google/start"),
         ("get", "/{mailbox_id}/google/gmail-send/start"),
+        ("get", "/{mailbox_id}/google/gmail-reconnect/start"),
         ("get", "/google/callback"),
         ("post", "/{mailbox_id}/disconnect"),
         ("get", "/{mailbox_id}/gmail-diagnostic/threads/{thread_id}"),

@@ -98,16 +98,24 @@ class OAuthFlowType(str, Enum):
 
     CONNECT = "connect"
     GMAIL_SEND_UPGRADE = "gmail_send_upgrade"
+    # 2026-09-17 (proactive OAuth expiration warnings) -- routine renewal
+    # of an EXISTING mailbox's CURRENT scopes, nothing more. Deliberately
+    # separate from GMAIL_SEND_UPGRADE, which always requests the full
+    # send+metadata+readonly set regardless of what's already granted --
+    # that flow is for deliberately ADDING capability; this one is for
+    # renewing what's already there without ever silently escalating
+    # scope. See MailboxService.begin_gmail_reconnect().
+    GMAIL_RECONNECT = "gmail_reconnect"
 
 
 @dataclass
 class _PendingState:
     created_at: datetime
     flow_type: OAuthFlowType = OAuthFlowType.CONNECT
-    # Set only for GMAIL_SEND_UPGRADE -- the mailbox this upgrade must
-    # resolve back to. handle_google_callback() verifies the Google
-    # account that actually completes the flow matches THIS mailbox's
-    # google_user_id before writing anything -- see
+    # Set for GMAIL_SEND_UPGRADE and GMAIL_RECONNECT -- the mailbox this
+    # flow must resolve back to. handle_google_callback() verifies the
+    # Google account that actually completes the flow matches THIS
+    # mailbox's google_user_id before writing anything -- see
     # MailboxOAuthAccountMismatchError.
     expected_mailbox_id: str | None = None
 
@@ -209,6 +217,21 @@ class MailboxOAuthUpgradeMissingRefreshTokenError(Exception):
         super().__init__(f"Mailbox {mailbox_id}: upgrade succeeded but Google issued no refresh token.")
 
 
+class MailboxOAuthReconnectMissingRefreshTokenError(Exception):
+    """A GMAIL_RECONNECT flow completed for the correct account, but
+    Google's token response included no `refresh_token` -- same
+    reasoning as MailboxOAuthUpgradeMissingRefreshTokenError's own
+    docstring (this app always sends `prompt=consent`, so a genuine
+    renewal omitting a fresh refresh_token would be an anomaly, not the
+    expected case). Treated as a failed reconnect, not "keep the old
+    credential": zero mutation, `gmail_authorized_at` is left completely
+    unchanged, and the caller should simply retry."""
+
+    def __init__(self, mailbox_id: str):
+        self.mailbox_id = mailbox_id
+        super().__init__(f"Mailbox {mailbox_id}: reconnect succeeded but Google issued no refresh token.")
+
+
 class MailboxService:
     def __init__(
         self,
@@ -284,6 +307,40 @@ class MailboxService:
         )
         return authorize_url
 
+    async def begin_gmail_reconnect(self, mailbox_id: str) -> str:
+        """Returns the URL to send the browser to for a ROUTINE renewal of
+        an EXISTING, already-connected mailbox -- requests EXACTLY the
+        scopes this mailbox already has today (`mailbox.granted_scopes`),
+        never more. This exists specifically so a Day-6 "authorization
+        expiring soon" warning can be resolved by reconnecting WITHOUT
+        forcing every mailbox through begin_gmail_send_upgrade()'s full
+        send+metadata+readonly set -- a mailbox that was never upgraded to
+        send shouldn't have Gmail sending silently switched on just
+        because its owner clicked "Reconnect" in response to an
+        expiration warning. Works on a mailbox that is still fully
+        CONNECTED today (this is the whole point -- proactive renewal
+        before anything actually breaks), not only on one already showing
+        NEEDS_REAUTH.
+
+        Falls back to the base `SCOPES` if `granted_scopes` is somehow
+        empty (shouldn't happen for any mailbox that completed a real
+        connect, but keeps this from requesting zero scopes). Raises
+        MailboxNotFound if `mailbox_id` doesn't exist."""
+        mailbox = await self.mailbox_store.get(mailbox_id)
+        if mailbox is None:
+            raise MailboxNotFound(mailbox_id)
+
+        self._prune_expired_states()
+        state = generate_state()
+        scopes = tuple(mailbox.granted_scopes) if mailbox.granted_scopes else SCOPES
+        authorize_url = self.oauth_client.build_authorize_url(state, scopes=scopes)
+        self._pending_states[state] = _PendingState(
+            created_at=datetime.now(timezone.utc),
+            flow_type=OAuthFlowType.GMAIL_RECONNECT,
+            expected_mailbox_id=mailbox_id,
+        )
+        return authorize_url
+
     def _prune_expired_states(self) -> None:
         now = datetime.now(timezone.utc)
         expired = [s for s, p in self._pending_states.items() if now - p.created_at > _STATE_TTL]
@@ -333,6 +390,25 @@ class MailboxService:
         three checks fails with ZERO mutation -- see this module's
         docstring for the credential-first write order that protects
         every write that DOES happen after these checks pass.
+
+        GMAIL_RECONNECT flow (2026-09-17): same account-match + refresh-
+        token-required checks as GMAIL_SEND_UPGRADE, but deliberately NO
+        scope check and NO `granted_scopes` update below -- this flow only
+        ever requested the mailbox's OWN pre-existing scopes (see
+        begin_gmail_reconnect()), so `granted_scopes` is left exactly as
+        it was rather than adopted from Google's response, even if
+        `include_granted_scopes=true` happened to report something
+        broader. This is what makes "routine reconnect never silently
+        escalates scope" true regardless of what Google's incremental-
+        auth machinery reports, not just true because of what was
+        requested.
+
+        `gmail_authorized_at` is set to `now` on every flow's successful
+        commit below, but ONLY when this exchange actually produced a
+        refresh_token that gets persisted (`encrypted_refresh_token is
+        not None`) -- the one CONNECT-flow edge case where Google omits
+        one and the existing credential is kept as-is does NOT bump it,
+        since nothing was actually renewed.
         """
         pending = self._consume_state(state)
 
@@ -376,6 +452,15 @@ class MailboxService:
             if not refresh_token:
                 raise MailboxOAuthUpgradeMissingRefreshTokenError(pending.expected_mailbox_id)
             existing = target
+        elif pending.flow_type == OAuthFlowType.GMAIL_RECONNECT:
+            target = await self.mailbox_store.get(pending.expected_mailbox_id)
+            if target is None:
+                raise MailboxNotFound(pending.expected_mailbox_id)
+            if google_user_id != target.google_user_id:
+                raise MailboxOAuthAccountMismatchError(pending.expected_mailbox_id, target.google_user_id, google_user_id)
+            if not refresh_token:
+                raise MailboxOAuthReconnectMissingRefreshTokenError(pending.expected_mailbox_id)
+            existing = target
         else:
             existing = None
             if google_user_id:
@@ -400,12 +485,17 @@ class MailboxService:
         # the ORDINARY connect/reconnect flow, if Google ever omits it,
         # keep whatever credential we already have rather than wiping a
         # working one, and skip encryption entirely (nothing new to
-        # encrypt). The GMAIL_SEND_UPGRADE flow already required a
-        # refresh_token to be present above, so this branch is only ever
-        # "no new token" for CONNECT.
+        # encrypt). Both GMAIL_SEND_UPGRADE and GMAIL_RECONNECT already
+        # required a refresh_token to be present above, so this branch is
+        # only ever "no new token" for CONNECT.
         encrypted_refresh_token: str | None = None
         if refresh_token:
             encrypted_refresh_token = encrypt_refresh_token(refresh_token)
+
+        # gmail_authorized_at only bumps when a refresh token was actually
+        # (re)issued and is about to be persisted below -- see this
+        # method's own docstring.
+        authorized_now = encrypted_refresh_token is not None
 
         # --- PREPARE: the credential is written FIRST -- see this
         # module's own docstring for exactly why this order (not "mailbox
@@ -447,24 +537,30 @@ class MailboxService:
 
         # --- COMMIT: the public Mailbox row is written LAST.
         if existing is not None:
-            mailbox = existing.model_copy(
-                update={
-                    "email": email,
-                    "display_name": display_name or existing.display_name,
-                    "status": MailboxStatus.CONNECTED,
-                    "google_user_id": google_user_id or existing.google_user_id,
-                    "granted_scopes": granted_scopes or existing.granted_scopes,
-                    "updated_at": now,
-                    "disconnected_at": None,
-                }
-            )
+            update = {
+                "email": email,
+                "display_name": display_name or existing.display_name,
+                "status": MailboxStatus.CONNECTED,
+                "google_user_id": google_user_id or existing.google_user_id,
+                "updated_at": now,
+                "disconnected_at": None,
+            }
+            # GMAIL_RECONNECT never adopts Google's reported scopes -- see
+            # this method's own docstring on why that flow's whole point
+            # is "renew exactly what's already there," never escalate.
+            if pending.flow_type != OAuthFlowType.GMAIL_RECONNECT:
+                update["granted_scopes"] = granted_scopes or existing.granted_scopes
+            if authorized_now:
+                update["gmail_authorized_at"] = now
+            mailbox = existing.model_copy(update=update)
             await self.mailbox_store.save(mailbox)
         else:
             # Brand-new mailbox (CONNECT flow only -- GMAIL_SEND_UPGRADE
-            # always resolves `existing` to the known target above, so
-            # this branch never runs for an upgrade). mailbox_id is minted
-            # here, in memory, BEFORE either write, so the credential
-            # (if any) can still be written first, keyed by this same id.
+            # and GMAIL_RECONNECT always resolve `existing` to the known
+            # target above, so this branch never runs for either of
+            # them). mailbox_id is minted here, in memory, BEFORE either
+            # write, so the credential (if any) can still be written
+            # first, keyed by this same id.
             mailbox = Mailbox(
                 mailbox_id=str(uuid.uuid4()),
                 provider=MailboxProvider.GOOGLE,
@@ -475,6 +571,7 @@ class MailboxService:
                 granted_scopes=granted_scopes,
                 connected_at=now,
                 updated_at=now,
+                gmail_authorized_at=now if authorized_now else None,
             )
             if encrypted_refresh_token is not None:
                 await self.credential_store.create(

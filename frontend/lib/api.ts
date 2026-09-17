@@ -1914,6 +1914,13 @@ export function getMailSuppressionStatus(email: string): Promise<MailContactSupp
 export type MailboxProvider = "google";
 export type MailboxStatus = "connected" | "needs_reauth" | "disconnected";
 
+// 2026-09-17 (proactive OAuth expiration warnings). Computed fresh by the
+// backend on every GET /mailboxes call (see MailboxListItem/
+// mailbox_authorization_health.py) -- never persisted, never stale. null
+// only for a DISCONNECTED mailbox, which has no meaningful authorization
+// age to show (its own MailboxStatus badge already says so).
+export type MailboxAuthorizationHealth = "connected" | "reconnect_soon" | "needs_reauth" | null;
+
 export interface Mailbox {
   mailbox_id: string;
   provider: MailboxProvider;
@@ -1925,6 +1932,17 @@ export interface Mailbox {
   connected_at: string;
   updated_at: string;
   disconnected_at: string | null;
+  authorization_health: MailboxAuthorizationHealth;
+  // The timestamp actually used for the age calculation -- real
+  // gmail_authorized_at if the backend has one, else an ESTIMATE (see
+  // authorized_at_is_estimated) -- never null for a non-disconnected
+  // mailbox, even one connected before this field existed.
+  authorized_at: string | null;
+  authorized_at_is_estimated: boolean;
+  authorized_age_seconds: number | null;
+  // null when the Testing-mode 7-day assumption is disabled on the
+  // backend, or for a disconnected mailbox.
+  estimated_expires_at: string | null;
 }
 
 export function listMailboxes(): Promise<Mailbox[]> {
@@ -1963,6 +1981,21 @@ export function startGmailSendUpgrade(mailboxId: string): Promise<{ authorize_ur
   return request<{ authorize_url: string }>(`/mailboxes/${mailboxId}/google/gmail-send/start`);
 }
 
+/**
+ * Starts a ROUTINE renewal for an EXISTING, already-connected mailbox
+ * (2026-09-17, proactive OAuth expiration warnings) -- see
+ * app/api/mailboxes.py's start_gmail_reconnect(). Requests EXACTLY this
+ * mailbox's current scopes, never more -- unlike startGmailSendUpgrade()
+ * above, this never adds Gmail-sending capability to a mailbox that
+ * doesn't already have it. Works on a mailbox that is still fully
+ * CONNECTED today; that's the whole point of a proactive warning. Same
+ * full-page-navigation pattern and same-account requirement as
+ * startGmailSendUpgrade().
+ */
+export function startGmailReconnect(mailboxId: string): Promise<{ authorize_url: string }> {
+  return request<{ authorize_url: string }>(`/mailboxes/${mailboxId}/google/gmail-reconnect/start`);
+}
+
 // --- Mail Campaign Channels (selected sending mailboxes) -------------------
 //
 // Which already-connected mailboxes (see listMailboxes() above) may send a
@@ -1985,6 +2018,23 @@ export function setMailCampaignChannels(mailCampaignId: string, mailboxIds: stri
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ mailbox_ids: mailboxIds }),
   });
+}
+
+// --- Campaign mailbox next-send (2026-09-17, proactive OAuth expiration --
+// warnings) -- one entry per mailbox assigned to a campaign, with its
+// earliest still-QUEUED send time. Pair with that mailbox's own
+// estimated_expires_at (see listMailboxes()/Mailbox above) to decide
+// whether to show the stronger "reconnect required before next scheduled
+// send" warning -- see MailCampaignMailboxNextSendService's own docstring.
+
+export interface MailCampaignMailboxNextSend {
+  mail_campaign_id: string;
+  mailbox_id: string;
+  next_send_at: string | null;
+}
+
+export function getMailCampaignMailboxNextSend(mailCampaignId: string): Promise<MailCampaignMailboxNextSend[]> {
+  return request<MailCampaignMailboxNextSend[]>(`/mail/campaigns/${mailCampaignId}/mailbox-next-send`);
 }
 
 // --- Internal Hub login ------------------------------------------------

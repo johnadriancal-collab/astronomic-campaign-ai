@@ -38,6 +38,7 @@ from app.services.mailbox_service import (
     MailboxOAuthAccountMismatchError,
     MailboxOAuthDeniedError,
     MailboxOAuthMissingCodeError,
+    MailboxOAuthReconnectMissingRefreshTokenError,
     MailboxOAuthScopeNotGrantedError,
     MailboxOAuthStateError,
     MailboxOAuthUpgradeMissingRefreshTokenError,
@@ -977,6 +978,208 @@ async def test_repeated_ordinary_reconnects_rotate_previous_credential_without_a
     assert decrypt_refresh_token(credential_after_3.encrypted_refresh_token) == "token-3"
     # Rotated to token-2 -- NOT token-1, and not any multi-entry history.
     assert decrypt_refresh_token(credential_after_3.previous_encrypted_refresh_token) == "token-2"
+
+
+# --- Gmail routine reconnect (2026-09-17, proactive OAuth expiration -------
+# --- warnings) -- same-scopes-only renewal, distinct from the upgrade flow -
+
+
+async def test_reconnect_requests_exactly_the_mailboxs_current_two_scopes(connected_mailbox_service, oauth_client):
+    """Mailbox has gmail.send + gmail.metadata (not readonly) -- routine
+    Reconnect must renew exactly those two, per the approved spec's own
+    example, never escalate to the full three-scope upgrade set."""
+    service, mailbox = connected_mailbox_service
+    two_scopes = [*SCOPES, GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE]
+    await service.mailbox_store.save(mailbox.model_copy(update={"granted_scopes": two_scopes}))
+
+    await service.begin_gmail_reconnect(mailbox.mailbox_id)
+
+    assert oauth_client.requested_scopes == [tuple(two_scopes)]
+    assert GMAIL_READONLY_SCOPE not in oauth_client.requested_scopes[0]
+
+
+async def test_reconnect_requests_all_three_when_mailbox_already_has_all_three(connected_mailbox_service, oauth_client):
+    service, mailbox = connected_mailbox_service
+    three_scopes = [*SCOPES, GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE, GMAIL_READONLY_SCOPE]
+    await service.mailbox_store.save(mailbox.model_copy(update={"granted_scopes": three_scopes}))
+
+    await service.begin_gmail_reconnect(mailbox.mailbox_id)
+
+    assert oauth_client.requested_scopes == [tuple(three_scopes)]
+
+
+async def test_reconnect_for_unknown_mailbox_raises(service):
+    with pytest.raises(MailboxNotFound):
+        await service.begin_gmail_reconnect("does-not-exist")
+
+
+async def test_reconnect_works_while_mailbox_is_still_fully_connected(connected_mailbox_service, oauth_client):
+    """The whole point: proactive renewal must succeed on a mailbox that
+    is NOT broken yet -- connected_mailbox_service's fixture mailbox is
+    already CONNECTED, no invalid_grant, no NEEDS_REAUTH."""
+    service, mailbox = connected_mailbox_service
+    assert mailbox.status == MailboxStatus.CONNECTED
+    oauth_client.userinfo_response = {"sub": mailbox.google_user_id, "email": mailbox.email, "name": "Victoria Bennett"}
+    oauth_client.token_response = {
+        "access_token": "fake-access-token",
+        "refresh_token": "renewed-refresh-token",
+        "scope": "openid email profile",
+    }
+    url = await service.begin_gmail_reconnect(mailbox.mailbox_id)
+    state = url.split("state=")[1]
+
+    updated = await service.handle_google_callback(code="abc", state=state, error=None)
+
+    assert updated.status == MailboxStatus.CONNECTED
+    assert updated.mailbox_id == mailbox.mailbox_id
+
+
+async def test_reconnect_sets_gmail_authorized_at_to_now(connected_mailbox_service, oauth_client):
+    from datetime import datetime, timezone
+
+    service, mailbox = connected_mailbox_service
+    assert mailbox.gmail_authorized_at is None  # fixture predates this field
+    oauth_client.userinfo_response = {"sub": mailbox.google_user_id, "email": mailbox.email, "name": "Victoria Bennett"}
+    oauth_client.token_response = {
+        "access_token": "fake-access-token",
+        "refresh_token": "renewed-refresh-token",
+        "scope": "openid email profile",
+    }
+    before = datetime.now(timezone.utc)
+
+    url = await service.begin_gmail_reconnect(mailbox.mailbox_id)
+    updated = await service.handle_google_callback(code="abc", state=url.split("state=")[1], error=None)
+
+    after = datetime.now(timezone.utc)
+    assert updated.gmail_authorized_at is not None
+    assert before <= updated.gmail_authorized_at <= after
+
+
+async def test_reconnect_does_not_add_new_scopes_even_if_google_reports_more(connected_mailbox_service, oauth_client):
+    """Google's `include_granted_scopes=true` could in principle report a
+    broader grant than what THIS reconnect explicitly requested (e.g. a
+    scope granted in some earlier, separate consent). granted_scopes must
+    be left completely unchanged by a GMAIL_RECONNECT flow regardless --
+    this flow's whole contract is "renew what's already there," and it
+    must hold even if Google's response looks more generous than asked."""
+    service, mailbox = connected_mailbox_service
+    two_scopes = [*SCOPES, GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE]
+    await service.mailbox_store.save(mailbox.model_copy(update={"granted_scopes": two_scopes}))
+    oauth_client.userinfo_response = {"sub": mailbox.google_user_id, "email": mailbox.email, "name": "Victoria Bennett"}
+    # Google's response includes gmail.readonly even though this
+    # reconnect only asked for send+metadata.
+    oauth_client.token_response = {
+        "access_token": "fake-access-token",
+        "refresh_token": "renewed-refresh-token",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/gmail.readonly",
+    }
+
+    url = await service.begin_gmail_reconnect(mailbox.mailbox_id)
+    updated = await service.handle_google_callback(code="abc", state=url.split("state=")[1], error=None)
+
+    assert sorted(updated.granted_scopes) == sorted(two_scopes)
+    assert GMAIL_READONLY_SCOPE not in updated.granted_scopes
+
+
+async def test_reconnect_with_wrong_google_account_is_rejected_with_zero_mutation(connected_mailbox_service, oauth_client):
+    service, mailbox = connected_mailbox_service
+    oauth_client.userinfo_response = {"sub": "google-sub-someone-else", "email": "someone-else@example.com", "name": "Someone Else"}
+    oauth_client.token_response = {
+        "access_token": "fake-access-token",
+        "refresh_token": "new-refresh-token",
+        "scope": "openid email profile",
+    }
+    url = await service.begin_gmail_reconnect(mailbox.mailbox_id)
+    state = url.split("state=")[1]
+
+    with pytest.raises(MailboxOAuthAccountMismatchError):
+        await service.handle_google_callback(code="abc", state=state, error=None)
+
+    unchanged = await service.mailbox_store.get(mailbox.mailbox_id)
+    assert unchanged == mailbox
+    assert unchanged.gmail_authorized_at is None
+
+
+async def test_reconnect_missing_refresh_token_raises_and_leaves_everything_unchanged(connected_mailbox_service, oauth_client):
+    service, mailbox = connected_mailbox_service
+    oauth_client.userinfo_response = {"sub": mailbox.google_user_id, "email": mailbox.email, "name": "Victoria Bennett"}
+    oauth_client.token_response = {
+        "access_token": "fake-access-token",
+        # no refresh_token key at all
+        "scope": "openid email profile",
+    }
+    url = await service.begin_gmail_reconnect(mailbox.mailbox_id)
+    state = url.split("state=")[1]
+
+    with pytest.raises(MailboxOAuthReconnectMissingRefreshTokenError):
+        await service.handle_google_callback(code="abc", state=state, error=None)
+
+    unchanged = await service.mailbox_store.get(mailbox.mailbox_id)
+    assert unchanged == mailbox
+    assert unchanged.gmail_authorized_at is None
+    credential = await service.credential_store.get(mailbox.mailbox_id)
+    from app.services.token_encryption import decrypt_refresh_token
+
+    assert decrypt_refresh_token(credential.encrypted_refresh_token) == "original-refresh-token"
+
+
+async def test_cancelled_reconnect_leaves_gmail_authorized_at_unchanged(connected_mailbox_service, oauth_client):
+    """The user clicks Reconnect but then cancels at Google's consent
+    screen -- state is consumed, MailboxOAuthDeniedError is raised, and
+    NOTHING about the mailbox (least of all gmail_authorized_at) moves."""
+    service, mailbox = connected_mailbox_service
+    url = await service.begin_gmail_reconnect(mailbox.mailbox_id)
+    state = url.split("state=")[1]
+
+    with pytest.raises(MailboxOAuthDeniedError):
+        await service.handle_google_callback(code=None, state=state, error="access_denied")
+
+    unchanged = await service.mailbox_store.get(mailbox.mailbox_id)
+    assert unchanged == mailbox
+    assert unchanged.gmail_authorized_at is None
+
+
+async def test_reconnect_gets_a_genuinely_new_refresh_token(connected_mailbox_service, oauth_client):
+    service, mailbox = connected_mailbox_service
+    oauth_client.userinfo_response = {"sub": mailbox.google_user_id, "email": mailbox.email, "name": "Victoria Bennett"}
+    oauth_client.token_response = {
+        "access_token": "fake-access-token",
+        "refresh_token": "brand-new-renewed-token",
+        "scope": "openid email profile",
+    }
+    url = await service.begin_gmail_reconnect(mailbox.mailbox_id)
+    await service.handle_google_callback(code="abc", state=url.split("state=")[1], error=None)
+
+    credential = await service.credential_store.get(mailbox.mailbox_id)
+    from app.services.token_encryption import decrypt_refresh_token
+
+    assert decrypt_refresh_token(credential.encrypted_refresh_token) == "brand-new-renewed-token"
+    assert decrypt_refresh_token(credential.previous_encrypted_refresh_token) == "original-refresh-token"
+
+
+async def test_first_connect_sets_gmail_authorized_at(service):
+    """CONNECT flow (first-ever connection) also bumps
+    gmail_authorized_at -- it's not GMAIL_RECONNECT-only."""
+    state = service.begin_google_oauth().split("state=")[1]
+
+    mailbox = await service.handle_google_callback(code="abc", state=state, error=None)
+
+    assert mailbox.gmail_authorized_at is not None
+    assert mailbox.gmail_authorized_at == mailbox.updated_at
+
+
+async def test_gmail_send_upgrade_also_sets_gmail_authorized_at(connected_mailbox_service, oauth_client):
+    service, mailbox = connected_mailbox_service
+    oauth_client.userinfo_response = {"sub": mailbox.google_user_id, "email": mailbox.email, "name": "Victoria Bennett"}
+    oauth_client.token_response = {
+        "access_token": "fake-access-token",
+        "refresh_token": "new-refresh-token",
+        "scope": "openid email profile https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.metadata https://www.googleapis.com/auth/gmail.readonly",
+    }
+    url = await service.begin_gmail_send_upgrade(mailbox.mailbox_id)
+    updated = await service.handle_google_callback(code="abc", state=url.split("state=")[1], error=None)
+
+    assert updated.gmail_authorized_at is not None
 
 
 # --- Access-token refresh ----------------------------------------------------

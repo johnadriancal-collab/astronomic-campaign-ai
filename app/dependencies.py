@@ -35,6 +35,7 @@ from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProspectService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_campaign_list_service import MailCampaignListService
+from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_sending_service import MailSendingService
@@ -110,6 +111,10 @@ async def get_mail_leads_service(request: Request) -> MailLeadsService:
 
 async def get_mail_campaign_list_service(request: Request) -> MailCampaignListService:
     return request.app.state.mail_campaign_list_service
+
+
+async def get_mail_campaign_mailbox_next_send_service(request: Request) -> MailCampaignMailboxNextSendService:
+    return request.app.state.mail_campaign_mailbox_next_send_service
 
 
 async def get_mail_sending_service(request: Request) -> MailSendingService:

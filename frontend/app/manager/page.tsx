@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ChartColumn, Inbox, Mail, Megaphone, Settings, Users } from "lucide-react";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { MailboxHealthWarning } from "@/components/mailbox-health-warning";
 
 // Overview-card presentation only (2026-09-17): none of these six cards
 // carries a not-yet-built badge -- that's a deliberate call by the
@@ -57,6 +58,8 @@ export default function ManagerOverviewPage() {
           replies, and performance in one place.
         </p>
       </div>
+
+      <MailboxHealthWarning />
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {SECTIONS.map((section) => (

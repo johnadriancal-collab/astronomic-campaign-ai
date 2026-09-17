@@ -26,6 +26,7 @@ import {
   deleteMailSequenceStep,
   getMailCampaign,
   getMailCampaignChannels,
+  getMailCampaignMailboxNextSend,
   getMailCampaignReview,
   getMailCampaignSchedule,
   getMailCampaignWorkload,
@@ -45,6 +46,7 @@ import {
   type CrmContactListSummary,
   type Mailbox,
   type MailCampaign,
+  type MailCampaignMailboxNextSend,
   type MailCampaignReview,
   type MailCampaignSharing,
   type MailCampaignWorkload,
@@ -53,6 +55,12 @@ import {
   type MailLeadStartTrigger,
   type MailSequenceStep,
 } from "@/lib/api";
+import {
+  estimatedExpiryLabel,
+  mailboxAuthorizationHealthLabel,
+  mailboxDisplayName,
+  reconnectRequiredBeforeNextSend,
+} from "@/lib/mailboxes";
 
 export default function MailCampaignDetailPage() {
   const params = useParams<{ id: string }>();
@@ -109,11 +117,29 @@ export default function MailCampaignDetailPage() {
   const [selectedMailboxIds, setSelectedMailboxIds] = useState<string[]>([]);
   const [savingChannels, setSavingChannels] = useState(false);
   const [channelsError, setChannelsError] = useState<string | null>(null);
+  const [mailboxNextSend, setMailboxNextSend] = useState<MailCampaignMailboxNextSend[]>([]);
 
   const [triggers, setTriggers] = useState<MailLeadStartTrigger[]>([]);
   const [triggersError, setTriggersError] = useState<string | null>(null);
 
   const editable = campaign?.status === "draft";
+
+  // Proactive OAuth expiration warnings (2026-09-17) -- one entry per
+  // currently-assigned mailbox that's RECONNECT_SOON/NEEDS_REAUTH, paired
+  // with whether its estimated expiry falls before this campaign's own
+  // next scheduled send for it. Purely informational -- see
+  // MailboxHealthWarning's own docstring; this never pauses the campaign
+  // itself just because a mailbox is Day 6.
+  const atRiskAssignedMailboxes = selectedMailboxIds
+    .map((mailboxId) => {
+      const mailbox = mailboxes?.find((m) => m.mailbox_id === mailboxId);
+      const nextSend = mailboxNextSend.find((n) => n.mailbox_id === mailboxId)?.next_send_at ?? null;
+      return mailbox ? { mailbox, nextSend } : null;
+    })
+    .filter(
+      (entry): entry is { mailbox: Mailbox; nextSend: string | null } =>
+        entry !== null && (entry.mailbox.authorization_health === "reconnect_soon" || entry.mailbox.authorization_health === "needs_reauth")
+    );
 
   async function load() {
     try {
@@ -164,6 +190,15 @@ export default function MailCampaignDetailPage() {
   useEffect(() => {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campaignId]);
+
+  useEffect(() => {
+    // Proactive OAuth expiration warnings (2026-09-17) -- best-effort,
+    // non-blocking: a failure here just means this campaign's mailbox-
+    // health banner doesn't render, never an error for the whole page.
+    getMailCampaignMailboxNextSend(campaignId)
+      .then(setMailboxNextSend)
+      .catch(() => {});
   }, [campaignId]);
 
   async function refreshReview() {
@@ -552,6 +587,29 @@ export default function MailCampaignDetailPage() {
       </Link>
 
       <MailCampaignHeader campaign={campaign} busy={busy} onMarkReady={handleMarkReady} onUnlock={handleUnlock} onArchive={handleArchive} />
+
+      {atRiskAssignedMailboxes.map(({ mailbox, nextSend }) => {
+        const stronger = reconnectRequiredBeforeNextSend(mailbox.estimated_expires_at, nextSend);
+        const needsReauth = mailbox.authorization_health === "needs_reauth";
+        return (
+          <Alert
+            key={mailbox.mailbox_id}
+            variant={needsReauth ? "destructive" : "default"}
+            className={cn("mb-4", !needsReauth && "border-amber-300 text-amber-900")}
+          >
+            <AlertTriangle className={cn(!needsReauth && "text-amber-700")} />
+            <AlertTitle className={cn(!needsReauth && "text-amber-900")}>
+              {mailboxDisplayName(mailbox)}&apos;s {mailboxAuthorizationHealthLabel(mailbox.authorization_health).toLowerCase()}
+            </AlertTitle>
+            <AlertDescription className={cn(!needsReauth && "text-amber-800")}>
+              {estimatedExpiryLabel(mailbox.estimated_expires_at)}{" "}
+              {stronger
+                ? "Reconnect required before the next scheduled send."
+                : "Reconnect this inbox from Campaign Manager → Emails."}
+            </AlertDescription>
+          </Alert>
+        );
+      })}
 
       {actionError && (
         <Alert variant="destructive" className="mb-4">

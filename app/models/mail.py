@@ -1292,6 +1292,26 @@ class MailCampaignListPage(BaseModel):
     page_size: int
 
 
+# --- Campaign mailbox next-send (2026-09-17, proactive OAuth expiration --
+# warnings) -- see MailCampaignMailboxNextSendService. Deliberately NOT
+# carrying the mailbox's authorization-health fields itself (those already
+# come back from GET /mailboxes -- see MailboxListItem) -- this model is
+# only the one piece a campaign-scoped view can't get anywhere else: the
+# earliest still-QUEUED send time for each of the campaign's assigned
+# mailboxes, so the frontend can compare it against that mailbox's own
+# estimated_expires_at without this service needing to duplicate the
+# health calculation.
+
+
+class MailCampaignMailboxNextSend(BaseModel):
+    mail_campaign_id: str
+    mailbox_id: str
+    # None if this mailbox has nothing QUEUED for this campaign right now
+    # (e.g. every enrollment already completed/replied/failed, or the
+    # campaign isn't ACTIVE) -- never fabricated.
+    next_send_at: datetime | None
+
+
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --
 
 

@@ -11,14 +11,19 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { ConnectEmailModal } from "@/components/connect-email-modal";
 import { DisconnectMailboxModal } from "@/components/disconnect-mailbox-modal";
 import { EnableGmailSendingModal } from "@/components/enable-gmail-sending-modal";
+import { ReconnectMailboxModal } from "@/components/reconnect-mailbox-modal";
 import { ApiError, listMailboxes, type Mailbox } from "@/lib/api";
 import {
   DELIVERABILITY_TOOLTIP,
   EMAIL_ACCOUNT_TABLE_COLUMNS,
   deriveTld,
+  estimatedExpiryLabel,
   filterMailboxes,
+  formatAuthorizationAge,
   formatSendUsage,
   gmailSendUpgradeState,
+  mailboxAuthorizationHealthBadgeClass,
+  mailboxAuthorizationHealthLabel,
   mailboxDisplayName,
   mailboxStatusBadgeClass,
   mailboxStatusLabel,
@@ -46,6 +51,11 @@ const ERROR_MESSAGES: Record<string, string> = {
   scope_not_granted: "Gmail sending wasn't approved -- please try again and approve the Gmail sending permission.",
   upgrade_needs_retry: "Google didn't return the permission needed to enable Gmail sending -- please try again.",
   mailbox_not_found: "That inbox no longer exists -- please refresh and try again.",
+  // Routine reconnect flow (2026-09-17, proactive OAuth expiration
+  // warnings) -- see app/api/mailboxes.py's google_oauth_callback() for
+  // exactly when MailboxOAuthReconnectMissingRefreshTokenError produces
+  // this during a GMAIL_RECONNECT flow specifically.
+  reconnect_needs_retry: "Google didn't return the confirmation needed to renew this inbox -- please try again.",
 };
 
 // useSearchParams() requires a Suspense boundary above it -- this wrapper
@@ -68,6 +78,7 @@ function EmailsPageContent() {
   const [connectOpen, setConnectOpen] = useState(false);
   const [disconnectTarget, setDisconnectTarget] = useState<Mailbox | null>(null);
   const [upgradeTarget, setUpgradeTarget] = useState<Mailbox | null>(null);
+  const [reconnectTarget, setReconnectTarget] = useState<Mailbox | null>(null);
   const [banner, setBanner] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   async function load() {
@@ -206,6 +217,7 @@ function EmailsPageContent() {
                   </th>
                 ))}
                 <th className="px-3 py-2 text-right font-medium">Status</th>
+                <th className="px-3 py-2 text-left font-medium">Authorization</th>
                 <th className="px-3 py-2 text-right font-medium">Gmail Sending</th>
                 <th className="px-3 py-2" />
               </tr>
@@ -238,6 +250,45 @@ function EmailsPageContent() {
                       >
                         {mailboxStatusLabel(mailbox.status)}
                       </span>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      {mailbox.authorization_health === null ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={cn(
+                                "rounded-full px-2 py-0.5 text-xs font-medium",
+                                mailboxAuthorizationHealthBadgeClass(mailbox.authorization_health)
+                              )}
+                            >
+                              {mailboxAuthorizationHealthLabel(mailbox.authorization_health)}
+                            </span>
+                            {(mailbox.authorization_health === "reconnect_soon" ||
+                              mailbox.authorization_health === "needs_reauth") && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                size="sm"
+                                className="h-6 gap-1 px-2 text-xs"
+                                onClick={() => setReconnectTarget(mailbox)}
+                              >
+                                Reconnect
+                              </Button>
+                            )}
+                          </div>
+                          <span className="text-xs text-muted-foreground">
+                            Last authorized {formatAuthorizationAge(mailbox.authorized_age_seconds)}
+                            {mailbox.authorized_at_is_estimated ? " (estimated)" : ""}
+                          </span>
+                          {mailbox.authorization_health !== "connected" && (
+                            <span className="text-xs text-amber-700">
+                              {estimatedExpiryLabel(mailbox.estimated_expires_at)}
+                            </span>
+                          )}
+                        </div>
+                      )}
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       {(() => {
@@ -291,6 +342,7 @@ function EmailsPageContent() {
         onDisconnected={handleDisconnected}
       />
       <EnableGmailSendingModal mailbox={upgradeTarget} onOpenChange={(open) => !open && setUpgradeTarget(null)} />
+      <ReconnectMailboxModal mailbox={reconnectTarget} onOpenChange={(open) => !open && setReconnectTarget(null)} />
     </div>
   );
 }

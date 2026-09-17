@@ -143,6 +143,7 @@ from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_campaign_list_service import MailCampaignListService
+from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
@@ -473,6 +474,15 @@ async def lifespan(app: FastAPI):
         sequence_step_store=mail_sequence_step_store,
         channel_store=mail_campaign_mailbox_store,
         mailbox_store=mailbox_store,
+    )
+
+    # Proactive OAuth expiration warnings (2026-09-17) -- read-only, no
+    # new persistence. See MailCampaignMailboxNextSendService's own
+    # module docstring.
+    app.state.mail_campaign_mailbox_next_send_service = MailCampaignMailboxNextSendService(
+        campaign_store=mail_campaign_store,
+        channel_store=mail_campaign_mailbox_store,
+        enrollment_step_store=mail_enrollment_step_store,
     )
 
     # Reply Detection V1 (2026-09-15). Read-only, gmail.metadata-scoped

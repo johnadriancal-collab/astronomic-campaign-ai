@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from app.dependencies import (
     get_mail_campaign_csv_prospect_service,
     get_mail_campaign_list_service,
+    get_mail_campaign_mailbox_next_send_service,
     get_mail_campaign_service,
     get_mail_inbox_service,
     get_mail_leads_service,
@@ -48,6 +49,7 @@ from app.dependencies import (
 from app.models.mail import (
     MailCampaign,
     MailCampaignListPage,
+    MailCampaignMailboxNextSend,
     MailCampaignReview,
     MailCampaignSchedule,
     MailCampaignSharing,
@@ -89,6 +91,7 @@ from app.services.mail_campaign_service import (
     MailSequenceStepNotFound,
 )
 from app.services.mail_campaign_list_service import MailCampaignListService
+from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_sending_service import (
@@ -491,6 +494,24 @@ async def get_campaign_workload(mail_campaign_id: str, service: MailCampaignServ
     pending/in-progress enrollments is still ACTIVE, not "done")."""
     try:
         return await service.get_workload(mail_campaign_id)
+    except MailCampaignNotFound as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/campaigns/{mail_campaign_id}/mailbox-next-send", response_model=list[MailCampaignMailboxNextSend])
+async def get_campaign_mailbox_next_send(
+    mail_campaign_id: str,
+    service: MailCampaignMailboxNextSendService = Depends(get_mail_campaign_mailbox_next_send_service),
+):
+    """Proactive OAuth expiration warnings (2026-09-17) -- one entry per
+    mailbox currently assigned to this campaign (see GET .../channels),
+    each with its earliest still-QUEUED send time. Pair with that
+    mailbox's own `estimated_expires_at` (GET /mailboxes -- see
+    MailboxListItem) to decide whether to show the stronger "reconnect
+    required before next scheduled send" warning. See
+    MailCampaignMailboxNextSendService's own module docstring."""
+    try:
+        return await service.get_next_send_by_mailbox(mail_campaign_id)
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
 

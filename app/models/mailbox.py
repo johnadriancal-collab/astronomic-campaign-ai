@@ -39,11 +39,14 @@ class MailboxStatus(str, Enum):
     """
     CONNECTED: token exchange + userinfo fetch succeeded and a refresh
       token is stored -- see MailboxService.handle_google_callback().
-    NEEDS_REAUTH: reserved for when a future refresh-token-use (e.g. once
-      sending exists, or a periodic health check is added) discovers Google
-      has revoked/expired the grant. Nothing in this phase ever transitions
-      a mailbox into this state, since nothing yet uses the stored refresh
-      token again after the initial connection.
+    NEEDS_REAUTH: set exclusively by MailboxService.
+      refresh_mailbox_access_token() when Google's token endpoint confirms
+      the grant itself is gone (invalid_grant on an actual refresh
+      attempt). This is DIFFERENT from the age-based "Reconnect soon" /
+      "Needs reauthorization" warning shown in the UI before that ever
+      happens -- see MailboxAuthorizationHealthState below and
+      app/services/mailbox_authorization_health.py, which is a purely
+      computed-at-read-time signal and never writes to this field.
     DISCONNECTED: the user explicitly disconnected this mailbox (see
       MailboxService.disconnect_mailbox()) -- terminal in this phase,
       matching MailCampaignStatus.ARCHIVED's "no un-archive" precedent.
@@ -52,6 +55,20 @@ class MailboxStatus(str, Enum):
     CONNECTED = "connected"
     NEEDS_REAUTH = "needs_reauth"
     DISCONNECTED = "disconnected"
+
+
+class MailboxAuthorizationHealthState(str, Enum):
+    """Computed-at-read-time only (see app/services/
+    mailbox_authorization_health.py) -- never persisted on Mailbox
+    itself, so it's always freshly derived from gmail_authorized_at/
+    updated_at and the mailbox's current MailboxStatus, never stale and
+    never needing a background job to keep it current. Proactive-warning
+    UX only (2026-09-17) -- a mailbox actually becoming unusable is
+    still, and only ever, governed by MailboxStatus.NEEDS_REAUTH above."""
+
+    CONNECTED = "connected"
+    RECONNECT_SOON = "reconnect_soon"
+    NEEDS_REAUTH = "needs_reauth"
 
 
 class Mailbox(BaseModel):
@@ -70,6 +87,18 @@ class Mailbox(BaseModel):
     connected_at: datetime
     updated_at: datetime
     disconnected_at: datetime | None = None
+    # 2026-09-17 (proactive OAuth expiration warnings) -- set ONLY by
+    # MailboxService.handle_google_callback(), on a callback that actually
+    # persists a (re)issued refresh token: first connect, a Gmail-send
+    # scope upgrade, or a routine same-scopes reconnect. A cancelled or
+    # failed OAuth attempt never reaches that write, so this is left
+    # completely unchanged by anything short of a real, successful
+    # authorization. None for a mailbox connected before this field
+    # existed -- callers computing authorization age fall back to
+    # `updated_at` in that case (see mailbox_authorization_health.py) and
+    # must treat it explicitly as an ESTIMATE, never a real historical
+    # consent time.
+    gmail_authorized_at: datetime | None = None
 
 
 class MailboxCredential(BaseModel):
@@ -160,3 +189,28 @@ class MailboxSendPolicy(BaseModel):
     min_seconds_between_sends: int | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class MailboxListItem(Mailbox):
+    """GET /mailboxes' actual response shape (2026-09-17) -- every
+    Mailbox field, plus the derived authorization-health fields from
+    app/services/mailbox_authorization_health.py.compute_authorization_
+    health(). A strict superset of Mailbox, so this is purely additive
+    for any existing caller reading only the fields it already knew
+    about. `authorization_health` is None only for a DISCONNECTED
+    mailbox (no age-based warning is meaningful once a mailbox has been
+    explicitly disconnected -- its MailboxStatus badge already says so).
+    """
+
+    authorization_health: MailboxAuthorizationHealthState | None
+    # The timestamp actually used for the age calculation above --
+    # `gmail_authorized_at` if set, else `updated_at` as a documented
+    # estimate (see `authorized_at_is_estimated`). None only alongside
+    # authorization_health=None (a disconnected mailbox).
+    authorized_at: datetime | None
+    authorized_at_is_estimated: bool
+    authorized_age_seconds: float | None
+    # None when the Testing-mode 7-day assumption is disabled (see
+    # mailbox_authorization_health.OAUTH_TESTING_MODE_EXPIRY_ENABLED) or
+    # for a disconnected mailbox.
+    estimated_expires_at: datetime | None

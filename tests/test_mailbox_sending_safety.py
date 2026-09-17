@@ -92,16 +92,21 @@ def test_mailboxes_api_has_no_send_queue_or_activate_route():
         assert forbidden not in source
 
 
-def test_mailboxes_api_declares_only_the_seven_approved_routes():
+def test_mailboxes_api_declares_only_the_eight_approved_routes():
     """Routes 6-7 (2026-09-15) are READ-ONLY Gmail diagnostics -- see
     tests/test_gmail_sending_safety.py's own copy of this check for the
-    full rationale."""
+    full rationale. Route 8 (2026-09-17, proactive OAuth expiration
+    warnings) is the GMAIL_RECONNECT start route -- GET-only, same
+    "registers a pending state, mutates nothing itself" shape as
+    /google/gmail-send/start, and every actual write still happens
+    exclusively inside the one shared /google/callback route."""
     source = Path("app/api/mailboxes.py").read_text()
     routes = re.findall(r'@router\.(get|post|patch|delete)\("([^"]*)"', source)
     assert set(routes) == {
         ("get", ""),
         ("get", "/google/start"),
         ("get", "/{mailbox_id}/google/gmail-send/start"),
+        ("get", "/{mailbox_id}/google/gmail-reconnect/start"),
         ("get", "/google/callback"),
         ("post", "/{mailbox_id}/disconnect"),
         ("get", "/{mailbox_id}/gmail-diagnostic/threads/{thread_id}"),

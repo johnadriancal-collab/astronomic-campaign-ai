@@ -232,13 +232,18 @@ def test_gmail_send_upgrade_start_requests_base_scopes_plus_gmail_send(client, o
 def test_gmail_send_upgrade_start_never_mutates_the_mailbox(client):
     """Initiation only registers a pending OAuth state -- see
     MailboxService.begin_gmail_send_upgrade()'s own docstring. Every
-    actual scope/status change happens exclusively inside the callback."""
+    actual scope/status change happens exclusively inside the callback.
+    `authorized_age_seconds` is excluded from the comparison -- it's a
+    live, computed-at-read-time value (see MailboxListItem) that ticks
+    up between the two GET calls even with zero mailbox mutation."""
     mailbox = _connect(client)
     before = client.get("/mailboxes").json()[0]
 
     client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-send/start")
 
     after = client.get("/mailboxes").json()[0]
+    before.pop("authorized_age_seconds")
+    after.pop("authorized_age_seconds")
     assert after == before
     assert "gmail.send" not in " ".join(after["granted_scopes"])
     assert after["status"] == "connected"
@@ -276,6 +281,95 @@ def test_ordinary_connect_flow_remains_base_scope_only_after_upgrade_route_exist
     client.get("/mailboxes/google/start")
 
     assert oauth_client.requested_scopes == [("openid", "email", "profile")]
+
+
+# --- Gmail routine reconnect start route (2026-09-17) ------------------------
+
+
+def test_gmail_reconnect_start_missing_mailbox_returns_404(client):
+    resp = client.get("/mailboxes/does-not-exist/google/gmail-reconnect/start")
+
+    assert resp.status_code == 404
+
+
+def test_gmail_reconnect_start_returns_an_authorize_url_for_a_real_mailbox(client):
+    mailbox = _connect(client)
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-reconnect/start")
+
+    assert resp.status_code == 200
+    assert resp.json()["authorize_url"].startswith("https://accounts.google.com")
+
+
+def test_gmail_reconnect_start_requests_only_the_mailboxs_own_current_scopes(client, oauth_client):
+    """A freshly-connected mailbox only has the base three scopes -- the
+    reconnect route must request exactly those, never the full upgrade
+    set, even though this same mailbox_id could separately be sent
+    through /google/gmail-send/start for real capability escalation."""
+    mailbox = _connect(client)
+    oauth_client.requested_scopes.clear()
+
+    client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-reconnect/start")
+
+    assert oauth_client.requested_scopes == [("email", "openid", "profile")]
+
+
+def test_gmail_reconnect_start_never_mutates_the_mailbox(client):
+    mailbox = _connect(client)
+    before = client.get("/mailboxes").json()[0]
+
+    client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-reconnect/start")
+
+    after = client.get("/mailboxes").json()[0]
+    assert after["granted_scopes"] == before["granted_scopes"]
+    assert after["status"] == "connected"
+
+
+def test_gmail_reconnect_pending_state_carries_the_correct_flow_type_and_mailbox(client, mailbox_service):
+    from app.services.mailbox_service import OAuthFlowType
+
+    mailbox = _connect(client)
+
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-reconnect/start")
+    state = resp.json()["authorize_url"].split("state=")[1]
+
+    pending = mailbox_service._pending_states[state]
+    assert pending.flow_type == OAuthFlowType.GMAIL_RECONNECT
+    assert pending.expected_mailbox_id == mailbox["mailbox_id"]
+
+
+def test_gmail_reconnect_callback_missing_refresh_token_redirects_with_reconnect_error_code(client, oauth_client):
+    mailbox = _connect(client)
+    resp = client.get(f"/mailboxes/{mailbox['mailbox_id']}/google/gmail-reconnect/start")
+    state = resp.json()["authorize_url"].split("state=")[1]
+    oauth_client.token_response = {"access_token": "fake-access-token", "scope": "openid email profile"}  # no refresh_token
+
+    callback_resp = client.get(
+        "/mailboxes/google/callback", params={"code": "fake-code", "state": state}, follow_redirects=False
+    )
+
+    assert callback_resp.status_code in (302, 307)
+    assert "error=reconnect_needs_retry" in callback_resp.headers["location"]
+
+
+# --- GET /mailboxes' authorization-health fields (2026-09-17) ----------------
+
+
+def test_list_mailboxes_includes_authorization_health_fields(client):
+    mailbox = _connect(client)
+
+    assert mailbox["authorization_health"] == "connected"
+    assert mailbox["authorized_at"] is not None
+    assert mailbox["authorized_at_is_estimated"] is False
+    assert mailbox["estimated_expires_at"] is not None
+
+
+def test_disconnected_mailbox_has_null_authorization_health(client):
+    mailbox = _connect(client)
+    client.post(f"/mailboxes/{mailbox['mailbox_id']}/disconnect")
+
+    after = client.get("/mailboxes").json()[0]
+    assert after["authorization_health"] is None
 
 
 # --- tokens never appear in any API response --------------------------------

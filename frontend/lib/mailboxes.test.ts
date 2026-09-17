@@ -79,6 +79,11 @@ function makeMailbox(overrides: Partial<Mailbox> = {}): Mailbox {
     connected_at: "2026-08-19T00:00:00Z",
     updated_at: "2026-08-19T00:00:00Z",
     disconnected_at: null,
+    authorization_health: "connected",
+    authorized_at: "2026-08-19T00:00:00Z",
+    authorized_at_is_estimated: false,
+    authorized_age_seconds: 3600,
+    estimated_expires_at: "2026-08-26T00:00:00Z",
     ...overrides,
   };
 }

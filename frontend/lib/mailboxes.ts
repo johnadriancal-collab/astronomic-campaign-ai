@@ -12,7 +12,7 @@
 // neutral values, not read off any mailbox field, so there is nothing
 // here to fabricate.
 
-import type { Mailbox, MailboxProvider, MailboxStatus } from "@/lib/api";
+import type { Mailbox, MailboxAuthorizationHealth, MailboxProvider, MailboxStatus } from "@/lib/api";
 
 export const DELIVERABILITY_TOOLTIP = "Deliverability monitoring will be added later.";
 
@@ -164,4 +164,83 @@ export function filterMailboxes(mailboxes: Mailbox[], query: string): Mailbox[] 
 // through this one function.
 export function formatSendUsage(sent: number, limit: number | null): string {
   return limit === null ? String(sent) : `${sent} / ${limit}`;
+}
+
+// --- Proactive Gmail OAuth expiration warnings (2026-09-17) ----------------
+//
+// `Mailbox.authorization_health` is computed backend-side, fresh on every
+// GET /mailboxes call (see app/services/mailbox_authorization_health.py) --
+// these are pure display helpers only, never a second place that decides
+// the state itself. `formatAuthorizationAge`/`estimatedExpiryLabel` DO
+// compute their own live "time remaining" text client-side from
+// `estimated_expires_at`, which is fine (pure formatting of an already-
+// backend-computed timestamp), but they never re-derive the health STATE.
+
+export function mailboxAuthorizationHealthLabel(health: MailboxAuthorizationHealth): string {
+  switch (health) {
+    case "connected":
+      return "Connected";
+    case "reconnect_soon":
+      return "Reconnect soon";
+    case "needs_reauth":
+      return "Needs reauthorization";
+    case null:
+      return "";
+  }
+}
+
+export function mailboxAuthorizationHealthBadgeClass(health: MailboxAuthorizationHealth): string {
+  switch (health) {
+    case "connected":
+      return "bg-emerald-100 text-emerald-800";
+    case "reconnect_soon":
+      return "bg-amber-100 text-amber-800";
+    case "needs_reauth":
+      return "bg-red-100 text-red-800";
+    case null:
+      return "bg-secondary text-muted-foreground";
+  }
+}
+
+// "expires in approximately 18 hours" / "expired ~2 hours ago" -- rounds
+// to the coarsest unit that stays readable (days when >= 1 day away,
+// otherwise hours), matching the approved spec's own example copy. null
+// input (no estimate available, e.g. Testing-mode expiry disabled, or a
+// disconnected mailbox) returns null so the caller can skip the sentence
+// entirely rather than render something misleading.
+export function estimatedExpiryLabel(estimatedExpiresAt: string | null, now: Date = new Date()): string | null {
+  if (!estimatedExpiresAt) return null;
+  const diffMs = new Date(estimatedExpiresAt).getTime() - now.getTime();
+  const absHours = Math.abs(diffMs) / (1000 * 60 * 60);
+  const verb = diffMs >= 0 ? "expires in approximately" : "expired approximately";
+  if (absHours >= 24) {
+    const days = Math.round(absHours / 24);
+    return `Google authorization ${verb} ${days} day${days === 1 ? "" : "s"}.`;
+  }
+  const hours = Math.max(1, Math.round(absHours));
+  return `Google authorization ${verb} ${hours} hour${hours === 1 ? "" : "s"}.`;
+}
+
+// Plain "X days ago" / "X hours ago" age display for the Emails page's
+// "Last authorized" column -- distinct from estimatedExpiryLabel (which is
+// forward-looking, toward expiry) even though both are derived from the
+// same underlying timestamp.
+export function formatAuthorizationAge(ageSeconds: number | null): string {
+  if (ageSeconds === null) return "—";
+  const hours = ageSeconds / 3600;
+  if (hours < 1) return "Less than an hour ago";
+  if (hours < 24) {
+    const h = Math.round(hours);
+    return `${h} hour${h === 1 ? "" : "s"} ago`;
+  }
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+// A campaign's assigned mailbox is at risk of missing a scheduled send if
+// its estimated expiry falls BEFORE that send's next_send_at -- pure
+// comparison of two already-computed timestamps, no new decision logic.
+export function reconnectRequiredBeforeNextSend(estimatedExpiresAt: string | null, nextSendAt: string | null): boolean {
+  if (!estimatedExpiresAt || !nextSendAt) return false;
+  return new Date(nextSendAt).getTime() > new Date(estimatedExpiresAt).getTime();
 }
