@@ -143,6 +143,7 @@ from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_inbox_service import MailInboxService
+from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
@@ -446,6 +447,19 @@ async def lifespan(app: FastAPI):
         contact_store=crm_contact_store,
         mailbox_store=mailbox_store,
         mailbox_service=app.state.mailbox_service,
+    )
+
+    # Leads V1 (2026-09-17) -- same store-reuse stance as Inbox above;
+    # read-only, no new persistence. See MailLeadsService's own module
+    # docstring for why a "Lead" here is a pure aggregation view, never a
+    # second contact/lead record.
+    app.state.mail_leads_service = MailLeadsService(
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        contact_store=crm_contact_store,
+        reply_store=mail_reply_store,
+        mailbox_store=mailbox_store,
     )
 
     # Reply Detection V1 (2026-09-15). Read-only, gmail.metadata-scoped

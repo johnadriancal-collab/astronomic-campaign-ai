@@ -39,6 +39,7 @@ from app.dependencies import (
     get_mail_campaign_csv_prospect_service,
     get_mail_campaign_service,
     get_mail_inbox_service,
+    get_mail_leads_service,
     get_mail_sending_service,
     get_mail_suppression_service,
     get_mail_trigger_service,
@@ -57,6 +58,8 @@ from app.models.mail import (
     MailExecutionStepView,
     MailInboxReplyBody,
     MailInboxReplyView,
+    MailLeadDetail,
+    MailLeadPage,
     MailLeadStartTrigger,
     MailScheduleValidationError,
     MailSequenceStep,
@@ -84,6 +87,7 @@ from app.services.mail_campaign_service import (
     MailSequenceStepNotFound,
 )
 from app.services.mail_inbox_service import MailInboxService
+from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_sending_service import (
     MailSendingService,
     PrepareBlockedWrongStateError,
@@ -391,6 +395,55 @@ async def get_inbox_reply_body(enrollment_id: str, service: MailInboxService = D
     typed `status` field, never an HTTP error the frontend has to
     special-case to keep the rest of the Inbox working."""
     return await service.get_reply_body(enrollment_id)
+
+
+# --- Leads (V1, 2026-09-17) --------------------------------------------------
+
+
+@router.get("/leads", response_model=MailLeadPage)
+async def list_mail_leads(
+    q: str | None = None,
+    status: str | None = None,
+    campaign_id: str | None = None,
+    replied: bool | None = None,
+    sort_by: str = "last_activity",
+    sort_dir: str = "desc",
+    page: int = 1,
+    page_size: int = 50,
+    service: MailLeadsService = Depends(get_mail_leads_service),
+):
+    """Read-only. A "Lead" is a CRM contact with at least one real
+    MailEnrollment -- never every CrmContact, never a search/prospecting
+    result (see MailLeadsService's own module docstring). One row per
+    crm_contact_id, aggregated across every campaign that contact has
+    ever been enrolled in. Same envelope shape as GET /crm/contacts
+    (CrmContactPage) for consistency. `status` filters on the exact
+    MailEnrollmentStatus value of each lead's most recent enrollment;
+    `campaign_id` matches a lead who has EVER been enrolled in that
+    campaign (not only their most recent one); `sort_by` is one of
+    "name" | "last_activity" | "last_campaign" (default last_activity,
+    newest first)."""
+    return await service.list_leads(
+        q=q,
+        status=status,
+        campaign_id=campaign_id,
+        replied=replied,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.get("/leads/{crm_contact_id}", response_model=MailLeadDetail)
+async def get_mail_lead(crm_contact_id: str, service: MailLeadsService = Depends(get_mail_leads_service)):
+    """404 if this CRM contact has zero MailEnrollments anywhere -- the
+    exact "not a Lead" case, distinct from the contact simply not
+    existing (also 404, since either way there is nothing to show)."""
+    lead = await service.get_lead_detail(crm_contact_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail=f"No Campaign Manager lead found for contact {crm_contact_id}.")
+    return lead
 
 
 # --- Workload / prospect batches (Phase 2, 2026-09-03) ---------------------

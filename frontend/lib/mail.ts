@@ -147,6 +147,8 @@ export function mailExecutionStepStatusLabel(status: MailExecutionStepStatus): s
       return "Sent";
     case "skipped_suppressed":
       return "Skipped (suppressed)";
+    case "skipped_replied":
+      return "Skipped (replied)";
     case "failed":
       return "Failed";
     case "unknown":
@@ -167,6 +169,7 @@ export function mailExecutionStepStatusBadgeClass(status: MailExecutionStepStatu
     case "claimed":
       return "bg-blue-100 text-blue-800";
     case "skipped_suppressed":
+    case "skipped_replied":
       return "bg-amber-100 text-amber-800";
     case "pending":
     case "queued":

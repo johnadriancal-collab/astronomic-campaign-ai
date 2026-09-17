@@ -35,6 +35,7 @@ from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProspectService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_inbox_service import MailInboxService
+from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mail_trigger_service import MailTriggerService
@@ -100,6 +101,10 @@ async def get_mail_campaign_csv_prospect_service(request: Request) -> MailCampai
 
 async def get_mail_inbox_service(request: Request) -> MailInboxService:
     return request.app.state.mail_inbox_service
+
+
+async def get_mail_leads_service(request: Request) -> MailLeadsService:
+    return request.app.state.mail_leads_service
 
 
 async def get_mail_sending_service(request: Request) -> MailSendingService:

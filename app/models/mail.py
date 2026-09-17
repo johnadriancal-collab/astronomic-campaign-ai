@@ -1139,6 +1139,106 @@ class MailInboxReplyBody(BaseModel):
     message: str | None = None
 
 
+# --- Leads (V1, 2026-09-17) -------------------------------------------------
+#
+# A "Lead" is a CRM contact with at least one real MailEnrollment -- never
+# every CrmContact, never a search/prospecting result. This is a pure
+# read-side aggregation over existing MailEnrollment/MailEnrollmentStep/
+# MailCampaign/CrmContact/MailReply data (see MailLeadsService) -- no new
+# persistence, no second "Lead" record anywhere. One row per
+# crm_contact_id, even when that contact has multiple enrollments across
+# multiple campaigns.
+
+
+class MailLeadStepSummary(BaseModel):
+    """One step's outcome within one campaign enrollment, for the Lead
+    detail page's per-campaign step history. Sourced directly from an
+    existing MailEnrollmentStep row -- `subject` is `rendered_subject`
+    (the exact line actually transmitted) falling back to the frozen
+    `subject` for a pre-rendered_subject row, matching
+    MailInboxReplyView's own precedent."""
+
+    step_number: int
+    status: MailEnrollmentStepStatus
+    subject: str | None
+    sent_at: datetime | None
+    last_error: str | None
+
+
+class MailLeadCampaignHistoryEntry(BaseModel):
+    """One (contact, campaign) enrollment, for the Lead detail page's
+    chronological campaign history list. `has_reply`/`reply_enrollment_id`
+    let the frontend link straight to Campaign Manager -> Inbox's existing
+    reply detail page (see MailInboxReplyView) instead of duplicating any
+    reply content here."""
+
+    mail_campaign_id: str
+    campaign_name: str
+    campaign_status: MailCampaignStatus
+    enrollment_id: str
+    enrollment_status: MailEnrollmentStatus
+    mailbox_email: str | None
+    enrolled_at: datetime
+    replied_at: datetime | None
+    has_reply: bool
+    reply_enrollment_id: str | None
+    steps: list[MailLeadStepSummary]
+
+
+class MailLeadListItem(BaseModel):
+    """One row in the Leads list -- one per crm_contact_id, aggregated
+    across every campaign that contact has ever been enrolled in.
+    `status`/`status_enrollment_id` reflect the MOST RECENT enrollment
+    (by `enrolled_at`) across all of that contact's campaigns -- "most
+    recent" is the only defensible, non-fabricated ordering signal
+    MailEnrollment offers (it has no `updated_at`). `last_activity_at` is
+    the latest of: every step's `sent_at` across every enrollment, every
+    enrollment's `replied_at`, or (if neither exists yet) the most recent
+    `enrolled_at` -- never a fabricated timestamp. This is a Campaign
+    Manager-only status view; it never reads or writes CRM Engagement
+    Stage."""
+
+    crm_contact_id: str
+    name: str | None
+    email: str | None
+    company: str | None
+    title: str | None
+    status: MailEnrollmentStatus
+    last_campaign_id: str
+    last_campaign_name: str
+    campaigns_count: int
+    replied: bool
+    last_activity_at: datetime
+
+
+class MailLeadPage(BaseModel):
+    """Paginated Leads list envelope -- same shape as CrmContactPage
+    (app/models/crm.py), for consistency with this codebase's one other
+    paginated list endpoint."""
+
+    items: list[MailLeadListItem]
+    total: int
+    page: int
+    page_size: int
+
+
+class MailLeadDetail(BaseModel):
+    """The Lead detail page's full data contract -- summary fields plus
+    the complete, newest-first campaign history."""
+
+    crm_contact_id: str
+    name: str | None
+    email: str | None
+    company: str | None
+    title: str | None
+    status: MailEnrollmentStatus
+    campaigns_count: int
+    replies_count: int
+    first_campaign_at: datetime
+    last_activity_at: datetime
+    campaign_history: list[MailLeadCampaignHistoryEntry]
+
+
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --
 
 

@@ -1340,6 +1340,7 @@ export type MailExecutionStepStatus =
   | "sending"
   | "sent"
   | "skipped_suppressed"
+  | "skipped_replied"
   | "failed"
   | "unknown";
 
@@ -1452,6 +1453,104 @@ export interface MailInboxReplyBody {
  * eagerly for the whole list. Never persisted server-side either. */
 export function getInboxReplyBody(enrollmentId: string): Promise<MailInboxReplyBody> {
   return request<MailInboxReplyBody>(`/mail/inbox/replies/${enrollmentId}/body`);
+}
+
+// --- Leads (V1, 2026-09-17) --------------------------------------------------
+//
+// A "Lead" is a CRM contact with at least one real MailEnrollment -- see
+// MailLeadsService's backend docstring. Deliberately named/typed with a
+// "Mail" prefix (MailLead*, listMailLeads/getMailLead) so these never
+// collide with the pre-existing, fully separate Apollo-based
+// listLeads()/LeadListItem below (app/api/leads.py) -- two different
+// systems that happen to share the English word "lead."
+
+export interface MailLeadStepSummary {
+  step_number: number;
+  status: MailExecutionStepStatus;
+  subject: string | null;
+  sent_at: string | null;
+  last_error: string | null;
+}
+
+export interface MailLeadCampaignHistoryEntry {
+  mail_campaign_id: string;
+  campaign_name: string;
+  campaign_status: MailCampaignStatus;
+  enrollment_id: string;
+  enrollment_status: MailEnrollmentStatus;
+  mailbox_email: string | null;
+  enrolled_at: string;
+  replied_at: string | null;
+  has_reply: boolean;
+  reply_enrollment_id: string | null;
+  steps: MailLeadStepSummary[];
+}
+
+export interface MailLeadListItem {
+  crm_contact_id: string;
+  name: string | null;
+  email: string | null;
+  company: string | null;
+  title: string | null;
+  status: MailEnrollmentStatus;
+  last_campaign_id: string;
+  last_campaign_name: string;
+  campaigns_count: number;
+  replied: boolean;
+  last_activity_at: string;
+}
+
+export interface MailLeadPage {
+  items: MailLeadListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface MailLeadDetail {
+  crm_contact_id: string;
+  name: string | null;
+  email: string | null;
+  company: string | null;
+  title: string | null;
+  status: MailEnrollmentStatus;
+  campaigns_count: number;
+  replies_count: number;
+  first_campaign_at: string;
+  last_activity_at: string;
+  campaign_history: MailLeadCampaignHistoryEntry[];
+}
+
+export type MailLeadSortBy = "name" | "last_activity" | "last_campaign";
+
+export interface ListMailLeadsParams {
+  q?: string;
+  status?: MailEnrollmentStatus;
+  campaignId?: string;
+  replied?: boolean;
+  sortBy?: MailLeadSortBy;
+  sortDir?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
+}
+
+export function listMailLeads(params: ListMailLeadsParams = {}): Promise<MailLeadPage> {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.status) query.set("status", params.status);
+  if (params.campaignId) query.set("campaign_id", params.campaignId);
+  if (params.replied !== undefined) query.set("replied", String(params.replied));
+  if (params.sortBy) query.set("sort_by", params.sortBy);
+  if (params.sortDir) query.set("sort_dir", params.sortDir);
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 25));
+  return request<MailLeadPage>(`/mail/leads?${query.toString()}`);
+}
+
+/** Throws ApiError(404) if this CRM contact has no MailEnrollment
+ * anywhere (not a Lead). */
+export function getMailLead(crmContactId: string): Promise<MailLeadDetail> {
+  return request<MailLeadDetail>(`/mail/leads/${crmContactId}`);
 }
 
 // --- Workload / prospect batches / Add Prospects (Phase 2, Stage 2-4B) ----
