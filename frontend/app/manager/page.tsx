@@ -1,56 +1,49 @@
 import Link from "next/link";
 import { ChartColumn, Inbox, Mail, Megaphone, Settings, Users } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
-// `builtOut: false` is the ONLY thing that still earns a "Coming soon"
-// badge below -- Campaigns/Emails/Leads/Inbox are real, working sections
-// now (Inbox V1 shipped 2026-09-17; see frontend/app/manager/inbox/page.tsx),
-// so they no longer claim to be unbuilt. Analytics and Settings are still
-// genuinely ManagerPlaceholder pages (see those files) -- flip this flag
-// only once a section's own page actually stops being a placeholder.
+// Overview-card presentation only (2026-09-17): none of these six cards
+// carries a not-yet-built badge -- that's a deliberate call by the
+// product owner, independent of whether a given section's own page
+// (Analytics, Settings) is still a ManagerPlaceholder. Do not
+// reintroduce one here without an explicit request; if a section's own
+// page is still unbuilt, that page says so itself.
 const SECTIONS = [
   {
     href: "/manager/campaigns",
     icon: Megaphone,
     title: "Campaigns",
     description: "Every campaign built via Campaign Builder, with status and progress at a glance.",
-    builtOut: true,
   },
   {
     href: "/manager/emails",
     icon: Mail,
     title: "Emails",
     description: "Sending inboxes connected to Astronomic Mail campaigns.",
-    builtOut: true,
   },
   {
     href: "/manager/leads",
     icon: Users,
     title: "Leads",
     description: "Prospects across every campaign, with status and history.",
-    builtOut: true,
   },
   {
     href: "/manager/inbox",
     icon: Inbox,
     title: "Inbox",
     description: "Replies from leads, unified across all campaigns.",
-    builtOut: true,
   },
   {
     href: "/manager/analytics",
     icon: ChartColumn,
     title: "Analytics",
     description: "Send, open, click, and reply performance across campaigns.",
-    builtOut: false,
   },
   {
     href: "/manager/settings",
     icon: Settings,
     title: "Settings",
     description: "Workspace-level preferences.",
-    builtOut: false,
   },
 ];
 
@@ -61,7 +54,7 @@ export default function ManagerOverviewPage() {
         <h1 className="font-serif text-2xl font-medium tracking-tight sm:text-3xl">Campaign Manager</h1>
         <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
           Campaigns built in Campaign Builder are managed here after launch — leads, sequences,
-          replies, and performance in one place. Analytics and Settings are still being built out.
+          replies, and performance in one place.
         </p>
       </div>
 
@@ -74,11 +67,6 @@ export default function ManagerOverviewPage() {
                   <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-secondary/60 text-muted-foreground">
                     <section.icon className="h-4 w-4" />
                   </div>
-                  {!section.builtOut && (
-                    <Badge variant="outline" className="rounded-full font-normal text-muted-foreground">
-                      Coming soon
-                    </Badge>
-                  )}
                 </div>
                 <CardTitle>{section.title}</CardTitle>
                 <CardDescription>{section.description}</CardDescription>

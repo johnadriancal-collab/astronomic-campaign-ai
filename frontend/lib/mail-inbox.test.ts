@@ -91,28 +91,19 @@ test("MailReplyStore.list_all is newest-first and every implementation provides 
   assert.match(REPLY_STORE_SOURCE, /reverse=True/);
 });
 
-test("Overview page no longer shows Coming soon on the built-out sections (Campaigns/Emails/Leads/Inbox)", () => {
+test("Overview page shows Coming soon on none of its six cards (product owner's explicit call, 2026-09-17)", () => {
+  assert.doesNotMatch(OVERVIEW_PAGE_SOURCE, /Coming soon/);
+  assert.doesNotMatch(OVERVIEW_PAGE_SOURCE, /builtOut/);
+});
+
+test("Overview still lists all six real sections, unchanged", () => {
   const sectionsBlock = OVERVIEW_PAGE_SOURCE.slice(
     OVERVIEW_PAGE_SOURCE.indexOf("const SECTIONS"),
     OVERVIEW_PAGE_SOURCE.indexOf("export default function")
   );
-  assert.match(sectionsBlock, /title: "Campaigns"[\s\S]*?builtOut: true/);
-  assert.match(sectionsBlock, /title: "Emails"[\s\S]*?builtOut: true/);
-  assert.match(sectionsBlock, /title: "Leads"[\s\S]*?builtOut: true/);
-  assert.match(sectionsBlock, /title: "Inbox"[\s\S]*?builtOut: true/);
-});
-
-test("Overview page is honest that Analytics and Settings are still unbuilt", () => {
-  const sectionsBlock = OVERVIEW_PAGE_SOURCE.slice(
-    OVERVIEW_PAGE_SOURCE.indexOf("const SECTIONS"),
-    OVERVIEW_PAGE_SOURCE.indexOf("export default function")
-  );
-  assert.match(sectionsBlock, /title: "Analytics"[\s\S]*?builtOut: false/);
-  assert.match(sectionsBlock, /title: "Settings"[\s\S]*?builtOut: false/);
-});
-
-test("Overview only renders the Coming soon badge conditionally, not unconditionally for every card", () => {
-  assert.match(OVERVIEW_PAGE_SOURCE, /!section\.builtOut/);
+  for (const title of ["Campaigns", "Emails", "Leads", "Inbox", "Analytics", "Settings"]) {
+    assert.match(sectionsBlock, new RegExp(`title: "${title}"`));
+  }
 });
 
 test("every Overview card is still a Link to its real route (already-existing navigation, unchanged)", () => {
