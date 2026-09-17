@@ -2,25 +2,11 @@
 
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { AlertTriangle, Inbox as InboxIcon, RefreshCw } from "lucide-react";
+import { AlertTriangle, Inbox as InboxIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import {
-  Dialog,
-  DialogPopup,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import {
-  ApiError,
-  getInboxReplyBody,
-  listInboxReplies,
-  type MailInboxReplyBody,
-  type MailInboxReplyView,
-} from "@/lib/api";
-import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel } from "@/lib/mail";
+import { ApiError, listInboxReplies, type MailInboxReplyView } from "@/lib/api";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
 import { cn } from "@/lib/utils";
 
@@ -30,13 +16,10 @@ import { cn } from "@/lib/utils";
 // MailCampaign/CrmContact/Mailbox/MailEnrollmentStep data -- no second
 // reply model, no fabricated state).
 //
-// Inbox V2 (2026-09-17) -- the detail view additionally fetches the
-// actual reply text on demand (GET /mail/inbox/replies/{id}/body, under
-// gmail.readonly) the moment it opens -- never eagerly for the whole
-// list, never persisted. `status` on that response is the only thing
-// this page branches on; every non-"ok" status is a normal, expected UI
-// state (reconnect needed, Gmail hiccup), not an error that breaks the
-// rest of the Inbox. There is no unread/read model anywhere in this
+// Inbox V2 (2026-09-17): reply reading moved from a modal to a
+// dedicated full page at /manager/inbox/[enrollment_id] (see that
+// route) -- clicking a row here is a real navigation (next/link),
+// not a Dialog open. There is no unread/read model anywhere in this
 // codebase, so this page never invents one.
 
 function formatDateTime(iso: string): string {
@@ -46,104 +29,11 @@ function formatDateTime(iso: string): string {
   });
 }
 
-function ReplyBody({ enrollmentId }: { enrollmentId: string }) {
-  const [state, setState] = useState<{ loading: boolean; result: MailInboxReplyBody | null; error: string | null }>({
-    loading: true,
-    result: null,
-    error: null,
-  });
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    let cancelled = false;
-    setState({ loading: true, result: null, error: null });
-    getInboxReplyBody(enrollmentId)
-      .then((result) => {
-        if (!cancelled) setState({ loading: false, result, error: null });
-      })
-      .catch((err) => {
-        if (!cancelled) {
-          setState({
-            loading: false,
-            result: null,
-            error: err instanceof ApiError ? `Couldn't load the reply (${err.status}): ${err.message}` : "Couldn't reach the backend.",
-          });
-        }
-      });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enrollmentId, attempt]);
-
-  if (state.loading) {
-    return <p className="text-sm text-muted-foreground">Loading reply…</p>;
-  }
-
-  if (state.error) {
-    return (
-      <div className="space-y-2">
-        <p className="text-sm text-destructive">{state.error}</p>
-        <button
-          type="button"
-          onClick={() => setAttempt((n) => n + 1)}
-          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground underline hover:no-underline"
-        >
-          <RefreshCw className="h-3 w-3" /> Try again
-        </button>
-      </div>
-    );
-  }
-
-  const result = state.result!;
-
-  if (result.status === "scope_missing" || result.status === "needs_reauth") {
-    return (
-      <p className="rounded-md bg-secondary/40 px-3 py-2 text-sm text-muted-foreground">
-        Reconnect this mailbox to enable reply-content viewing.
-      </p>
-    );
-  }
-
-  if (result.status === "not_found") {
-    return <p className="text-sm text-muted-foreground">Gmail no longer has this specific message.</p>;
-  }
-
-  if (result.status === "provider_error") {
-    return (
-      <div className="space-y-2">
-        <p className="text-sm text-muted-foreground">Couldn&apos;t load the reply right now.</p>
-        <button
-          type="button"
-          onClick={() => setAttempt((n) => n + 1)}
-          className="inline-flex items-center gap-1.5 text-xs text-muted-foreground underline hover:no-underline"
-        >
-          <RefreshCw className="h-3 w-3" /> Try again
-        </button>
-      </div>
-    );
-  }
-
-  if (!result.body_text) {
-    return <p className="text-sm text-muted-foreground">(This message has no readable text.)</p>;
-  }
-
-  return (
-    <div>
-      <p className="whitespace-pre-wrap text-sm leading-relaxed">{result.body_text}</p>
-      {result.body_source === "html_converted" && (
-        <p className="mt-2 text-xs text-muted-foreground/70">Converted from an HTML-only message.</p>
-      )}
-    </div>
-  );
-}
-
 export default function InboxPage() {
   const [replies, setReplies] = useState<MailInboxReplyView[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [campaignFilter, setCampaignFilter] = useState<string>("all");
-  const [selected, setSelected] = useState<MailInboxReplyView | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -261,10 +151,9 @@ export default function InboxPage() {
               <CardContent className="p-0">
                 <div className="divide-y divide-border">
                   {filtered.map((reply) => (
-                    <button
+                    <Link
                       key={reply.enrollment_id}
-                      type="button"
-                      onClick={() => setSelected(reply)}
+                      href={`/manager/inbox/${reply.enrollment_id}`}
                       className="flex w-full min-w-0 flex-col gap-1 px-6 py-4 text-left text-sm transition-colors hover:bg-secondary/40 sm:flex-row sm:items-center sm:justify-between sm:gap-6 sm:px-8"
                     >
                       <div className="min-w-0">
@@ -286,7 +175,7 @@ export default function InboxPage() {
                       <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground sm:w-36 sm:text-right">
                         {formatDateTime(reply.replied_at)}
                       </span>
-                    </button>
+                    </Link>
                   ))}
                 </div>
               </CardContent>
@@ -294,68 +183,6 @@ export default function InboxPage() {
           )}
         </>
       )}
-
-      <Dialog open={selected !== null} onOpenChange={(open) => !open && setSelected(null)}>
-        <DialogPopup className="max-w-2xl">
-          {selected && (
-            <>
-              <DialogHeader>
-                <DialogTitle>{selected.contact_name ?? selected.email}</DialogTitle>
-                <DialogDescription>
-                  {selected.email} · {selected.campaign_name} · {formatDateTime(selected.replied_at)}
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4 px-6 pb-6">
-                <div className="rounded-md border border-border bg-secondary/20 p-4">
-                  <ReplyBody enrollmentId={selected.enrollment_id} />
-                </div>
-
-                <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
-                  <span className="text-muted-foreground">Campaign</span>
-                  <span className="flex items-center gap-2">
-                    <Link href={`/manager/campaigns/mail/${selected.mail_campaign_id}`} className="underline hover:no-underline">
-                      {selected.campaign_name}
-                    </Link>
-                    <span
-                      className={cn(
-                        "rounded-full px-2 py-0.5 text-xs font-medium",
-                        mailCampaignStatusBadgeClass(selected.campaign_status)
-                      )}
-                    >
-                      {mailCampaignStatusLabel(selected.campaign_status)}
-                    </span>
-                  </span>
-
-                  <span className="text-muted-foreground">Sender mailbox</span>
-                  <span>{selected.mailbox_email ?? "(mailbox no longer available)"}</span>
-
-                  <span className="text-muted-foreground">Original subject</span>
-                  <span>{selected.subject ?? "(not available)"}</span>
-
-                  <span className="text-muted-foreground">Replied</span>
-                  <span>{formatDateTime(selected.replied_at)}</span>
-
-                  <span className="text-muted-foreground">Gmail thread ID</span>
-                  <span className="break-all font-mono text-xs">{selected.gmail_thread_id}</span>
-
-                  <span className="text-muted-foreground">Reply message ID</span>
-                  <span className="break-all font-mono text-xs">{selected.gmail_message_id}</span>
-
-                  {selected.skipped_step_numbers.length > 0 && (
-                    <>
-                      <span className="text-muted-foreground">Steps skipped</span>
-                      <span>
-                        Step{selected.skipped_step_numbers.length > 1 ? "s" : ""}{" "}
-                        {selected.skipped_step_numbers.join(", ")} — never sent because this lead replied.
-                      </span>
-                    </>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-        </DialogPopup>
-      </Dialog>
     </div>
   );
 }

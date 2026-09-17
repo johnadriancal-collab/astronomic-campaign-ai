@@ -7,6 +7,7 @@ import { test } from "node:test";
 // project has no DOM render harness (see package.json's test script).
 
 const INBOX_PAGE_SOURCE = readFileSync(new URL("../app/manager/inbox/page.tsx", import.meta.url), "utf-8");
+const DETAIL_PAGE_SOURCE = readFileSync(new URL("../app/manager/inbox/[enrollment_id]/page.tsx", import.meta.url), "utf-8");
 const OVERVIEW_PAGE_SOURCE = readFileSync(new URL("../app/manager/page.tsx", import.meta.url), "utf-8");
 const API_SOURCE = readFileSync(new URL("./api.ts", import.meta.url), "utf-8");
 const MODEL_SOURCE = readFileSync(new URL("../../app/models/mail.py", import.meta.url), "utf-8");
@@ -27,12 +28,15 @@ test("the Inbox page no longer says Coming soon", () => {
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /Coming soon/);
 });
 
-test("the Inbox page renders the real contact name/email, campaign name, replied timestamp, and Gmail thread id", () => {
+test("the Inbox list renders the real contact name/email, campaign name, and replied timestamp per row", () => {
   assert.match(INBOX_PAGE_SOURCE, /contact_name/);
   assert.match(INBOX_PAGE_SOURCE, /\.email\b/);
   assert.match(INBOX_PAGE_SOURCE, /campaign_name/);
   assert.match(INBOX_PAGE_SOURCE, /replied_at/);
-  assert.match(INBOX_PAGE_SOURCE, /gmail_thread_id/);
+});
+
+test("the reply detail page renders the Gmail thread id (a detail-only field, not shown in the list row)", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /gmail_thread_id/);
 });
 
 test("the Inbox page never fabricates unread/read state (still no such model anywhere in this codebase)", () => {
@@ -41,12 +45,14 @@ test("the Inbox page never fabricates unread/read state (still no such model any
   }
 });
 
-test("the Inbox page never renders body content as raw HTML (no dangerouslySetInnerHTML anywhere)", () => {
+test("neither the Inbox list nor the reply detail page ever renders body content as raw HTML (no dangerouslySetInnerHTML anywhere)", () => {
   // Inbox V2 (2026-09-17) does show real reply text now, but only ever
-  // as plain text in a <p> -- the backend already converts any
-  // HTML-only reply to plain text (see gmail_message_body_client.py),
-  // so the frontend has no legitimate reason to ever interpret markup.
+  // as plain text plus explicitly-constructed <a> links -- the backend
+  // already converts any HTML-only reply to plain text (see
+  // gmail_message_body_client.py), so the frontend has no legitimate
+  // reason to ever interpret markup.
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /dangerouslySetInnerHTML/);
+  assert.doesNotMatch(DETAIL_PAGE_SOURCE, /dangerouslySetInnerHTML/);
 });
 
 test("the Inbox page trusts the backend's ordering rather than re-sorting client-side", () => {
@@ -61,30 +67,39 @@ test("the Inbox page renders an empty state distinct from the loading/error stat
   assert.match(INBOX_PAGE_SOURCE, /Couldn.t load the Inbox/);
 });
 
-test("the Inbox detail view fetches and renders the real reply body on demand (Inbox V2, 2026-09-17)", () => {
-  assert.match(INBOX_PAGE_SOURCE, /getInboxReplyBody/);
-  assert.match(INBOX_PAGE_SOURCE, /body_text/);
-  // On-demand means fetched when the detail view opens, not eagerly for
-  // the whole list -- the fetch call must live inside the per-reply
-  // ReplyBody component, not in the top-level list-loading effect.
-  const listLoadEffect = INBOX_PAGE_SOURCE.slice(
-    INBOX_PAGE_SOURCE.indexOf("export default function InboxPage"),
-    INBOX_PAGE_SOURCE.indexOf("const campaigns = useMemo")
-  );
-  assert.doesNotMatch(listLoadEffect, /getInboxReplyBody/);
+test("the Inbox list no longer fetches or renders reply bodies at all (moved to the dedicated detail page)", () => {
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /getInboxReplyBody/);
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /body_text/);
 });
 
-test("the Inbox detail view handles every expected non-ok body status distinctly", () => {
+test("the reply detail page fetches and renders the real reply body on demand (Inbox V2, 2026-09-17)", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /getInboxReplyBody/);
+  assert.match(DETAIL_PAGE_SOURCE, /body_text/);
+  // On-demand means fetched when the detail page mounts for THIS one
+  // reply, not eagerly for the whole list -- the fetch call must live
+  // inside the per-reply body section, keyed off the route param.
+  assert.match(DETAIL_PAGE_SOURCE, /getInboxReplyBody\(enrollmentId\)/);
+});
+
+test("the reply detail page handles every expected non-ok body status distinctly", () => {
   for (const status of ["scope_missing", "needs_reauth", "not_found", "provider_error"]) {
-    assert.match(INBOX_PAGE_SOURCE, new RegExp(status));
+    assert.match(DETAIL_PAGE_SOURCE, new RegExp(status));
   }
-  assert.match(INBOX_PAGE_SOURCE, /Reconnect this mailbox/);
+  assert.match(DETAIL_PAGE_SOURCE, /Reconnect this mailbox/);
 });
 
-test("a body-fetch failure never blocks the rest of the Inbox list from working", () => {
+test("a body-fetch failure never blocks the rest of the reply page (metadata sidebar) from working", () => {
   // The reply-body fetch lives in its own component with its own
-  // loading/error state, never gating the outer list's own render.
-  assert.match(INBOX_PAGE_SOURCE, /function ReplyBody/);
+  // loading/error state, never gating the metadata sidebar's own render.
+  assert.match(DETAIL_PAGE_SOURCE, /function ReplyBodySection/);
+});
+
+test("the reply body is the visually dominant element -- larger text than the metadata sidebar, given its own Card", () => {
+  const bodySection = DETAIL_PAGE_SOURCE.slice(
+    DETAIL_PAGE_SOURCE.indexOf("function ReplyBodySection"),
+    DETAIL_PAGE_SOURCE.indexOf("function RetryButton")
+  );
+  assert.match(bodySection, /text-base leading-relaxed/);
 });
 
 test("MailInboxReplyView (api.ts) has no body/snippet or unread/read field", () => {
@@ -210,8 +225,90 @@ test("the Inbox page reuses the app's existing wide-detail-page container conven
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /max-w-4xl/);
 });
 
-test("the reply detail modal is widened beyond the dialog default, but not to a huge/edge-to-edge width", () => {
-  assert.match(INBOX_PAGE_SOURCE, /DialogPopup className="max-w-2xl"/);
+test("reply reading no longer happens in a modal anywhere (Inbox V2 UX change, 2026-09-17)", () => {
+  for (const modalSource of [INBOX_PAGE_SOURCE, DETAIL_PAGE_SOURCE]) {
+    assert.doesNotMatch(modalSource, /<Dialog[\s>]/);
+    assert.doesNotMatch(modalSource, /DialogPopup/);
+  }
+});
+
+test("the Inbox list row is a real navigation (next/link Link), not a modal-opening button", () => {
+  const rowBlock = INBOX_PAGE_SOURCE.slice(
+    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)"),
+    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)") + 400
+  );
+  assert.match(rowBlock, /<Link\b/);
+  assert.match(rowBlock, /href=\{`\/manager\/inbox\/\$\{reply\.enrollment_id\}`\}/);
+  assert.doesNotMatch(rowBlock, /onClick=\{\(\) => setSelected/);
+});
+
+test("the reply detail page is a comfortable reading width, not huge/edge-to-edge", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /max-w-6xl/);
+  assert.doesNotMatch(DETAIL_PAGE_SOURCE, /max-w-full\b|w-screen\b/);
+  // The reading column itself is capped to a real prose measure, not
+  // stretched across the whole wide page.
+  assert.match(DETAIL_PAGE_SOURCE, /max-w-\[65ch\]/);
+});
+
+test("the reply detail page has a Back to Inbox link", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /Back to Inbox/);
+  assert.match(DETAIL_PAGE_SOURCE, /href="\/manager\/inbox"/);
+});
+
+test("the reply detail page splits new reply text from quoted/previous content using the real, tested heuristic -- never a fabricated ad hoc regex", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /splitReplyQuote/);
+  assert.match(DETAIL_PAGE_SOURCE, /New reply/);
+  assert.match(DETAIL_PAGE_SOURCE, /Previous \/ quoted message/);
+  // Only renders the quoted block when one was actually found.
+  assert.match(DETAIL_PAGE_SOURCE, /\{quoted && \(/);
+});
+
+test("the reply detail page linkifies URLs via the tested pure helper, never dangerouslySetInnerHTML or a raw regex inline", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /linkifySegments/);
+  assert.match(DETAIL_PAGE_SOURCE, /target="_blank"/);
+  assert.match(DETAIL_PAGE_SOURCE, /rel="noopener noreferrer nofollow"/);
+});
+
+test("the reply detail page's metadata sidebar renders every required field and the campaign/contact links", () => {
+  for (const field of [
+    "mailbox_email",
+    "subject",
+    "replied_at",
+    "gmail_thread_id",
+    "gmail_message_id",
+    "enrollment_status",
+    "skipped_step_numbers",
+  ]) {
+    assert.match(DETAIL_PAGE_SOURCE, new RegExp(field));
+  }
+  assert.match(DETAIL_PAGE_SOURCE, /href=\{`\/manager\/campaigns\/mail\/\$\{reply\.mail_campaign_id\}`\}/);
+  assert.match(DETAIL_PAGE_SOURCE, /href=\{`\/crm\/\$\{reply\.crm_contact_id\}`\}/);
+});
+
+test("the reply detail page only links to a contact when one was actually resolved (contact_name present)", () => {
+  const contactLinkBlock = DETAIL_PAGE_SOURCE.slice(
+    DETAIL_PAGE_SOURCE.indexOf("reply.contact_name &&"),
+    DETAIL_PAGE_SOURCE.indexOf("reply.contact_name &&") + 350
+  );
+  assert.match(contactLinkBlock, /View in Contacts/);
+});
+
+test("the reply detail page's layout stacks the metadata sidebar below the body on narrow screens and sits beside it on large screens", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /grid gap-8 lg:grid-cols-\[1fr_320px\]/);
+});
+
+test("the reply detail page handles a missing/404 reply gracefully rather than crashing", () => {
+  assert.match(DETAIL_PAGE_SOURCE, /No reply found for this enrollment/);
+});
+
+test("GET /mail/inbox/replies/{enrollment_id} (single-reply metadata) exists, is read-only, and is distinct from the /body route", () => {
+  assert.match(API_ROUTE_SOURCE, /@router\.get\("\/inbox\/replies\/\{enrollment_id\}"/);
+  assert.doesNotMatch(API_ROUTE_SOURCE, /@router\.(post|patch|put|delete)\("\/inbox\/replies\/\{enrollment_id\}"/);
+});
+
+test("MailInboxService.get_reply is the single-row counterpart to list_replies, sharing the same join logic", () => {
+  assert.match(SERVICE_SOURCE, /async def get_reply\(self, enrollment_id: str\)/);
+  assert.match(SERVICE_SOURCE, /_build_view/);
 });
 
 test("the toolbar's search and campaign filter widen on desktop and stack on narrow widths", () => {

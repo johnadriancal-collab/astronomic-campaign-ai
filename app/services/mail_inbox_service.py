@@ -21,7 +21,7 @@ anywhere in this codebase to go stale or leak."""
 from app.google.gmail_message_body_client import GmailMessageBodyClient, extract_best_body
 from app.google.gmail_thread_reader_client import GmailReadError, GmailReadNotFoundError
 from app.google.oauth_client import GMAIL_READONLY_SCOPE, GoogleRefreshTokenInvalidError
-from app.models.mail import MailEnrollmentStepStatus, MailInboxReplyBody, MailInboxReplyView
+from app.models.mail import MailEnrollmentStepStatus, MailInboxReplyBody, MailInboxReplyView, MailReply
 from app.repositories.crm_contact_store import CrmContactStore
 from app.repositories.mail_campaign_store import MailCampaignStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
@@ -53,68 +53,85 @@ class MailInboxService:
         self.body_client = body_client or GmailMessageBodyClient()
 
     async def list_replies(self) -> list[MailInboxReplyView]:
-        """Pure read, computed fresh on every call -- never cached. A
-        MailReply whose enrollment or campaign has since vanished is
-        skipped (same defensive stance as
-        MailCampaignService.list_execution_steps(): enrollments are
-        never hard-deleted and campaigns are only ever archived, never
-        deleted, so this should be unreachable in practice -- there is
-        no honest fallback value for a MailCampaignStatus that doesn't
-        exist, so this row is dropped rather than shown with a
+        """Pure read, computed fresh on every call -- never cached. See
+        _build_view()'s own docstring for the per-row join/fallback
+        rules; a MailReply whose enrollment or campaign has since
+        vanished is dropped from the list entirely (same defensive
+        stance as MailCampaignService.list_execution_steps())."""
+        replies = await self.reply_store.list_all()
+        views: list[MailInboxReplyView] = []
+        for reply in replies:
+            view = await self._build_view(reply)
+            if view is not None:
+                views.append(view)
+        return views
+
+    async def get_reply(self, enrollment_id: str) -> MailInboxReplyView | None:
+        """The single-row counterpart to list_replies() -- powers a
+        direct page load of one reply's detail view (a reload, a
+        bookmarked/shared link) without re-fetching the entire Inbox.
+        Same join/fallback rules as list_replies(); returns None if no
+        MailReply exists for this enrollment, or if its enrollment/
+        campaign has since vanished (see _build_view())."""
+        reply = await self.reply_store.get(enrollment_id)
+        if reply is None:
+            return None
+        return await self._build_view(reply)
+
+    async def _build_view(self, reply: MailReply) -> MailInboxReplyView | None:
+        """Joins one MailReply row against MailEnrollment/MailCampaign/
+        CrmContact/Mailbox/MailEnrollmentStep for display. Returns None
+        if the enrollment or campaign it points at is gone (enrollments
+        are never hard-deleted and campaigns are only ever archived,
+        never deleted, so this should be unreachable in practice --
+        there is no honest fallback value for a MailCampaignStatus that
+        doesn't exist, so the row is dropped rather than shown with a
         fabricated status). A missing contact/mailbox never drops the
         row -- only the corresponding display field goes None, so a
         reply is never hidden just because a Contact or mailbox it
         points at was removed."""
-        replies = await self.reply_store.list_all()
+        enrollment = await self.enrollment_store.get(reply.enrollment_id)
+        if enrollment is None:
+            return None
 
-        views: list[MailInboxReplyView] = []
-        for reply in replies:
-            enrollment = await self.enrollment_store.get(reply.enrollment_id)
-            if enrollment is None:
-                continue
+        campaign = await self.campaign_store.get(reply.mail_campaign_id)
+        if campaign is None:
+            return None
 
-            campaign = await self.campaign_store.get(reply.mail_campaign_id)
-            if campaign is None:
-                continue
+        contact = await self.contact_store.get(reply.crm_contact_id)
+        mailbox = await self.mailbox_store.get(reply.mailbox_id)
+        steps = await self.enrollment_step_store.list_for_enrollment(reply.enrollment_id)
 
-            contact = await self.contact_store.get(reply.crm_contact_id)
-            mailbox = await self.mailbox_store.get(reply.mailbox_id)
-            steps = await self.enrollment_step_store.list_for_enrollment(reply.enrollment_id)
+        step1 = next((s for s in steps if s.step_number == 1), None)
+        subject = None
+        if step1 is not None:
+            subject = step1.rendered_subject or step1.subject
 
-            step1 = next((s for s in steps if s.step_number == 1), None)
-            subject = None
-            if step1 is not None:
-                subject = step1.rendered_subject or step1.subject
+        skipped_step_numbers = sorted(
+            s.step_number for s in steps if s.status == MailEnrollmentStepStatus.SKIPPED_REPLIED
+        )
 
-            skipped_step_numbers = sorted(
-                s.step_number for s in steps if s.status == MailEnrollmentStepStatus.SKIPPED_REPLIED
-            )
+        contact_name = None
+        if contact is not None:
+            contact_name = " ".join(part for part in [contact.first_name, contact.last_name] if part) or None
 
-            contact_name = None
-            if contact is not None:
-                contact_name = " ".join(part for part in [contact.first_name, contact.last_name] if part) or None
-
-            views.append(
-                MailInboxReplyView(
-                    enrollment_id=reply.enrollment_id,
-                    mail_campaign_id=reply.mail_campaign_id,
-                    campaign_name=campaign.name,
-                    campaign_status=campaign.status,
-                    crm_contact_id=reply.crm_contact_id,
-                    contact_name=contact_name,
-                    email=reply.reply_email_normalized,
-                    mailbox_id=reply.mailbox_id,
-                    mailbox_email=mailbox.email if mailbox is not None else None,
-                    subject=subject,
-                    replied_at=reply.detected_at,
-                    gmail_thread_id=reply.gmail_thread_id,
-                    gmail_message_id=reply.gmail_message_id,
-                    enrollment_status=enrollment.status,
-                    skipped_step_numbers=skipped_step_numbers,
-                )
-            )
-
-        return views
+        return MailInboxReplyView(
+            enrollment_id=reply.enrollment_id,
+            mail_campaign_id=reply.mail_campaign_id,
+            campaign_name=campaign.name,
+            campaign_status=campaign.status,
+            crm_contact_id=reply.crm_contact_id,
+            contact_name=contact_name,
+            email=reply.reply_email_normalized,
+            mailbox_id=reply.mailbox_id,
+            mailbox_email=mailbox.email if mailbox is not None else None,
+            subject=subject,
+            replied_at=reply.detected_at,
+            gmail_thread_id=reply.gmail_thread_id,
+            gmail_message_id=reply.gmail_message_id,
+            enrollment_status=enrollment.status,
+            skipped_step_numbers=skipped_step_numbers,
+        )
 
     async def get_reply_body(self, enrollment_id: str) -> MailInboxReplyBody:
         """On-demand only -- never called from list_replies(), never

@@ -702,3 +702,36 @@ async def test_inbox_list_still_works_after_a_body_fetch_failure(stores, service
 async def test_get_reply_body_returns_not_found_for_unknown_enrollment(stores, service):
     result = await service.get_reply_body("no-such-enrollment")
     assert result.status == "not_found"
+
+
+# --- get_reply() (single-row counterpart to list_replies, Inbox V2 detail page) ---
+
+
+async def test_get_reply_returns_the_same_view_as_the_matching_list_replies_row(stores, service):
+    await stores["campaign_store"].create(make_campaign())
+    await stores["mailbox_store"].create(make_mailbox())
+    contact = make_contact("c1", "Chris", "Beaman", "chris@galaxysway.com")
+    await stores["contact_store"].create(contact)
+    enrollment = make_enrollment("e1", contact.crm_contact_id, contact.email)
+    await stores["enrollment_store"].create(enrollment)
+    await stores["enrollment_step_store"].create(make_step1(enrollment.enrollment_id, contact.crm_contact_id))
+    await stores["reply_store"].create(make_reply(enrollment.enrollment_id, contact.crm_contact_id, contact.email))
+
+    [listed] = await service.list_replies()
+    single = await service.get_reply(enrollment.enrollment_id)
+
+    assert single is not None
+    assert single == listed
+
+
+async def test_get_reply_returns_none_for_an_enrollment_with_no_reply(stores, service):
+    assert await service.get_reply("no-such-enrollment") is None
+
+
+async def test_get_reply_returns_none_when_the_campaign_has_vanished(stores, service):
+    # No campaign ever created for this reply -- mirrors
+    # test_missing_enrollment_or_campaign_drops_the_row_rather_than_fabricating_one.
+    enrollment = make_enrollment("e1", "ghost-contact", "ghost@example.com")
+    await stores["enrollment_store"].create(enrollment)
+    await stores["reply_store"].create(make_reply(enrollment.enrollment_id, "ghost-contact", "ghost@example.com"))
+    assert await service.get_reply(enrollment.enrollment_id) is None

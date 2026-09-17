@@ -1424,6 +1424,14 @@ export function listInboxReplies(): Promise<MailInboxReplyView[]> {
   return request<MailInboxReplyView[]>("/mail/inbox/replies");
 }
 
+/** The single-row counterpart to listInboxReplies() -- powers a direct
+ * load of the Inbox V2 detail page (a reload, a bookmarked/shared link)
+ * without re-fetching the whole Inbox. Throws ApiError(404) if no reply
+ * exists for this enrollment. */
+export function getInboxReply(enrollmentId: string): Promise<MailInboxReplyView> {
+  return request<MailInboxReplyView>(`/mail/inbox/replies/${enrollmentId}`);
+}
+
 // --- Inbox V2 (2026-09-17): on-demand reply-body reading --------------------
 //
 // Always 200 -- `status` is the ONLY thing to branch on. "ok" carries

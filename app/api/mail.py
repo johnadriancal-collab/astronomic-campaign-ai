@@ -365,6 +365,20 @@ async def list_inbox_replies(service: MailInboxService = Depends(get_mail_inbox_
     return await service.list_replies()
 
 
+@router.get("/inbox/replies/{enrollment_id}", response_model=MailInboxReplyView)
+async def get_inbox_reply(enrollment_id: str, service: MailInboxService = Depends(get_mail_inbox_service)):
+    """The single-row counterpart to list_inbox_replies() -- powers a
+    direct load of Inbox V2's dedicated reply detail page (a reload, a
+    bookmarked/shared link) without re-fetching the whole Inbox. 404 if
+    no MailReply exists for this enrollment (or its enrollment/campaign
+    has since vanished -- see MailInboxService.get_reply()'s own
+    docstring)."""
+    reply = await service.get_reply(enrollment_id)
+    if reply is None:
+        raise HTTPException(status_code=404, detail=f"No reply found for enrollment {enrollment_id}.")
+    return reply
+
+
 @router.get("/inbox/replies/{enrollment_id}/body", response_model=MailInboxReplyBody)
 async def get_inbox_reply_body(enrollment_id: str, service: MailInboxService = Depends(get_mail_inbox_service)):
     """Inbox V2 (2026-09-17) -- on-demand only, never bulk, never
