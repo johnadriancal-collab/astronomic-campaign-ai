@@ -226,7 +226,7 @@ export default function InboxPage() {
               Inbox ({filtered.length}
               {filtered.length !== replies.length ? ` of ${replies.length}` : ""})
             </h2>
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
               <Input
                 placeholder="Search name, email, or campaign…"
                 value={search}
@@ -237,7 +237,7 @@ export default function InboxPage() {
                 <select
                   value={campaignFilter}
                   onChange={(e) => setCampaignFilter(e.target.value)}
-                  className="rounded-md border border-input bg-background px-3 py-2 text-sm sm:w-56"
+                  className="w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm sm:w-56"
                 >
                   <option value="all">All campaigns</option>
                   {campaigns.map(([id, name]) => (
@@ -265,7 +265,7 @@ export default function InboxPage() {
                       key={reply.enrollment_id}
                       type="button"
                       onClick={() => setSelected(reply)}
-                      className="flex w-full items-center justify-between gap-6 px-6 py-4 text-left text-sm transition-colors hover:bg-secondary/40 sm:px-8"
+                      className="flex w-full min-w-0 flex-col gap-1 px-6 py-4 text-left text-sm transition-colors hover:bg-secondary/40 sm:flex-row sm:items-center sm:justify-between sm:gap-6 sm:px-8"
                     >
                       <div className="min-w-0">
                         <div className="flex items-center gap-2">
@@ -283,7 +283,7 @@ export default function InboxPage() {
                           {reply.email} · {reply.campaign_name}
                         </div>
                       </div>
-                      <span className="w-36 shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground">
+                      <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground sm:w-36 sm:text-right">
                         {formatDateTime(reply.replied_at)}
                       </span>
                     </button>

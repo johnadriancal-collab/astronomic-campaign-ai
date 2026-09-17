@@ -223,3 +223,19 @@ test("no fixed pixel widths or edge-to-edge full-bleed containers were introduce
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /width:\s*\d+px/);
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /\bmax-w-full\b|\bw-screen\b/);
 });
+
+test("the campaign filter <select> has a base full-width class, not just a sm: width (a real mobile overflow bug this reproduces: an unconstrained <select> takes its longest option's intrinsic width)", () => {
+  const selectBlock = INBOX_PAGE_SOURCE.slice(
+    INBOX_PAGE_SOURCE.indexOf("<select"),
+    INBOX_PAGE_SOURCE.indexOf("</select>")
+  );
+  assert.match(selectBlock, /className="[^"]*\bw-full\b[^"]*sm:w-56/);
+});
+
+test("the reply row stacks vertically below sm: and only becomes a horizontal split at sm: and up", () => {
+  const rowButtonOpenTag = INBOX_PAGE_SOURCE.slice(
+    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)"),
+    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)") + 400
+  );
+  assert.match(rowButtonOpenTag, /flex-col gap-1[^"]*sm:flex-row/);
+});
