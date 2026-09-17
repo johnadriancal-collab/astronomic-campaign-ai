@@ -200,5 +200,26 @@ test("the body route is read-only (GET only, no mutation route alongside it)", (
 });
 
 test("MailInboxReplyBody never persists -- get_reply_body has no store write for the body itself", () => {
-  assert.doesNotMatch(SERVICE_SOURCE, /body_text.*save|save.*body_text/is);
+  assert.doesNotMatch(SERVICE_SOURCE, /body_text.*save|save.*body_text/i);
+});
+
+// --- Layout widening (2026-09-17) -------------------------------------------
+
+test("the Inbox page reuses the app's existing wide-detail-page container convention, not an invented width", () => {
+  assert.match(INBOX_PAGE_SOURCE, /MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS/);
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /max-w-4xl/);
+});
+
+test("the reply detail modal is widened beyond the dialog default, but not to a huge/edge-to-edge width", () => {
+  assert.match(INBOX_PAGE_SOURCE, /DialogPopup className="max-w-2xl"/);
+});
+
+test("the toolbar's search and campaign filter widen on desktop and stack on narrow widths", () => {
+  assert.match(INBOX_PAGE_SOURCE, /flex-col gap-3 md:flex-row/);
+  assert.match(INBOX_PAGE_SOURCE, /sm:w-72 md:w-96/); // search
+});
+
+test("no fixed pixel widths or edge-to-edge full-bleed containers were introduced", () => {
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /width:\s*\d+px/);
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /\bmax-w-full\b|\bw-screen\b/);
 });

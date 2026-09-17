@@ -50,12 +50,28 @@ export const GMAIL_SEND_SCOPE = "https://www.googleapis.com/auth/gmail.send";
 // silently grant gmail.send-only again.
 export const GMAIL_METADATA_SCOPE = "https://www.googleapis.com/auth/gmail.metadata";
 
+// 2026-09-17 (Inbox V2) -- same reasoning as GMAIL_METADATA_SCOPE above,
+// one more time: requested in the SAME upgrade flow (see
+// MailboxService.begin_gmail_send_upgrade()'s own docstring), added
+// here specifically so a mailbox that already has send+metadata from
+// before this scope existed still shows the upgrade action. Skipping
+// this update is EXACTLY the gap the gmail.metadata comment above
+// already warned about -- and exactly what happened here: Victoria's
+// mailbox already had send+metadata, so gmailSendUpgradeState() kept
+// returning "enabled" and the upgrade button stayed hidden even after
+// this scope existed, until this fix.
+export const GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly";
+
 export function hasGmailSendScope(mailbox: Mailbox): boolean {
   return mailbox.granted_scopes.includes(GMAIL_SEND_SCOPE);
 }
 
 export function hasGmailMetadataScope(mailbox: Mailbox): boolean {
   return mailbox.granted_scopes.includes(GMAIL_METADATA_SCOPE);
+}
+
+export function hasGmailReadonlyScope(mailbox: Mailbox): boolean {
+  return mailbox.granted_scopes.includes(GMAIL_READONLY_SCOPE);
 }
 
 // Astronomic Mail Gmail-send upgrade (see components/enable-gmail-
@@ -65,16 +81,18 @@ export function hasGmailMetadataScope(mailbox: Mailbox): boolean {
 // right now. "needs_reconnect" deliberately takes priority over
 // "enabled": a NEEDS_REAUTH/DISCONNECTED mailbox is not currently usable
 // for sending regardless of what it was once granted, and the UI must
-// never imply otherwise. "enabled" requires BOTH scopes -- a mailbox
-// with gmail.send but not yet gmail.metadata is "can_enable", so the
-// SAME upgrade button/modal remains clickable and re-requests the full
-// desired scope set (Google's include_granted_scopes=true keeps
-// gmail.send granted either way).
+// never imply otherwise. "enabled" requires ALL THREE scopes -- a
+// mailbox missing any one of them is "can_enable", so the SAME upgrade
+// button/modal remains clickable and re-requests the full desired scope
+// set (Google's include_granted_scopes=true keeps whatever was already
+// granted either way).
 export type GmailSendUpgradeState = "enabled" | "can_enable" | "needs_reconnect";
 
 export function gmailSendUpgradeState(mailbox: Mailbox): GmailSendUpgradeState {
   if (mailbox.status !== "connected") return "needs_reconnect";
-  return hasGmailSendScope(mailbox) && hasGmailMetadataScope(mailbox) ? "enabled" : "can_enable";
+  return hasGmailSendScope(mailbox) && hasGmailMetadataScope(mailbox) && hasGmailReadonlyScope(mailbox)
+    ? "enabled"
+    : "can_enable";
 }
 
 export function providerLabel(provider: MailboxProvider): string {

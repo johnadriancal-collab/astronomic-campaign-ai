@@ -5,12 +5,14 @@ import {
   DELIVERABILITY_TOOLTIP,
   EMAIL_ACCOUNT_TABLE_COLUMNS,
   GMAIL_METADATA_SCOPE,
+  GMAIL_READONLY_SCOPE,
   GMAIL_SEND_SCOPE,
   deriveTld,
   filterMailboxes,
   formatSendUsage,
   gmailSendUpgradeState,
   hasGmailMetadataScope,
+  hasGmailReadonlyScope,
   hasGmailSendScope,
   mailboxDisplayName,
   mailboxStatusBadgeClass,
@@ -204,30 +206,55 @@ test("gmailSendUpgradeState is 'can_enable' -- NOT 'enabled' -- for a mailbox wi
   assert.equal(gmailSendUpgradeState(mailbox), "can_enable");
 });
 
-test("gmailSendUpgradeState is 'enabled' only once BOTH gmail.send and gmail.metadata are present", () => {
+test("gmailSendUpgradeState is 'can_enable' -- NOT 'enabled' -- for a mailbox with send+metadata but not yet gmail.readonly (Inbox V2, 2026-09-17)", () => {
+  // The exact gap this test guards against, one more time: a mailbox
+  // granted send+metadata before gmail.readonly existed as a requested
+  // scope must still show the upgrade action -- a real production
+  // incident (Victoria's mailbox) this test reproduces.
   const mailbox = makeMailbox({
     status: "connected",
     granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE],
+  });
+  assert.equal(gmailSendUpgradeState(mailbox), "can_enable");
+});
+
+test("hasGmailReadonlyScope is false until gmail.readonly is present", () => {
+  assert.equal(
+    hasGmailReadonlyScope(makeMailbox({ granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE] })),
+    false
+  );
+  assert.equal(
+    hasGmailReadonlyScope(
+      makeMailbox({ granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE, GMAIL_READONLY_SCOPE] })
+    ),
+    true
+  );
+});
+
+test("gmailSendUpgradeState is 'enabled' only once ALL THREE of gmail.send, gmail.metadata, and gmail.readonly are present", () => {
+  const mailbox = makeMailbox({
+    status: "connected",
+    granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE, GMAIL_READONLY_SCOPE],
   });
   assert.equal(gmailSendUpgradeState(mailbox), "enabled");
 });
 
 test("gmailSendUpgradeState is 'needs_reconnect' for a needs_reauth mailbox regardless of granted_scopes", () => {
   const mailboxWithoutSendScope = makeMailbox({ status: "needs_reauth", granted_scopes: ["openid", "email", "profile"] });
-  const mailboxWithBothScopes = makeMailbox({
+  const mailboxWithAllThreeScopes = makeMailbox({
     status: "needs_reauth",
-    granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE],
+    granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE, GMAIL_READONLY_SCOPE],
   });
   assert.equal(gmailSendUpgradeState(mailboxWithoutSendScope), "needs_reconnect");
-  // Critically: even a mailbox that WAS granted both scopes before it
-  // needed reauth must not be shown as "enabled" -- it isn't currently usable.
-  assert.equal(gmailSendUpgradeState(mailboxWithBothScopes), "needs_reconnect");
+  // Critically: even a mailbox that WAS granted all three scopes before
+  // it needed reauth must not be shown as "enabled" -- it isn't currently usable.
+  assert.equal(gmailSendUpgradeState(mailboxWithAllThreeScopes), "needs_reconnect");
 });
 
 test("gmailSendUpgradeState is 'needs_reconnect' for a disconnected mailbox", () => {
   const mailbox = makeMailbox({
     status: "disconnected",
-    granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE],
+    granted_scopes: ["openid", "email", "profile", GMAIL_SEND_SCOPE, GMAIL_METADATA_SCOPE, GMAIL_READONLY_SCOPE],
   });
   assert.equal(gmailSendUpgradeState(mailbox), "needs_reconnect");
 });
