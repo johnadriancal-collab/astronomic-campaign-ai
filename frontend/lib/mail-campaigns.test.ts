@@ -138,3 +138,60 @@ test("archived/historical campaigns are never excluded from the list", () => {
   assert.doesNotMatch(SERVICE_SOURCE, /status\s*!=\s*MailCampaignStatus\.ARCHIVED/);
   assert.doesNotMatch(SERVICE_SOURCE, /exclude.*archived/i);
 });
+
+// --- Table density / campaign-name truncation (2026-09-17 tightening) --------
+//
+// QuickMail-density pass: single-line, ellipsis-truncated campaign names,
+// tighter cell padding, a bounded Campaign column width, and a hover
+// tooltip carrying the full name -- layout-only, no change to the read
+// model, sorting, search, filters, or pagination above.
+
+const NAME_LINK_START = LIST_PAGE_SOURCE.indexOf("href={`/manager/campaigns/mail/");
+const NAME_CELL = LIST_PAGE_SOURCE.slice(NAME_LINK_START, LIST_PAGE_SOURCE.indexOf("</Link>", NAME_LINK_START));
+
+test("the campaign name renders as a single line with ellipsis truncation, never wraps", () => {
+  assert.match(NAME_CELL, /truncate/);
+  assert.match(NAME_CELL, /whitespace-nowrap/);
+});
+
+test("the campaign name's full text is preserved as the stored name and exposed via a title attribute (hover tooltip)", () => {
+  assert.match(NAME_CELL, /title=\{campaign\.name\}/);
+  // The rendered text itself is still the real, untruncated campaign.name
+  // -- truncation is CSS-only, never a manually shortened string.
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /campaign\.name\.slice\(|campaign\.name\.substring\(/);
+});
+
+test("the Campaign column has a bounded width so it can't consume the whole table or collapse to near-zero", () => {
+  assert.match(LIST_PAGE_SOURCE, /w-\[240px\]/);
+});
+
+test("table cell padding is tighter than the original px-4 py-2.5 pass, for a more compact row height", () => {
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /px-4 py-2\.5/);
+  assert.match(LIST_PAGE_SOURCE, /px-3 py-2\b/);
+});
+
+test("Status, Mailbox, and Last Updated cells never wrap, keeping every row's height consistent", () => {
+  const statusCell = LIST_PAGE_SOURCE.slice(
+    LIST_PAGE_SOURCE.indexOf('rounded-full px-2 py-0.5 text-xs font-medium",\n                            mailCampaignStatusBadgeClass') - 200,
+    LIST_PAGE_SOURCE.indexOf('rounded-full px-2 py-0.5 text-xs font-medium",\n                            mailCampaignStatusBadgeClass')
+  );
+  assert.match(statusCell, /whitespace-nowrap/);
+  assert.match(LIST_PAGE_SOURCE, /whitespace-nowrap px-3 py-2 text-muted-foreground">\s*\{campaign\.mailbox_email/);
+  assert.match(LIST_PAGE_SOURCE, /whitespace-nowrap px-3 py-2 text-right text-muted-foreground">\{formatDateTime/);
+});
+
+test("Last Updated still renders a real formatted date/time, just a more compact one", () => {
+  assert.match(LIST_PAGE_SOURCE, /function formatDateTime/);
+  assert.match(LIST_PAGE_SOURCE, /month: "short", day: "numeric", hour: "numeric", minute: "2-digit"/);
+});
+
+test("the table still scrolls horizontally in its own container rather than corrupting the page on narrow screens", () => {
+  assert.match(LIST_PAGE_SOURCE, /overflow-x-auto/);
+});
+
+test("search, sort, filter, and pagination wiring are unchanged by the density pass", () => {
+  assert.match(LIST_PAGE_SOURCE, /q: search\.trim\(\)/);
+  assert.match(LIST_PAGE_SOURCE, /status: statusFilter/);
+  assert.match(LIST_PAGE_SOURCE, /function handleSort/);
+  assert.match(LIST_PAGE_SOURCE, /page,\s*\n\s*pageSize,/);
+});

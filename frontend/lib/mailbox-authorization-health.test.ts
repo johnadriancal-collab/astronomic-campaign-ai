@@ -124,7 +124,7 @@ test("the Emails page renders authorization health, last-authorized age, and an 
 });
 
 test("the Emails page's Reconnect action works while the mailbox is still connected -- not gated on needs_reauth alone", () => {
-  assert.match(EMAILS_PAGE_SOURCE, /reconnect_soon.*setReconnectTarget|setReconnectTarget.*reconnect_soon/s);
+  assert.match(EMAILS_PAGE_SOURCE, /reconnect_soon[\s\S]*setReconnectTarget|setReconnectTarget[\s\S]*reconnect_soon/);
 });
 
 test("the Emails page uses the dedicated ReconnectMailboxModal, not the full-upgrade modal, for routine reconnects", () => {

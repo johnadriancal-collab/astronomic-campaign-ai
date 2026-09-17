@@ -39,8 +39,11 @@ const STATUS_OPTIONS: { value: MailCampaignStatus; label: string }[] = [
 
 const PAGE_SIZE_OPTIONS = [25, 50];
 
+// Compact -- omits the year (every campaign here is recent enough that
+// it's rarely ambiguous) so the Last Updated column stays narrow and
+// single-line at the tighter row height below.
 function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 function SortHeader({
@@ -220,15 +223,15 @@ export default function CampaignsPage() {
         <>
           <Card>
             <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[1080px] text-sm">
+              <table className="w-full min-w-[1000px] text-sm">
                 <thead className="border-b border-border bg-secondary/30 text-xs">
                   <tr>
-                    <th className="px-4 py-2.5 text-left">
+                    <th className="w-[240px] px-3 py-2 text-left">
                       <SortHeader label="Campaign" column="name" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                     </th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Status</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Mailbox</th>
-                    <th className="px-4 py-2.5 text-right">
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground">Status</th>
+                    <th className="px-3 py-2 text-left font-medium text-muted-foreground">Mailbox</th>
+                    <th className="px-3 py-2 text-right">
                       <SortHeader
                         label="Leads"
                         column="total_leads"
@@ -238,8 +241,8 @@ export default function CampaignsPage() {
                         align="right"
                       />
                     </th>
-                    <th className="px-4 py-2.5 text-right font-medium text-muted-foreground">Sent</th>
-                    <th className="px-4 py-2.5 text-right">
+                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Sent</th>
+                    <th className="px-3 py-2 text-right">
                       <SortHeader
                         label="Replied"
                         column="replied"
@@ -249,9 +252,9 @@ export default function CampaignsPage() {
                         align="right"
                       />
                     </th>
-                    <th className="px-4 py-2.5 text-right font-medium text-muted-foreground">Suppressed</th>
-                    <th className="px-4 py-2.5 text-right font-medium text-muted-foreground">Failed</th>
-                    <th className="px-4 py-2.5 text-left">
+                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Suppressed</th>
+                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Failed</th>
+                    <th className="px-3 py-2 text-left">
                       <SortHeader
                         label="Progress"
                         column="progress"
@@ -260,8 +263,8 @@ export default function CampaignsPage() {
                         onSort={handleSort}
                       />
                     </th>
-                    <th className="px-4 py-2.5 text-right font-medium text-muted-foreground">Steps</th>
-                    <th className="px-4 py-2.5 text-right">
+                    <th className="px-3 py-2 text-right font-medium text-muted-foreground">Steps</th>
+                    <th className="px-3 py-2 text-right">
                       <SortHeader
                         label="Last Updated"
                         column="updated_at"
@@ -276,15 +279,16 @@ export default function CampaignsPage() {
                 <tbody className="divide-y divide-border">
                   {items.map((campaign) => (
                     <tr key={campaign.mail_campaign_id} className="hover:bg-secondary/20">
-                      <td className="p-0">
+                      <td className="w-[240px] max-w-[240px] p-0">
                         <Link
                           href={`/manager/campaigns/mail/${campaign.mail_campaign_id}`}
-                          className="block px-4 py-2.5 font-medium hover:underline"
+                          title={campaign.name}
+                          className="block truncate whitespace-nowrap px-3 py-2 font-medium hover:underline"
                         >
                           {campaign.name}
                         </Link>
                       </td>
-                      <td className="px-4 py-2.5">
+                      <td className="whitespace-nowrap px-3 py-2">
                         <span
                           className={cn(
                             "rounded-full px-2 py-0.5 text-xs font-medium",
@@ -294,22 +298,22 @@ export default function CampaignsPage() {
                           {mailCampaignStatusLabel(campaign.status)}
                         </span>
                       </td>
-                      <td className="px-4 py-2.5 text-muted-foreground">
+                      <td className="whitespace-nowrap px-3 py-2 text-muted-foreground">
                         {campaign.mailbox_email ?? "—"}
                         {campaign.mailbox_count > 1 && (
                           <span className="ml-1 text-xs text-muted-foreground/70">+{campaign.mailbox_count - 1}</span>
                         )}
                       </td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{campaign.total_leads}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{campaign.sent}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{campaign.replied}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{campaign.suppressed}</td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{campaign.failed}</td>
-                      <td className="px-4 py-2.5">
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{campaign.total_leads}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{campaign.sent}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{campaign.replied}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{campaign.suppressed}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{campaign.failed}</td>
+                      <td className="px-3 py-2">
                         <ProgressCell percent={campaign.progress_percent} />
                       </td>
-                      <td className="px-4 py-2.5 text-right tabular-nums text-muted-foreground">{campaign.step_count}</td>
-                      <td className="px-4 py-2.5 text-right text-muted-foreground">{formatDateTime(campaign.updated_at)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-muted-foreground">{campaign.step_count}</td>
+                      <td className="whitespace-nowrap px-3 py-2 text-right text-muted-foreground">{formatDateTime(campaign.updated_at)}</td>
                     </tr>
                   ))}
                 </tbody>
