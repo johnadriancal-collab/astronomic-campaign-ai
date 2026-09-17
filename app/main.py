@@ -142,6 +142,7 @@ from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProsp
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_execution_worker import MailExecutionWorker
+from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
@@ -396,6 +397,18 @@ async def lifespan(app: FastAPI):
         crm_import_service=crm_import_service,
         mail_campaign_service=app.state.mail_campaign_service,
         link_store=mail_campaign_csv_prospect_link_store,
+    )
+    # Inbox V1 (2026-09-17) -- reuses the SAME store instances everything
+    # above already holds (mail_reply_store in particular is the one
+    # MailSendingService.mark_enrollment_replied() writes to), never a
+    # second set of connections/state.
+    app.state.mail_inbox_service = MailInboxService(
+        reply_store=mail_reply_store,
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        contact_store=crm_contact_store,
+        mailbox_store=mailbox_store,
     )
 
     # Trigger feature (Stage 5D, 2026-09-04) -- Trigger CRUD + occurrence

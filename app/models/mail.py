@@ -1065,6 +1065,44 @@ class MailReply(BaseModel):
     created_at: datetime
 
 
+class MailInboxReplyView(BaseModel):
+    """Inbox V1 (2026-09-17) -- one already-joined, read-only row per
+    MailReply, unified across every Astronomic Mail campaign. Composed
+    entirely from existing data (MailReply + MailEnrollment + MailCampaign
+    + CrmContact + Mailbox + the replied enrollment's Step 1
+    MailEnrollmentStep) -- no new reply state, no message body/snippet
+    (see MailReply's own docstring: this system has never had access to
+    reply body content under the gmail.metadata scope it holds today, and
+    this view does not change that). `contact_name`/`mailbox_email` are
+    None on a best-effort lookup miss (a deleted Contact or mailbox must
+    never break the Inbox), matching MailExecutionStepView's precedent.
+    `subject` is the Step 1 row's `rendered_subject` (the exact line
+    actually transmitted) falling back to its frozen `subject` for a row
+    that predates rendered_subject, or None if even Step 1's row is
+    somehow missing. `skipped_step_numbers` lists every step number this
+    reply caused MailSendingService.mark_enrollment_replied() to skip --
+    empty for a reply on the campaign's final step. Still returned for an
+    archived/paused/completed campaign -- the Inbox is historical, a
+    reply never disappears just because its campaign later changed
+    lifecycle state."""
+
+    enrollment_id: str
+    mail_campaign_id: str
+    campaign_name: str
+    campaign_status: MailCampaignStatus
+    crm_contact_id: str
+    contact_name: str | None
+    email: str
+    mailbox_id: str
+    mailbox_email: str | None
+    subject: str | None
+    replied_at: datetime
+    gmail_thread_id: str
+    gmail_message_id: str
+    enrollment_status: MailEnrollmentStatus
+    skipped_step_numbers: list[int]
+
+
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --
 
 

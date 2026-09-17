@@ -27,6 +27,14 @@ class MailReplyStore(ABC):
         guard; callers must never assume idempotency lives anywhere
         else."""
 
+    @abstractmethod
+    async def list_all(self) -> list[MailReply]:
+        """Every MailReply row that exists, across every campaign, newest
+        `detected_at` first -- the Inbox's (2026-09-17) only read path.
+        Read-only, no pagination (V1 pilot scale); ordering happens here,
+        not left to the caller, so every reader gets the same "newest
+        reply first" guarantee this store's docstring promises."""
+
 
 class MemoryMailReplyStore(MailReplyStore):
     """Dict-backed, keyed by enrollment_id -- not persistent, for tests/local dev."""
@@ -42,3 +50,6 @@ class MemoryMailReplyStore(MailReplyStore):
             return False
         self._rows[reply.enrollment_id] = reply
         return True
+
+    async def list_all(self) -> list[MailReply]:
+        return sorted(self._rows.values(), key=lambda r: r.detected_at, reverse=True)

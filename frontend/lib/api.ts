@@ -1391,6 +1391,39 @@ export function resolveMailExecutionStepNotSent(enrollmentStepId: string): Promi
   return post<{ applied: boolean }>(`/mail/execution/${enrollmentStepId}/resolve-not-sent`, {});
 }
 
+// --- Inbox (V1, 2026-09-17) --------------------------------------------------
+//
+// One already-joined, read-only row per MailReply, unified across every
+// Astronomic Mail campaign -- see MailInboxReplyView's backend docstring.
+// Deliberately has no body/snippet field: this system has never had reply
+// body content available under the gmail.metadata scope it holds today, so
+// this type must never grow one just to look more complete. Likewise no
+// unread/read field -- there is no such model anywhere in this codebase;
+// never fabricate one client-side either.
+export interface MailInboxReplyView {
+  enrollment_id: string;
+  mail_campaign_id: string;
+  campaign_name: string;
+  campaign_status: MailCampaignStatus;
+  crm_contact_id: string;
+  contact_name: string | null;
+  email: string;
+  mailbox_id: string;
+  mailbox_email: string | null;
+  subject: string | null;
+  replied_at: string;
+  gmail_thread_id: string;
+  gmail_message_id: string;
+  enrollment_status: MailEnrollmentStatus;
+  skipped_step_numbers: number[];
+}
+
+/** Every reply ever detected, across every campaign, newest first. No
+ * pagination (V1 pilot scale). */
+export function listInboxReplies(): Promise<MailInboxReplyView[]> {
+  return request<MailInboxReplyView[]>("/mail/inbox/replies");
+}
+
 // --- Workload / prospect batches / Add Prospects (Phase 2, Stage 2-4B) ----
 //
 // Workload is enrollment-status counts, entirely independent of the

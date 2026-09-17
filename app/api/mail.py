@@ -38,6 +38,7 @@ from pydantic import BaseModel
 from app.dependencies import (
     get_mail_campaign_csv_prospect_service,
     get_mail_campaign_service,
+    get_mail_inbox_service,
     get_mail_sending_service,
     get_mail_suppression_service,
     get_mail_trigger_service,
@@ -54,6 +55,7 @@ from app.models.mail import (
     MailEnrollmentBatchSource,
     MailEnrollmentStepStatus,
     MailExecutionStepView,
+    MailInboxReplyView,
     MailLeadStartTrigger,
     MailScheduleValidationError,
     MailSequenceStep,
@@ -80,6 +82,7 @@ from app.services.mail_campaign_service import (
     MailSendingEngineDisabledError,
     MailSequenceStepNotFound,
 )
+from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_sending_service import (
     MailSendingService,
     PrepareBlockedWrongStateError,
@@ -346,6 +349,19 @@ async def list_execution_steps(
         return await service.list_execution_steps(mail_campaign_id, statuses=status)
     except MailCampaignNotFound as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+# --- Inbox (V1, 2026-09-17) -------------------------------------------------
+
+
+@router.get("/inbox/replies", response_model=list[MailInboxReplyView])
+async def list_inbox_replies(service: MailInboxService = Depends(get_mail_inbox_service)):
+    """Read-only, unified across every Astronomic Mail campaign -- every
+    MailReply that has ever been recorded, newest first. No mutation, no
+    pagination (V1 pilot scale). See MailInboxService.list_replies()'s own
+    docstring for exactly what's joined in and what falls back to None on
+    a lookup miss."""
+    return await service.list_replies()
 
 
 # --- Workload / prospect batches (Phase 2, 2026-09-03) ---------------------

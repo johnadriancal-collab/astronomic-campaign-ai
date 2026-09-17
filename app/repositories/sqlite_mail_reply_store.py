@@ -53,3 +53,16 @@ class SQLiteMailReplyStore(MailReplyStore):
                 (reply.enrollment_id, reply.model_dump_json()),
             )
             return cursor.rowcount == 1
+
+    async def list_all(self) -> list[MailReply]:
+        # `detected_at` lives only inside the JSON blob (no indexed column
+        # on this table -- see this file's own docstring), so newest-first
+        # ordering is applied in Python after parsing every row rather than
+        # via SQL ORDER BY. Fine at V1 pilot scale; a real index becomes
+        # worth adding once reply volume actually justifies it.
+        cursor = await self._connection.execute("SELECT data FROM mail_replies")
+        rows = await cursor.fetchall()
+        await cursor.close()
+        replies = [MailReply.model_validate_json(row["data"]) for row in rows]
+        replies.sort(key=lambda r: r.detected_at, reverse=True)
+        return replies
