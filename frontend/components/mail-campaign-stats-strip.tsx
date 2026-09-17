@@ -21,8 +21,8 @@ export function MailCampaignStatsStrip({ stats }: { stats: MailCampaignStats | n
 function StatItem({ label, value }: { label: string; value: string }) {
   const tracked = value !== "Not tracked";
   return (
-    <div className="flex flex-col gap-0.5 px-4 py-2.5">
-      <span className="text-xs text-muted-foreground">{label}</span>
+    <div className="flex items-center justify-center gap-1.5 whitespace-nowrap px-4 py-2">
+      <span className="text-xs text-muted-foreground">{label}:</span>
       <span className={tracked ? "font-medium tabular-nums" : "text-sm text-muted-foreground/70"}>{value}</span>
     </div>
   );

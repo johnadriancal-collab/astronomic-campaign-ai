@@ -56,6 +56,14 @@ test("the stats strip is a compact single row, not four oversized cards", () => 
   assert.match(STRIP_SOURCE, /grid-cols-1[\s\S]*sm:grid-cols-4/);
 });
 
+test("each metric keeps its label and value on the same line -- no stacked flex-col layout", () => {
+  const statItemBlock = STRIP_SOURCE.slice(STRIP_SOURCE.indexOf("function StatItem"));
+  assert.doesNotMatch(statItemBlock, /flex-col/);
+  assert.match(statItemBlock, /whitespace-nowrap/);
+  // "Label:" rendered inline, immediately followed by the value in the same row.
+  assert.match(statItemBlock, /\{label\}:/);
+});
+
 test("Reply rate and Unsub rate are wired to real MailCampaignStats fields", () => {
   assert.match(STRIP_SOURCE, /stats\.reply_rate_percent/);
   assert.match(STRIP_SOURCE, /stats\.unsub_rate_percent/);
