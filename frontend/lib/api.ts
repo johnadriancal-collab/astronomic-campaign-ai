@@ -1553,6 +1553,63 @@ export function getMailLead(crmContactId: string): Promise<MailLeadDetail> {
   return request<MailLeadDetail>(`/mail/leads/${crmContactId}`);
 }
 
+// --- Campaign list (V1, 2026-09-17) -----------------------------------------
+//
+// A wide, table-shaped read over every campaign -- see
+// MailCampaignListService's backend docstring. A SEPARATE, additive route
+// from the existing listMailCampaigns()/MailCampaign below (which stays
+// exactly as-is, still relied on elsewhere).
+
+export interface MailCampaignListItem {
+  mail_campaign_id: string;
+  name: string;
+  status: MailCampaignStatus;
+  mailbox_id: string | null;
+  mailbox_email: string | null;
+  mailbox_count: number;
+  total_leads: number;
+  sent: number;
+  replied: number;
+  suppressed: number;
+  failed: number;
+  completed: number;
+  progress_percent: number;
+  step_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MailCampaignListPage {
+  items: MailCampaignListItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export type MailCampaignListSortBy = "name" | "status" | "total_leads" | "replied" | "progress" | "updated_at";
+
+export interface ListMailCampaignListParams {
+  q?: string;
+  status?: MailCampaignStatus;
+  mailboxEmail?: string;
+  sortBy?: MailCampaignListSortBy;
+  sortDir?: "asc" | "desc";
+  page?: number;
+  pageSize?: number;
+}
+
+export function listMailCampaignList(params: ListMailCampaignListParams = {}): Promise<MailCampaignListPage> {
+  const query = new URLSearchParams();
+  if (params.q) query.set("q", params.q);
+  if (params.status) query.set("status", params.status);
+  if (params.mailboxEmail) query.set("mailbox_email", params.mailboxEmail);
+  if (params.sortBy) query.set("sort_by", params.sortBy);
+  if (params.sortDir) query.set("sort_dir", params.sortDir);
+  query.set("page", String(params.page ?? 1));
+  query.set("page_size", String(params.pageSize ?? 25));
+  return request<MailCampaignListPage>(`/mail/campaign-list?${query.toString()}`);
+}
+
 // --- Workload / prospect batches / Add Prospects (Phase 2, Stage 2-4B) ----
 //
 // Workload is enrollment-status counts, entirely independent of the

@@ -37,6 +37,7 @@ from pydantic import BaseModel
 
 from app.dependencies import (
     get_mail_campaign_csv_prospect_service,
+    get_mail_campaign_list_service,
     get_mail_campaign_service,
     get_mail_inbox_service,
     get_mail_leads_service,
@@ -46,6 +47,7 @@ from app.dependencies import (
 )
 from app.models.mail import (
     MailCampaign,
+    MailCampaignListPage,
     MailCampaignReview,
     MailCampaignSchedule,
     MailCampaignSharing,
@@ -86,6 +88,7 @@ from app.services.mail_campaign_service import (
     MailSendingEngineDisabledError,
     MailSequenceStepNotFound,
 )
+from app.services.mail_campaign_list_service import MailCampaignListService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_sending_service import (
@@ -145,6 +148,37 @@ class MailCampaignCreateRequest(BaseModel):
 @router.get("/campaigns", response_model=list[MailCampaign])
 async def list_campaigns(service: MailCampaignService = Depends(get_mail_campaign_service)):
     return await service.list_campaigns()
+
+
+@router.get("/campaign-list", response_model=MailCampaignListPage)
+async def list_campaigns_wide(
+    q: str | None = None,
+    status: str | None = None,
+    mailbox_email: str | None = None,
+    sort_by: str = "updated_at",
+    sort_dir: str = "desc",
+    page: int = 1,
+    page_size: int = 25,
+    service: MailCampaignListService = Depends(get_mail_campaign_list_service),
+):
+    """Read-only, wide table-shaped view of every campaign -- a
+    SEPARATE, additive route from GET /campaigns above (which stays
+    exactly as it was: the full, unpaginated list[MailCampaign], relied
+    on by existing callers). See MailCampaignListService's own module
+    docstring for exactly what's aggregated in. `sort_by` is one of
+    "name" | "status" | "total_leads" | "replied" | "progress" |
+    "updated_at" (default, newest first). `mailbox_email` matches a
+    campaign's first selected channel mailbox only (see
+    MailCampaignListItem's own docstring)."""
+    return await service.list_campaigns(
+        q=q,
+        status=status,
+        mailbox_email=mailbox_email,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post("/campaigns", response_model=MailCampaign)

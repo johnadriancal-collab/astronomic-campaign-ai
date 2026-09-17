@@ -1239,6 +1239,59 @@ class MailLeadDetail(BaseModel):
     campaign_history: list[MailLeadCampaignHistoryEntry]
 
 
+# --- Campaign list (V1, 2026-09-17) -----------------------------------------
+#
+# A wide, table-shaped read model over EXISTING campaign/enrollment/step
+# data -- no new persistence, no duplicated analytics state. Reuses the
+# exact same per-campaign counting MailCampaignService.get_workload()
+# already does (enrollment rows bucketed by MailEnrollmentStatus), plus
+# step/mailbox data already exposed elsewhere. See MailCampaignListService.
+
+
+class MailCampaignListItem(BaseModel):
+    """One row. `progress_percent` is
+    (completed + replied + suppressed + failed) / total * 100 -- every
+    enrollment status that will never advance further on its own
+    (terminal), against the total ever snapshotted. Deliberately NOT
+    "steps sent / theoretical total sends": an ACTIVE campaign with
+    every lead still mid-sequence (nothing terminal yet) correctly
+    shows a real, low, non-zero-looking number as leads actually
+    finish -- not a step-completion ratio that can never reach 100%
+    for a still-active multi-step sequence. 0.0 for a DRAFT/READY
+    campaign with zero enrollments (nothing to divide), never fabricated.
+    `mailbox_email`/`mailbox_id` are this campaign's FIRST selected
+    channel mailbox only (`mailbox_count` says how many it actually
+    has) -- a V1 simplification for the list view; the campaign detail
+    page's own Channels tab remains the source of truth for the full set."""
+
+    mail_campaign_id: str
+    name: str
+    status: MailCampaignStatus
+    mailbox_id: str | None
+    mailbox_email: str | None
+    mailbox_count: int
+    total_leads: int
+    sent: int
+    replied: int
+    suppressed: int
+    failed: int
+    completed: int
+    progress_percent: float
+    step_count: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class MailCampaignListPage(BaseModel):
+    """Same envelope shape as CrmContactPage/MailLeadPage, for
+    consistency with this codebase's other paginated list endpoints."""
+
+    items: list[MailCampaignListItem]
+    total: int
+    page: int
+    page_size: int
+
+
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --
 
 

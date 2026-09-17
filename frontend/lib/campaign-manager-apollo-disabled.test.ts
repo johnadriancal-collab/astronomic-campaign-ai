@@ -39,7 +39,12 @@ test("the campaigns list page no longer renders a sending-method badge", () => {
   assert.doesNotMatch(CAMPAIGNS_PAGE_SOURCE, /SendingMethodBadge/);
 });
 
-test("the campaigns list page still renders native campaign cards with a status badge", () => {
-  assert.match(CAMPAIGNS_PAGE_SOURCE, /StatusBadge/);
-  assert.match(CAMPAIGNS_PAGE_SOURCE, /listUnifiedCampaigns/);
+test("the campaigns list page still renders native campaign rows with a status badge, sourced from real Astronomic Mail data", () => {
+  // Campaigns V1 (2026-09-17) replaced the card grid with a wide table
+  // sourced from listMailCampaignList/GET /mail/campaign-list -- see
+  // mail-campaigns.test.ts for that redesign's own coverage. The
+  // underlying data was, and remains, Astronomic-Mail-only (Apollo
+  // Campaign/Sequence stays disabled here either way).
+  assert.match(CAMPAIGNS_PAGE_SOURCE, /mailCampaignStatusBadgeClass/);
+  assert.match(CAMPAIGNS_PAGE_SOURCE, /listMailCampaignList/);
 });

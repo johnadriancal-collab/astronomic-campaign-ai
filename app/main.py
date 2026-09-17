@@ -142,6 +142,7 @@ from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProsp
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
 from app.services.mail_execution_worker import MailExecutionWorker
+from app.services.mail_campaign_list_service import MailCampaignListService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
@@ -459,6 +460,18 @@ async def lifespan(app: FastAPI):
         enrollment_step_store=mail_enrollment_step_store,
         contact_store=crm_contact_store,
         reply_store=mail_reply_store,
+        mailbox_store=mailbox_store,
+    )
+
+    # Campaign list V1 (2026-09-17) -- same store-reuse stance as
+    # Inbox/Leads above; read-only, no new persistence. See
+    # MailCampaignListService's own module docstring.
+    app.state.mail_campaign_list_service = MailCampaignListService(
+        campaign_store=mail_campaign_store,
+        enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        sequence_step_store=mail_sequence_step_store,
+        channel_store=mail_campaign_mailbox_store,
         mailbox_store=mailbox_store,
     )
 
