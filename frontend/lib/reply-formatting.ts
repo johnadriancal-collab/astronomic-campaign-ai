@@ -88,6 +88,17 @@ export function splitReplyQuote(bodyText: string): ReplySplit {
 
 const URL_PATTERN = /\bhttps?:\/\/[^\s<>()[\]"']+[^\s<>()[\].,!?"':;]/g;
 
+// Matches a line that consists of NOTHING but a single bracketed URL,
+// e.g. "<https://api.astronomicconnect.com/mail/unsubscribe?token=...>".
+// This is a standard plain-text-mail rendering of an HTML anchor whose
+// visible label and href differ ("Unsubscribe" pointing at a long
+// tokenized URL) -- the label ends up on the previous line (or the same
+// line, word-wrapped) and the raw href gets bracketed on its own line.
+// Deliberately not keyed to "unsubscribe" or any Astronomic-specific
+// string -- any label line immediately followed by one of these gets
+// folded the same way.
+const BRACKETED_URL_LINE = /^<(https?:\/\/[^\s<>]+)>$/;
+
 export type TextSegment = { type: "text"; value: string } | { type: "link"; href: string; label: string };
 
 /**
@@ -99,23 +110,63 @@ export type TextSegment = { type: "text"; value: string } | { type: "link"; href
  * punctuation immediately after a URL (a period ending a sentence, a
  * closing paren from surrounding prose) is excluded from the link
  * itself.
+ *
+ * Special case (general, not campaign-specific): a line that is ONLY a
+ * bracketed URL, immediately following a non-blank label line, is
+ * folded into that label line -- the label line's own trailing word
+ * becomes the clickable text (pointing at the bracketed URL) and the
+ * separate raw-URL line is dropped entirely, so the long tokenized URL
+ * is never shown. This mirrors exactly how the same link renders in
+ * Gmail itself (anchor text "Unsubscribe", href the long token) -- see
+ * this function's own test file for the real production fixture this
+ * was built against.
  */
 export function linkifySegments(text: string): TextSegment[] {
+  const lines = text.split("\n");
   const segments: TextSegment[] = [];
-  let lastIndex = 0;
-  for (const match of text.matchAll(URL_PATTERN)) {
-    const start = match.index ?? 0;
-    if (start > lastIndex) {
-      segments.push({ type: "text", value: text.slice(lastIndex, start) });
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const nextLine = lines[i + 1];
+    const bracketedMatch = nextLine !== undefined ? nextLine.trim().match(BRACKETED_URL_LINE) : null;
+
+    if (bracketedMatch && line.trim().length > 0) {
+      const labelMatch = line.match(/^(.*?)(\S+)(\s*)$/);
+      if (labelMatch) {
+        const [, before, label, trailingSpace] = labelMatch;
+        linkifyLineInto(segments, before);
+        segments.push({ type: "link", href: bracketedMatch[1], label });
+        if (trailingSpace) segments.push({ type: "text", value: trailingSpace });
+      } else {
+        linkifyLineInto(segments, line);
+      }
+      i++; // skip the now-folded bracketed-URL line entirely
+    } else {
+      linkifyLineInto(segments, line);
     }
-    segments.push({ type: "link", href: match[0], label: match[0] });
-    lastIndex = start + match[0].length;
+
+    if (i < lines.length - 1) {
+      segments.push({ type: "text", value: "\n" });
+    }
   }
-  if (lastIndex < text.length) {
-    segments.push({ type: "text", value: text.slice(lastIndex) });
-  }
+
   if (segments.length === 0) {
     return [{ type: "text", value: text }];
   }
   return segments;
+}
+
+function linkifyLineInto(segments: TextSegment[], line: string): void {
+  let lastIndex = 0;
+  for (const match of line.matchAll(URL_PATTERN)) {
+    const start = match.index ?? 0;
+    if (start > lastIndex) {
+      segments.push({ type: "text", value: line.slice(lastIndex, start) });
+    }
+    segments.push({ type: "link", href: match[0], label: match[0] });
+    lastIndex = start + match[0].length;
+  }
+  if (lastIndex < line.length) {
+    segments.push({ type: "text", value: line.slice(lastIndex) });
+  }
 }
