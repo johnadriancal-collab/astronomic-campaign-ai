@@ -1137,6 +1137,94 @@ class MailOpenEvent(BaseModel):
     open_count: int
 
 
+class MailBounceType(str, Enum):
+    """Classified conservatively from the DSN's own structured `Status`
+    field (RFC 3464, `class.subject.detail`) -- NEVER from prose in a
+    human-readable part, and never guessed when the field is missing or
+    doesn't parse as `N.N.N`. See mail_bounce_dsn_parser.classify_bounce_
+    type()'s own docstring for the exact leading-digit rule."""
+
+    HARD = "hard"  # 5.x.x -- permanent failure (invalid recipient, etc.)
+    SOFT = "soft"  # 4.x.x -- temporary failure (mailbox full, etc.)
+    UNKNOWN = "unknown"  # present but unparseable, or genuinely absent
+
+
+class MailBounce(BaseModel):
+    """Bounce detection (2026-09-18) -- one row per DETECTED, ATTRIBUTED
+    delivery-status notification. `gmail_message_id` (the DSN message's
+    OWN id, in the receiving mailbox) IS the primary key -- the natural,
+    already-unique identifier Gmail guarantees, matching this codebase's
+    "the actual key IS the identifier" convention (see MailReply's own
+    docstring). This is a DELIBERATE choice NOT to dedupe by
+    `enrollment_step_id`: a single outbound send can legitimately
+    generate more than one DSN over time (e.g. an initial soft-bounce
+    retry notice followed later by a permanent-failure notice) -- each
+    is a distinct, real event and gets its own row; only re-ingesting
+    the exact SAME Gmail message twice (a re-run poll cycle re-seeing
+    already-processed history) must be a no-op, which keying on the
+    DSN's own message id guarantees structurally.
+
+    Written ONLY by MailBounceDetectionService, after BOTH (a) the DSN's
+    structural evidence is confirmed (multipart/report + a real
+    message/delivery-status part -- never From/Subject text alone, see
+    mail_bounce_dsn_parser's own docstring) AND (b) attribution to a
+    real MailEnrollmentStep succeeds via Original-Message-ID matching
+    that step's own `rfc_message_id` -- an unattributed or structurally-
+    unconfirmed candidate is simply never persisted here at all, never
+    guessed at.
+
+    Automatic Astronomic Mail infrastructure, not an opt-in feature
+    (contrast MailCampaign.open_tracking_enabled) -- every campaign's
+    sends are eligible for bounce detection, since it reads only the
+    connected mailbox's OWN inbound mail, never anything requiring a
+    per-campaign choice.
+
+    Phase 1 (2026-09-18): detect, persist, surface, verify only --
+    nothing here ever creates a MailSuppression row, mutates a
+    MailEnrollment/MailEnrollmentStep, or stops a campaign. That
+    decision is deliberately deferred to a later, separate phase once
+    real detections are production-verified."""
+
+    gmail_message_id: str
+    mailbox_id: str
+    mail_campaign_id: str
+    enrollment_id: str
+    enrollment_step_id: str
+    # The RFC Message-ID this DSN's own attached original-message headers
+    # (or per-recipient block) reported -- matched against
+    # MailEnrollmentStep.rfc_message_id to resolve enrollment_step_id
+    # above. Kept here too, verbatim, as a durable audit fact independent
+    # of whatever that step row's own field says later.
+    original_message_id: str
+    recipient_email: str
+    bounce_type: MailBounceType
+    # RFC 3464 per-recipient fields, verbatim, for later inspection --
+    # never re-derived, never overwritten once persisted.
+    action: str | None = None
+    status_code: str | None = None  # e.g. "5.1.1"
+    diagnostic_code: str | None = None
+    bounced_at: datetime
+    created_at: datetime
+
+
+class MailboxHistoryCheckpoint(BaseModel):
+    """Bounce detection (2026-09-18) -- a per-mailbox Gmail History API
+    cursor, same shape/role as LumaBackfillCheckpointStore's own
+    checkpoint (see that store's docstring): `history_id` is Gmail's own
+    opaque cursor value (NOT a timestamp -- Gmail's own history stream
+    has no reliable time-ordering guarantee, only this cursor does).
+    `mailbox_id` IS the primary key -- exactly one checkpoint per
+    connected mailbox. Advanced ONLY after MailBounceDetectionService
+    successfully processes an entire history batch for that mailbox --
+    see that service's own docstring for the exact "advance only after
+    success, never on a Gmail read error" rule, and for what happens
+    when Gmail reports this `history_id` as expired/out of range."""
+
+    mailbox_id: str
+    history_id: str
+    updated_at: datetime
+
+
 class MailInboxReplyView(BaseModel):
     """Inbox V1 (2026-09-17) -- one already-joined, read-only row per
     MailReply, unified across every Astronomic Mail campaign. Composed
@@ -1371,6 +1459,16 @@ class MailCampaignListItem(BaseModel):
     "no denominator" state, distinct from a true 0%). Never a fabricated
     0% either way.
 
+    `bounce_rate_percent` (2026-09-18, bounce detection) -- `unique
+    leads with >=1 attributed MailBounce / unique sent * 100`. Unlike
+    Open rate, bounce detection has NO campaign-level toggle -- it is
+    automatic delivery-state infrastructure for every campaign, so this
+    field has only ONE None case (no sent denominator yet), never a
+    second "disabled" case. Never a fabricated 0%. Uses the SAME
+    sent-leads denominator as `open_rate_percent` (computed once, per
+    campaign, and shared -- see MailCampaignListService's own module
+    docstring).
+
     Mailbox is deliberately NOT on this row any more (2026-09-18) -- a
     campaign's channel mailboxes are a Channels-tab concept now shown
     only on the campaign detail page, not duplicated here."""
@@ -1382,6 +1480,7 @@ class MailCampaignListItem(BaseModel):
     available_leads: int
     open_tracking_enabled: bool
     open_rate_percent: float | None
+    bounce_rate_percent: float | None
     replied: int
     reply_rate_percent: float
     suppressed: int
@@ -1427,13 +1526,9 @@ class MailCampaignMailboxNextSend(BaseModel):
 # --- Campaign stats strip (2026-09-17) -- reply rate / unsub rate / open --
 #
 # See MailCampaignStatsService's own module docstring for the full
-# investigation this is based on: Astronomic Mail has NO real
-# provider-bounce tracking anywhere (confirmed absent, not merely
-# unwired) -- this model deliberately has no bounce_rate_percent field at
-# all, rather than a field that's always fabricated to some placeholder
-# value. The frontend renders "Not tracked" for that one as static copy,
-# never derived from this model. Open tracking (2026-09-18) is real and
-# DOES have fields here now -- see below.
+# investigation this was based on. Open tracking (2026-09-18) and bounce
+# detection (2026-09-18) are both real now, with fields below -- see each
+# field's own comment for its None semantics.
 
 
 class MailCampaignStats(BaseModel):
@@ -1456,6 +1551,10 @@ class MailCampaignStats(BaseModel):
     # frontend must tell apart).
     open_tracking_enabled: bool
     open_rate_percent: float | None
+    # Bounce detection (2026-09-18) -- same exact semantics as
+    # MailCampaignListItem.bounce_rate_percent (automatic, no toggle,
+    # None only when there's no sent denominator yet).
+    bounce_rate_percent: float | None
 
 
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --

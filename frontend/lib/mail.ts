@@ -29,6 +29,21 @@ export function openRateDisplay(campaign: { open_tracking_enabled: boolean; open
   return { text: `${campaign.open_rate_percent}%`, tooltip: OPEN_RATE_APPROXIMATE_TOOLTIP };
 }
 
+// Bounce detection (2026-09-18) -- automatic for every campaign, NO
+// per-campaign toggle at all (contrast openRateDisplay above), so this
+// has only ONE dash case: no sent denominator yet. Never a fake 0%.
+const BOUNCE_RATE_NO_DATA_TOOLTIP = "No emails sent yet for this campaign.";
+
+export function bounceRateDisplay(campaign: { bounce_rate_percent: number | null }): {
+  text: string;
+  tooltip: string | null;
+} {
+  if (campaign.bounce_rate_percent === null) {
+    return { text: "—", tooltip: BOUNCE_RATE_NO_DATA_TOOLTIP };
+  }
+  return { text: `${campaign.bounce_rate_percent}%`, tooltip: null };
+}
+
 export const MAIL_CAMPAIGN_STATUS_OPTIONS: { value: MailCampaignStatus; label: string }[] = [
   { value: "draft", label: "Draft" },
   { value: "ready", label: "Ready" },

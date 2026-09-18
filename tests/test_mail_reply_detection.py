@@ -763,6 +763,42 @@ async def test_one_candidates_gmail_read_failure_does_not_abort_the_others(detec
     assert (await svc.enrollment_store.get(healthy.enrollment_id)).status == MailEnrollmentStatus.REPLIED
 
 
+async def test_dsn_shaped_message_in_thread_is_never_counted_as_a_reply(detection_env):
+    """(2026-09-18, spec section 16) A genuine DSN-shaped message landing
+    in the same Gmail thread -- Content-Type: multipart/report; report-
+    type=delivery-status, From the recipient's own mail server rather
+    than the recipient -- must never be counted as a reply. Reply
+    detection reads only the From header (see _from_address()'s own
+    docstring); it never inspects Content-Type, so this is really the
+    same positive-match guarantee as test_bounce_or_system_sender_is_not_
+    a_reply, but proven here against a message that carries real DSN
+    structure rather than merely a mailer-daemon-looking address."""
+    svc, detector, _mailbox_service, reader = detection_env
+    enrollment = await _enroll(svc)
+    sent1 = await _sent_step1(svc, enrollment)
+    dsn_message = {
+        "id": "m-dsn-1",
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "postmaster@lead-mail-provider.com"},
+                {"name": "To", "value": "mbx-1@astronomic.com"},
+                {"name": "Subject", "value": "Delivery Status Notification (Failure)"},
+                {"name": "Content-Type", "value": "multipart/report; report-type=delivery-status"},
+            ]
+        },
+    }
+    reader.threads[sent1.gmail_thread_id] = _thread(
+        sent1.gmail_thread_id, [_message("m-out-1", "mbx-1@astronomic.com"), dsn_message]
+    )
+
+    detected = await detector.poll_for_replies(NOW + PACING_STEP)
+
+    assert detected == 0
+    updated = await svc.enrollment_store.get(enrollment.enrollment_id)
+    assert updated.status == MailEnrollmentStatus.ACTIVE
+    assert await svc.reply_store.get(enrollment.enrollment_id) is None
+
+
 async def test_candidate_whose_mailbox_needs_reauth_is_skipped_not_fatal(detection_env):
     svc, detector, mailbox_service, reader = detection_env
     mailbox_service.refresh_error = GoogleRefreshTokenInvalidError("invalid_grant")

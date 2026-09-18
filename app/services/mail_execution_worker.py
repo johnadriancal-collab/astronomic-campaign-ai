@@ -44,9 +44,11 @@ from app.config import settings
 from app.models.activity import ActivityCategory, ActivitySource
 from app.models.mail import MailCampaignStatus, MailSendWindow, MailSequenceStep
 from app.services.activity_log_service import ActivityLogService
+from app.services.mail_bounce_detection_service import MailBounceDetectionService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
 from app.services.mail_sending_service import (
+    WORKER_BOUNCE_POLL_INTERVAL_SECONDS,
     WORKER_DUE_ROW_BATCH_SIZE,
     WORKER_LEASE_DURATION_SECONDS,
     WORKER_POLL_INTERVAL_SECONDS,
@@ -83,10 +85,12 @@ class MailExecutionWorker:
         activity_log: ActivityLogService | None = None,
         mail_trigger_service: MailTriggerService | None = None,
         mail_reply_detection_service: MailReplyDetectionService | None = None,
+        mail_bounce_detection_service: MailBounceDetectionService | None = None,
         poll_interval_seconds: int = WORKER_POLL_INTERVAL_SECONDS,
         lease_duration_seconds: int = WORKER_LEASE_DURATION_SECONDS,
         recovery_interval_seconds: int = WORKER_RECOVERY_INTERVAL_SECONDS,
         reply_poll_interval_seconds: int = WORKER_REPLY_POLL_INTERVAL_SECONDS,
+        bounce_poll_interval_seconds: int = WORKER_BOUNCE_POLL_INTERVAL_SECONDS,
         batch_size: int = WORKER_DUE_ROW_BATCH_SIZE,
     ):
         self.mail_sending_service = mail_sending_service
@@ -108,6 +112,14 @@ class MailExecutionWorker:
         # own docstring) -- gated by the exact same leadership+engine-
         # enabled conditions as everything else in this worker.
         self.mail_reply_detection_service = mail_reply_detection_service
+        # Bounce detection (2026-09-18): same optional convention as
+        # mail_reply_detection_service immediately above, its own cadence
+        # (bounce_poll_interval_seconds), and its own isolated try/except
+        # in tick() below -- one mailbox's Gmail-history read failure must
+        # never block outbound sending, and bounce polling must never
+        # block it either (see MailBounceDetectionService's own
+        # "RESILIENCE" docstring).
+        self.mail_bounce_detection_service = mail_bounce_detection_service
         # Optional (matching MailboxService's own activity_log convention --
         # see that class's docstring) so every existing test/call site that
         # constructs a worker without it keeps working unchanged; every
@@ -117,6 +129,7 @@ class MailExecutionWorker:
         self.lease_duration_seconds = lease_duration_seconds
         self.recovery_interval_seconds = recovery_interval_seconds
         self.reply_poll_interval_seconds = reply_poll_interval_seconds
+        self.bounce_poll_interval_seconds = bounce_poll_interval_seconds
         self.batch_size = batch_size
 
         self._task: asyncio.Task | None = None
@@ -124,6 +137,7 @@ class MailExecutionWorker:
         self._last_tick_at: datetime | None = None
         self._last_recovery_at: datetime | None = None
         self._last_reply_poll_at: datetime | None = None
+        self._last_bounce_poll_at: datetime | None = None
 
     async def _log(self, event_type: str, summary: str) -> None:
         """Best-effort structural event for worker lifecycle/leadership
@@ -208,24 +222,27 @@ class MailExecutionWorker:
         of never computing "now" internally where a caller might need a
         deterministic, testable value instead.
 
-        Stage 5D (2026-09-04) order, deterministic and documented here:
-        leadership -> recovery sweep -> Trigger occurrence processing ->
-        ordinary due-step processing. Trigger processing runs BEFORE the
-        due-step claim specifically so a lead a Trigger just started (a
-        fresh QUEUED Step 1 row) can be picked up by THIS SAME tick's
+        Order, deterministic and documented here: leadership -> recovery
+        sweep -> Trigger occurrence processing -> reply-poll (its own
+        cadence, 2026-09-15) -> bounce-poll (its own cadence, 2026-09-18)
+        -> ordinary due-step processing. Trigger processing runs BEFORE
+        the due-step claim specifically so a lead a Trigger just started
+        (a fresh QUEUED Step 1 row) can be picked up by THIS SAME tick's
         list_due() call if its window happens to already be open, rather
         than waiting a full poll interval -- a latency nicety, not a
         correctness requirement (a later tick would pick it up regardless).
-        Both phases run only once this process holds leadership (the same
-        `is_leader` gate below covers both), and this whole method is only
-        ever invoked while the worker loop is running, which start() never
-        schedules at all when mail_sending_engine_enabled is False -- so
-        Trigger lead-starts share EXACTLY the same structural
+        Every phase runs only once this process holds leadership (the same
+        `is_leader` gate below covers all of them), and this whole method
+        is only ever invoked while the worker loop is running, which
+        start() never schedules at all when mail_sending_engine_enabled is
+        False -- so every phase below shares EXACTLY the same structural
         unreachability the rest of send execution already has, with no
-        separate check needed here. A Trigger-processing failure is caught
-        and logged the same way a tick-level failure always is (see
-        _run_forever()) -- it must never abort the due-step processing
-        that follows it in the same tick."""
+        separate check needed here. Each of Trigger/reply-poll/bounce-poll
+        is caught and logged independently (see each block's own comment)
+        the same way a tick-level failure always is (see _run_forever())
+        -- a failure in any one of them must never abort the phases that
+        follow it in the same tick, most importantly the due-step
+        processing at the end."""
         now = now or datetime.now(timezone.utc)
         self._last_tick_at = now
 
@@ -268,6 +285,21 @@ class MailExecutionWorker:
                 # processing below in the SAME tick.
                 logger.exception("Phase C worker: reply-poll failed.")
             self._last_reply_poll_at = now
+
+        if self.mail_bounce_detection_service is not None and (
+            self._last_bounce_poll_at is None
+            or (now - self._last_bounce_poll_at).total_seconds() >= self.bounce_poll_interval_seconds
+        ):
+            try:
+                await self.mail_bounce_detection_service.poll_all_mailboxes(now)
+            except Exception:
+                # Same isolation discipline as reply-poll above: a
+                # bounce-poll failure must never abort the due-step
+                # processing below in the SAME tick, and MailBounce
+                # DetectionService's own per-mailbox try/except already
+                # keeps one mailbox's failure from blocking another.
+                logger.exception("Phase C worker: bounce-poll failed.")
+            self._last_bounce_poll_at = now
 
         schedule_cache: dict[str, tuple[list[MailSendWindow], str]] = {}
         steps_cache: dict[str, list[MailSequenceStep]] = {}

@@ -62,6 +62,17 @@ class MailEnrollmentStepStore(ABC):
         docstring for why this can never become an oracle)."""
 
     @abstractmethod
+    async def get_by_rfc_message_id(self, rfc_message_id: str) -> MailEnrollmentStep | None:
+        """Bounce detection (2026-09-18) -- the ONE lookup
+        MailBounceDetectionService makes to attribute a detected DSN's
+        Original-Message-ID back to the real outbound send that
+        produced it (a real indexed column on
+        SQLiteMailEnrollmentStepStore, not a JSON-blob scan -- same
+        rationale as get_by_open_tracking_token() above). None for a
+        Message-ID this codebase never sent (an unrelated DSN) -- the
+        caller must never guess an attribution in that case, only skip."""
+
+    @abstractmethod
     async def save(self, step: MailEnrollmentStep) -> None:
         """Unconditional overwrite. Raises MailEnrollmentStepNotFoundError
         if the row doesn't exist. Callers that need "only if the row is
@@ -201,6 +212,12 @@ class MemoryMailEnrollmentStepStore(MailEnrollmentStepStore):
     async def get_by_open_tracking_token(self, open_tracking_token: str) -> MailEnrollmentStep | None:
         for row in self._rows.values():
             if row.open_tracking_token == open_tracking_token:
+                return row
+        return None
+
+    async def get_by_rfc_message_id(self, rfc_message_id: str) -> MailEnrollmentStep | None:
+        for row in self._rows.values():
+            if row.rfc_message_id == rfc_message_id:
                 return row
         return None
 

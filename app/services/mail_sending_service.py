@@ -153,6 +153,13 @@ WORKER_LEASE_DURATION_SECONDS = 90
 # users.threads.get call per eligible enrollment per cycle (see
 # MailReplyDetectionService), never a mailbox-wide sync.
 WORKER_REPLY_POLL_INTERVAL_SECONDS = 120
+# Bounce detection (2026-09-18) -- its own cadence, separate from both of
+# the above: one users.history.list call per CONNECTED mailbox per cycle
+# (see MailBounceDetectionService), not per enrollment, so this can run
+# less often than reply detection without losing meaningful freshness --
+# a bounce's own DSN can itself take minutes to arrive from the
+# recipient's mail server, so polling faster than this buys little.
+WORKER_BOUNCE_POLL_INTERVAL_SECONDS = 180
 
 
 class NoUsableMailboxError(Exception):

@@ -4,15 +4,18 @@ import { test } from "node:test";
 
 // Source-level regression coverage for Campaign Manager Campaigns
 // (V1 2026-09-17, QuickMail-style column/progress redefinition
-// 2026-09-18) -- same source-inspection pattern as mail-leads.test.ts,
-// since this project has no DOM render harness (see package.json's test
-// script). Real aggregation logic (available/progress/reply-rate calc,
-// search/filter/sort/pagination) is unit-tested directly against
-// MailCampaignListService in tests/test_mail_campaign_list_service.py;
-// these tests verify the frontend actually wires that data in as a wide
-// table -- never side-by-side cards, never Mailbox/Sent columns any
-// more -- and never fabricates a metric (Open rate stays a static
-// "not tracked" cell, never a real-looking number).
+// 2026-09-18, real Open rate 2026-09-18, real Bounce rate 2026-09-18) --
+// same source-inspection pattern as mail-leads.test.ts, since this
+// project has no DOM render harness (see package.json's test script).
+// Real aggregation logic (available/progress/reply-rate/open-rate/
+// bounce-rate calc, search/filter/sort/pagination) is unit-tested
+// directly against MailCampaignListService in
+// tests/test_mail_campaign_list_service.py; these tests verify the
+// frontend actually wires that data in as a wide table -- never side-
+// by-side cards, never Mailbox/Sent columns any more -- and never
+// fabricates a metric (both Open rate and Bounce rate render "—" with a
+// real, state-specific tooltip when there is no data, never a
+// real-looking number).
 
 const LIST_PAGE_SOURCE = readFileSync(new URL("../app/manager/campaigns/page.tsx", import.meta.url), "utf-8");
 const API_SOURCE = readFileSync(new URL("./api.ts", import.meta.url), "utf-8");
@@ -109,7 +112,7 @@ test("Available renders the campaign's own real available_leads field", () => {
 });
 
 test("Open rate is real (2026-09-18) -- rendered through the shared openRateDisplay() helper, never a hardcoded 'not tracked' placeholder", () => {
-  assert.match(LIST_PAGE_SOURCE, /import \{ mailCampaignStatusBadgeClass, mailCampaignStatusLabel, openRateDisplay \} from "@\/lib\/mail"/);
+  assert.match(LIST_PAGE_SOURCE, /import \{ bounceRateDisplay, mailCampaignStatusBadgeClass, mailCampaignStatusLabel, openRateDisplay \} from "@\/lib\/mail"/);
   assert.match(LIST_PAGE_SOURCE, /openRateDisplay\(campaign\)\.text/);
   assert.match(LIST_PAGE_SOURCE, /openRateDisplay\(campaign\)\.tooltip/);
   assert.doesNotMatch(LIST_PAGE_SOURCE, /OPEN_RATE_TOOLTIP/);
@@ -120,6 +123,14 @@ test("Open rate is real (2026-09-18) -- rendered through the shared openRateDisp
 test("Reply rate renders the campaign's own real reply_rate_percent field", () => {
   assert.match(LIST_PAGE_SOURCE, /label="Reply rate"/);
   assert.match(LIST_PAGE_SOURCE, /campaign\.reply_rate_percent/);
+});
+
+test("Bounce rate is real (2026-09-18) -- rendered through the shared bounceRateDisplay() helper, never a hardcoded 'not tracked' placeholder", () => {
+  assert.match(LIST_PAGE_SOURCE, /bounceRateDisplay\(campaign\)\.text/);
+  assert.match(LIST_PAGE_SOURCE, /bounceRateDisplay\(campaign\)\.tooltip/);
+  assert.match(LIST_PAGE_SOURCE, /label="Bounce rate"/);
+  assert.match(LIST_PAGE_SOURCE, /column="bounce_rate"/);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /Not tracked/);
 });
 
 test("Campaign created renders the campaign's own real created_at as a compact date, distinct from Last updated", () => {
@@ -143,8 +154,8 @@ test("the header row renders columns in the exact required order", () => {
   // whitespace/newlines between the ">" and the label. Locate each by
   // whichever marker actually appears, tolerating that whitespace, and
   // confirm their positions are in the exact required order.
-  const sortableLabels = new Set(["Status", "Campaign", "Available", "Total", "Progress", "Open rate", "Reply rate", "Replied", "Campaign created", "Last updated"]);
-  const order = ["Status", "Campaign", "Available", "Total", "Progress", "Open rate", "Reply rate", "Replied", "Suppressed", "Failed", "Steps", "Campaign created", "Last updated"];
+  const sortableLabels = new Set(["Status", "Campaign", "Available", "Total", "Progress", "Open rate", "Reply rate", "Replied", "Bounce rate", "Campaign created", "Last updated"]);
+  const order = ["Status", "Campaign", "Available", "Total", "Progress", "Open rate", "Reply rate", "Replied", "Suppressed", "Failed", "Bounce rate", "Steps", "Campaign created", "Last updated"];
   const headSection = LIST_PAGE_SOURCE.slice(LIST_PAGE_SOURCE.indexOf("<thead"), LIST_PAGE_SOURCE.indexOf("</thead>"));
   const indices = order.map((label) => {
     if (sortableLabels.has(label)) {
@@ -169,7 +180,7 @@ test("MailCampaignListItem/MailCampaignListPage (api.ts) are distinct types from
   assert.match(API_SOURCE, /export interface MailCampaign\b/);
 });
 
-test("MailCampaignListItem (api.ts) carries available_leads/finished_leads/in_progress_leads/reply_rate_percent/open_rate_percent and no mailbox/sent/completed fields", () => {
+test("MailCampaignListItem (api.ts) carries available_leads/finished_leads/in_progress_leads/reply_rate_percent/open_rate_percent/bounce_rate_percent and no mailbox/sent/completed fields", () => {
   const start = API_SOURCE.indexOf("export interface MailCampaignListItem");
   const end = API_SOURCE.indexOf("export interface MailCampaignListPage");
   const block = API_SOURCE.slice(start, end);
@@ -179,6 +190,7 @@ test("MailCampaignListItem (api.ts) carries available_leads/finished_leads/in_pr
   assert.match(block, /reply_rate_percent: number/);
   assert.match(block, /open_tracking_enabled: boolean/);
   assert.match(block, /open_rate_percent: number \| null/);
+  assert.match(block, /bounce_rate_percent: number \| null/);
   assert.doesNotMatch(block, /mailbox_id|mailbox_email|mailbox_count|\bsent:|\bcompleted:/);
 });
 
@@ -189,7 +201,7 @@ test("listMailCampaignList sends page/search/filter/sort as query params to GET 
 
 // --- Backend model / route -----------------------------------------------------
 
-test("MailCampaignListItem (backend model) has no click-rate field, but does carry the real reply_rate_percent/open_rate_percent", () => {
+test("MailCampaignListItem (backend model) has no click-rate field, but does carry the real reply_rate_percent/open_rate_percent/bounce_rate_percent", () => {
   const modelBlock = MODEL_SOURCE.slice(
     MODEL_SOURCE.indexOf("class MailCampaignListItem"),
     MODEL_SOURCE.indexOf("class MailCampaignListPage")
@@ -198,6 +210,7 @@ test("MailCampaignListItem (backend model) has no click-rate field, but does car
   assert.match(modelBlock, /reply_rate_percent: float/);
   assert.match(modelBlock, /open_tracking_enabled: bool/);
   assert.match(modelBlock, /open_rate_percent: float \| None/);
+  assert.match(modelBlock, /bounce_rate_percent: float \| None/);
   assert.match(modelBlock, /available_leads: int/);
   assert.match(modelBlock, /finished_leads: int/);
   assert.match(modelBlock, /in_progress_leads: int/);

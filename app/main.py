@@ -106,7 +106,9 @@ from app.repositories.sqlite_mail_send_window_store import SQLiteMailSendWindowS
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
 from app.repositories.sqlite_mail_trigger_occurrence_store import SQLiteMailTriggerOccurrenceStore
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
+from app.repositories.sqlite_mail_bounce_store import SQLiteMailBounceStore
 from app.repositories.sqlite_mail_open_event_store import SQLiteMailOpenEventStore
+from app.repositories.sqlite_mailbox_history_checkpoint_store import SQLiteMailboxHistoryCheckpointStore
 from app.repositories.sqlite_mail_reply_store import SQLiteMailReplyStore
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
 from app.repositories.sqlite_mailbox_send_policy_store import SQLiteMailboxSendPolicyStore
@@ -144,6 +146,7 @@ from app.services.luma_sync_service import LumaSyncService
 from app.services.mail_campaign_csv_prospect_service import MailCampaignCsvProspectService
 from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_batch_reconciliation_worker import MailBatchReconciliationWorker
+from app.services.mail_bounce_detection_service import MailBounceDetectionService
 from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_campaign_list_service import MailCampaignListService
 from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
@@ -195,6 +198,8 @@ async def lifespan(app: FastAPI):
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
     mail_reply_store = SQLiteMailReplyStore(settings.database_path)
     mail_open_event_store = SQLiteMailOpenEventStore(settings.database_path)
+    mail_bounce_store = SQLiteMailBounceStore(settings.database_path)
+    mailbox_history_checkpoint_store = SQLiteMailboxHistoryCheckpointStore(settings.database_path)
     mail_campaign_mailbox_store = SQLiteMailCampaignMailboxStore(settings.database_path)
     mail_send_window_store = SQLiteMailSendWindowStore(settings.database_path)
     mail_enrollment_step_store = SQLiteMailEnrollmentStepStore(settings.database_path)
@@ -247,6 +252,8 @@ async def lifespan(app: FastAPI):
     await mail_suppression_store.connect()
     await mail_reply_store.connect()
     await mail_open_event_store.connect()
+    await mail_bounce_store.connect()
+    await mailbox_history_checkpoint_store.connect()
     await mail_campaign_mailbox_store.connect()
     await mail_send_window_store.connect()
     await mail_enrollment_step_store.connect()
@@ -490,6 +497,7 @@ async def lifespan(app: FastAPI):
         enrollment_step_store=mail_enrollment_step_store,
         open_event_store=mail_open_event_store,
         sequence_step_store=mail_sequence_step_store,
+        bounce_store=mail_bounce_store,
     )
 
     # Proactive OAuth expiration warnings (2026-09-17, mailbox-attribution
@@ -502,15 +510,15 @@ async def lifespan(app: FastAPI):
         enrollment_step_store=mail_enrollment_step_store,
     )
 
-    # Campaign stats strip (2026-09-17) -- reply rate / unsub rate only,
-    # read-only. See MailCampaignStatsService's own module docstring for
-    # why open/bounce rate have no field at all here.
+    # Campaign stats strip (2026-09-17, real Bounce rate added 2026-09-18)
+    # -- read-only. See MailCampaignStatsService's own module docstring.
     app.state.mail_campaign_stats_service = MailCampaignStatsService(
         campaign_store=mail_campaign_store,
         enrollment_store=mail_enrollment_store,
         enrollment_step_store=mail_enrollment_step_store,
         open_event_store=mail_open_event_store,
         suppression_store=mail_suppression_store,
+        bounce_store=mail_bounce_store,
     )
 
     # Emails page mailbox metrics (2026-09-18) -- real Campaigns/Emails
@@ -535,6 +543,20 @@ async def lifespan(app: FastAPI):
         mailbox_service=app.state.mailbox_service,
     )
     app.state.mail_reply_detection_service = mail_reply_detection_service
+
+    # Bounce detection (2026-09-18). Automatic for every campaign, no
+    # opt-in -- see MailBounceDetectionService's own module docstring.
+    # Reuses the SAME mailbox_store/mailbox_service/enrollment_step_store
+    # instances as everything else; never a second implementation of any
+    # of them.
+    mail_bounce_detection_service = MailBounceDetectionService(
+        mailbox_store=mailbox_store,
+        mailbox_service=app.state.mailbox_service,
+        enrollment_step_store=mail_enrollment_step_store,
+        checkpoint_store=mailbox_history_checkpoint_store,
+        bounce_store=mail_bounce_store,
+    )
+    app.state.mail_bounce_detection_service = mail_bounce_detection_service
 
     # Reply-preview one-time backfill (2026-09-18) -- see
     # mail_reply_preview_backfill.py's own module docstring for why this
@@ -573,6 +595,7 @@ async def lifespan(app: FastAPI):
         activity_log=activity_log_service,
         mail_trigger_service=app.state.mail_trigger_service,
         mail_reply_detection_service=mail_reply_detection_service,
+        mail_bounce_detection_service=mail_bounce_detection_service,
     )
     app.state.mail_execution_worker = mail_execution_worker
     mail_execution_worker.start()
@@ -717,6 +740,8 @@ async def lifespan(app: FastAPI):
     await mail_suppression_store.close()
     await mail_reply_store.close()
     await mail_open_event_store.close()
+    await mail_bounce_store.close()
+    await mailbox_history_checkpoint_store.close()
     await mail_campaign_mailbox_store.close()
     await mail_send_window_store.close()
     await mail_enrollment_step_store.close()

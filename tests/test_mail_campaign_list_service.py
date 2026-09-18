@@ -22,6 +22,8 @@ import pytest
 import pytest_asyncio
 
 from app.models.mail import (
+    MailBounce,
+    MailBounceType,
     MailCampaign,
     MailCampaignStatus,
     MailEnrollment,
@@ -30,6 +32,7 @@ from app.models.mail import (
     MailEnrollmentStepStatus,
     MailSequenceStep,
 )
+from app.repositories.mail_bounce_store import MemoryMailBounceStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
@@ -85,6 +88,23 @@ def make_step(enrollment_id: str, campaign_id: str, step_number: int = 1, **over
     return MailEnrollmentStep(**fields)
 
 
+def make_bounce(enrollment_id: str, campaign_id: str, gmail_message_id: str, **overrides) -> MailBounce:
+    fields = dict(
+        gmail_message_id=gmail_message_id,
+        mailbox_id="mbx-1",
+        mail_campaign_id=campaign_id,
+        enrollment_id=enrollment_id,
+        enrollment_step_id=f"{enrollment_id}-step1",
+        original_message_id=f"rfc-{enrollment_id}",
+        recipient_email=f"contact-{enrollment_id}@example.com",
+        bounce_type=MailBounceType.HARD,
+        bounced_at=NOW,
+        created_at=NOW,
+    )
+    fields.update(overrides)
+    return MailBounce(**fields)
+
+
 def make_sequence_step(campaign_id: str, step_id: str, step_number: int, **overrides) -> MailSequenceStep:
     fields = dict(
         step_id=step_id,
@@ -109,6 +129,7 @@ async def stores():
         "enrollment_step_store": MemoryMailEnrollmentStepStore(),
         "open_event_store": MemoryMailOpenEventStore(),
         "sequence_step_store": MemoryMailSequenceStepStore(),
+        "bounce_store": MemoryMailBounceStore(),
     }
 
 
@@ -367,6 +388,84 @@ async def test_open_rate_never_fabricated_to_zero_percent_when_disabled(stores, 
     [item] = (await service.list_campaigns()).items
     assert item.open_rate_percent is None
     assert item.open_rate_percent != 0.0
+
+
+# --- Bounce rate (2026-09-18) ------------------------------------------------
+
+
+async def test_bounce_rate_is_none_when_nothing_sent_yet(stores, service):
+    """No campaign-level toggle at all for bounce tracking -- the ONLY
+    None case is 'no sent denominator yet'."""
+    await stores["campaign_store"].create(make_campaign("c1", "No Sends Yet Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.bounce_rate_percent is None
+
+
+async def test_bounce_rate_counts_unique_bounced_leads_over_unique_sent_leads(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Bounce Rate Test"))
+    for i in range(4):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}"))
+        await stores["enrollment_step_store"].create(make_step(f"e{i}", "c1"))
+    await stores["bounce_store"].create(make_bounce("e0", "c1", "gm-1"))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.bounce_rate_percent == 25.0
+
+
+async def test_bounce_rate_counts_a_lead_once_despite_multiple_bounce_rows(stores, service):
+    """Unique LEADS, not raw bounce rows -- two DSNs for the same
+    enrollment (e.g. a soft-bounce retry notice followed by a permanent-
+    failure notice) must still count as exactly one bounced lead."""
+    await stores["campaign_store"].create(make_campaign("c1", "Multiple DSNs Test"))
+    for i in range(2):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}"))
+        await stores["enrollment_step_store"].create(make_step(f"e{i}", "c1"))
+    await stores["bounce_store"].create(make_bounce("e0", "c1", "gm-1", bounce_type=MailBounceType.SOFT))
+    await stores["bounce_store"].create(make_bounce("e0", "c1", "gm-2", bounce_type=MailBounceType.HARD))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.bounce_rate_percent == 50.0
+
+
+async def test_bounce_rate_never_fabricated_to_zero_percent_with_no_denominator(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Zero Leads Test"))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.bounce_rate_percent is None
+    assert item.bounce_rate_percent != 0.0
+
+
+async def test_bounce_rate_excludes_a_failed_before_send_lead_from_the_denominator(stores, service):
+    """A FAILED (our own send attempt failing) enrollment has no SENT
+    step at all -- it must never inflate the sent-denominator, matching
+    the same sent_enrollment_ids set Open rate already uses."""
+    await stores["campaign_store"].create(make_campaign("c1", "Failed Before Send Test"))
+    await stores["enrollment_store"].create(make_enrollment("e0", "c1", "contact0"))
+    await stores["enrollment_step_store"].create(make_step("e0", "c1"))
+    await stores["bounce_store"].create(make_bounce("e0", "c1", "gm-1"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.FAILED))
+    await stores["enrollment_step_store"].create(
+        make_step("e1", "c1", status=MailEnrollmentStepStatus.FAILED, sent_at=None)
+    )
+
+    [item] = (await service.list_campaigns()).items
+    assert item.bounce_rate_percent == 100.0
+
+
+async def test_bounce_rate_sortable(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "High Bounce"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
+    await stores["enrollment_step_store"].create(make_step("e1", "c1"))
+    await stores["bounce_store"].create(make_bounce("e1", "c1", "gm-1"))
+
+    await stores["campaign_store"].create(make_campaign("c2", "No Bounce"))
+    await stores["enrollment_store"].create(make_enrollment("e2", "c2", "contact2"))
+    await stores["enrollment_step_store"].create(make_step("e2", "c2"))
+
+    page = await service.list_campaigns(sort_by="bounce_rate", sort_dir="desc")
+    assert [item.mail_campaign_id for item in page.items] == ["c1", "c2"]
 
 
 # --- Suppressed / Failed (unchanged buckets) --------------------------------

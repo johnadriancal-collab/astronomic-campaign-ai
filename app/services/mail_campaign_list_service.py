@@ -32,6 +32,15 @@ itself, which is passed through unchanged. Numerator is UNIQUE opened
 leads (grouped by `enrollment_id`, never raw pixel-hit count) that also
 appear in the SENT-denominator set.
 
+Bounce rate (2026-09-18, bounce detection) is computed with the exact
+SAME shape as Open rate -- unique bounced leads (grouped by
+`enrollment_id`, from MailBounceStore.list_for_campaign()) intersected
+with the SAME sent-denominator set already built for Open rate above --
+but with only ONE None case (no sent denominator yet), since bounce
+tracking has no per-campaign toggle at all. This MUST stay identical to
+MailCampaignStatsService.get_stats()'s own bounce-rate formula so the
+Campaigns list and the Campaign Dashboard can never disagree.
+
 `reply_rate_percent` matches MailCampaignStatsService.get_stats()'s own
 formula exactly. The Mailbox column (mailbox_id/mailbox_email/
 mailbox_count) and the raw `sent`/`completed` counts were dropped from
@@ -51,13 +60,14 @@ from app.models.mail import (
     MailEnrollmentStatus,
     MailEnrollmentStepStatus,
 )
+from app.repositories.mail_bounce_store import MailBounceStore
 from app.repositories.mail_campaign_store import MailCampaignStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
 from app.repositories.mail_open_event_store import MailOpenEventStore
 from app.repositories.mail_sequence_step_store import MailSequenceStepStore
 
-MailCampaignSortBy = str  # "name" | "status" | "available" | "total_leads" | "progress" | "reply_rate" | "open_rate" | "replied" | "created_at" | "updated_at"
+MailCampaignSortBy = str  # "name" | "status" | "available" | "total_leads" | "progress" | "reply_rate" | "open_rate" | "bounce_rate" | "replied" | "created_at" | "updated_at"
 
 
 class MailCampaignListService:
@@ -68,12 +78,14 @@ class MailCampaignListService:
         enrollment_step_store: MailEnrollmentStepStore,
         open_event_store: MailOpenEventStore,
         sequence_step_store: MailSequenceStepStore,
+        bounce_store: MailBounceStore,
     ):
         self.campaign_store = campaign_store
         self.enrollment_store = enrollment_store
         self.enrollment_step_store = enrollment_step_store
         self.open_event_store = open_event_store
         self.sequence_step_store = sequence_step_store
+        self.bounce_store = bounce_store
 
     async def _build_item(self, campaign: MailCampaign) -> MailCampaignListItem:
         enrollments = await self.enrollment_store.list_for_campaign(campaign.mail_campaign_id)
@@ -96,15 +108,25 @@ class MailCampaignListService:
         not_finished = total - finished
         progress_percent = round((finished / total) * 100, 1) if total > 0 else 0.0
 
+        # Sent-denominator set: shared, identically, by Open rate (only
+        # when tracking is on) and Bounce rate (always) -- see this
+        # module's own docstring for why they MUST share it.
+        steps = await self.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
+        sent_enrollment_ids = {step.enrollment_id for step in steps if step.status == MailEnrollmentStepStatus.SENT}
+
         open_rate_percent = None
-        if campaign.open_tracking_enabled:
-            steps = await self.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
-            sent_enrollment_ids = {step.enrollment_id for step in steps if step.status == MailEnrollmentStepStatus.SENT}
-            if sent_enrollment_ids:
-                open_events = await self.open_event_store.list_for_campaign(campaign.mail_campaign_id)
-                opened_enrollment_ids = {event.enrollment_id for event in open_events}
-                unique_opens = len(opened_enrollment_ids & sent_enrollment_ids)
-                open_rate_percent = round((unique_opens / len(sent_enrollment_ids)) * 100, 1)
+        if campaign.open_tracking_enabled and sent_enrollment_ids:
+            open_events = await self.open_event_store.list_for_campaign(campaign.mail_campaign_id)
+            opened_enrollment_ids = {event.enrollment_id for event in open_events}
+            unique_opens = len(opened_enrollment_ids & sent_enrollment_ids)
+            open_rate_percent = round((unique_opens / len(sent_enrollment_ids)) * 100, 1)
+
+        bounce_rate_percent = None
+        if sent_enrollment_ids:
+            bounces = await self.bounce_store.list_for_campaign(campaign.mail_campaign_id)
+            bounced_enrollment_ids = {bounce.enrollment_id for bounce in bounces}
+            unique_bounces = len(bounced_enrollment_ids & sent_enrollment_ids)
+            bounce_rate_percent = round((unique_bounces / len(sent_enrollment_ids)) * 100, 1)
 
         sequence_steps = await self.sequence_step_store.list_for_campaign(campaign.mail_campaign_id)
 
@@ -120,6 +142,7 @@ class MailCampaignListService:
             reply_rate_percent=reply_rate_percent,
             suppressed=counts[MailEnrollmentStatus.SUPPRESSED],
             failed=counts[MailEnrollmentStatus.FAILED],
+            bounce_rate_percent=bounce_rate_percent,
             finished_leads=finished,
             in_progress_leads=not_finished,
             progress_percent=progress_percent,
@@ -171,6 +194,9 @@ class MailCampaignListService:
             # as -1 -- always last on a descending sort, never mixed in
             # among real percentages.
             items.sort(key=lambda item: item.open_rate_percent if item.open_rate_percent is not None else -1, reverse=reverse)
+        elif sort_by == "bounce_rate":
+            # Same None-sorts-last convention as open_rate above.
+            items.sort(key=lambda item: item.bounce_rate_percent if item.bounce_rate_percent is not None else -1, reverse=reverse)
         elif sort_by == "replied":
             items.sort(key=lambda item: item.replied, reverse=reverse)
         elif sort_by == "progress":

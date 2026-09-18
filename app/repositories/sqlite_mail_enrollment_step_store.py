@@ -88,9 +88,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_enrollment_steps_open_token
     ON mail_enrollment_steps(open_tracking_token)
 """
 
+# Bounce detection (2026-09-18) -- same ALTER-TABLE-then-index migration
+# shape as open_tracking_token above, promoting rfc_message_id (until
+# now JSON-blob-only) to a real, fast, UNIQUE-indexed column so
+# MailBounceDetectionService's Original-Message-ID attribution lookup
+# never has to scan every step in every campaign.
+CREATE_INDEX_RFC_MESSAGE_ID_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_enrollment_steps_rfc_message_id
+    ON mail_enrollment_steps(rfc_message_id)
+"""
+
 _ALL_COLUMNS = (
     "enrollment_step_id, mail_campaign_id, enrollment_id, step_id, step_number, "
-    "status, next_send_at, mailbox_id, sent_at, claimed_at, open_tracking_token, data"
+    "status, next_send_at, mailbox_id, sent_at, claimed_at, open_tracking_token, rfc_message_id, data"
 )
 
 
@@ -107,6 +117,7 @@ def _row_values(step: MailEnrollmentStep) -> tuple:
         step.sent_at.isoformat() if step.sent_at else None,
         step.claimed_at.isoformat() if step.claimed_at else None,
         step.open_tracking_token,
+        step.rfc_message_id,
         step.model_dump_json(),
     )
 
@@ -124,22 +135,56 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
         await self._conn.execute(CREATE_INDEX_CAMPAIGN_STEP_SQL)
         await self._conn.execute(CREATE_INDEX_ENROLLMENT_SQL)
         await self._conn.execute(CREATE_INDEX_CLAIMED_SQL)
-        await self._migrate_add_open_tracking_token_column()
+        await self._migrate_add_promoted_columns()
         await self._conn.commit()
 
-    async def _migrate_add_open_tracking_token_column(self) -> None:
-        """Safe for a table that already existed before open_tracking_token
-        was added -- adds the column only if missing, never touches
-        existing rows. See this module's own CREATE_INDEX_OPEN_TOKEN_SQL
-        comment for why a fresh NULL-valued column is fine under a
+    async def _migrate_add_promoted_columns(self) -> None:
+        """Safe for a table that already existed before open_tracking_
+        token/rfc_message_id were promoted to real columns -- adds only
+        whichever is missing, never touches existing rows (one PRAGMA
+        table_info read covers both). See this module's own
+        CREATE_INDEX_OPEN_TOKEN_SQL/CREATE_INDEX_RFC_MESSAGE_ID_SQL
+        comments for why a fresh NULL-valued column is fine under a
         UNIQUE index."""
         cursor = await self._conn.execute("PRAGMA table_info(mail_enrollment_steps)")
         existing_columns = {row["name"] for row in await cursor.fetchall()}
         await cursor.close()
 
         if "open_tracking_token" not in existing_columns:
+            # A BRAND NEW field -- no pre-existing row's JSON blob ever
+            # had one, so NULL-for-every-existing-row is correct as-is,
+            # no backfill needed.
             await self._conn.execute("ALTER TABLE mail_enrollment_steps ADD COLUMN open_tracking_token TEXT")
+        if "rfc_message_id" not in existing_columns:
+            # UNLIKE open_tracking_token, rfc_message_id already existed
+            # inside the JSON `data` blob for every real, already-sent
+            # row (it's been part of MailEnrollmentStep since Phase C) --
+            # a bare ADD COLUMN would leave every pre-existing row's new
+            # column NULL despite the blob having a real value, silently
+            # breaking bounce attribution for every send that predates
+            # this migration. Add the column, then backfill it from each
+            # row's own already-parsed blob (Python-side, not a SQL JSON
+            # function, for portability across SQLite builds -- same
+            # "parse the blob in Python" convention every store here
+            # already uses) before the UNIQUE index is created.
+            await self._conn.execute("ALTER TABLE mail_enrollment_steps ADD COLUMN rfc_message_id TEXT")
+            await self._backfill_rfc_message_id_column()
         await self._conn.execute(CREATE_INDEX_OPEN_TOKEN_SQL)
+        await self._conn.execute(CREATE_INDEX_RFC_MESSAGE_ID_SQL)
+
+    async def _backfill_rfc_message_id_column(self) -> None:
+        cursor = await self._conn.execute(
+            "SELECT enrollment_step_id, data FROM mail_enrollment_steps WHERE rfc_message_id IS NULL"
+        )
+        rows = await cursor.fetchall()
+        await cursor.close()
+        for row in rows:
+            step = MailEnrollmentStep.model_validate_json(row["data"])
+            if step.rfc_message_id:
+                await self._conn.execute(
+                    "UPDATE mail_enrollment_steps SET rfc_message_id = ? WHERE enrollment_step_id = ?",
+                    (step.rfc_message_id, row["enrollment_step_id"]),
+                )
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -156,7 +201,7 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
         try:
             async with sqlite_write(self._connection):
                 cursor = await self._connection.execute(
-                    f"INSERT INTO mail_enrollment_steps ({_ALL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    f"INSERT INTO mail_enrollment_steps ({_ALL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _row_values(step),
                 )
         except aiosqlite.IntegrityError:
@@ -188,12 +233,20 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
         await cursor.close()
         return MailEnrollmentStep.model_validate_json(row["data"]) if row else None
 
+    async def get_by_rfc_message_id(self, rfc_message_id: str) -> MailEnrollmentStep | None:
+        cursor = await self._connection.execute(
+            "SELECT data FROM mail_enrollment_steps WHERE rfc_message_id = ?", (rfc_message_id,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return MailEnrollmentStep.model_validate_json(row["data"]) if row else None
+
     async def save(self, step: MailEnrollmentStep) -> None:
         async with sqlite_write(self._connection):
             cursor = await self._connection.execute(
                 "UPDATE mail_enrollment_steps SET mail_campaign_id=?, enrollment_id=?, step_id=?, step_number=?, "
-                "status=?, next_send_at=?, mailbox_id=?, sent_at=?, claimed_at=?, open_tracking_token=?, data=? "
-                "WHERE enrollment_step_id=?",
+                "status=?, next_send_at=?, mailbox_id=?, sent_at=?, claimed_at=?, open_tracking_token=?, "
+                "rfc_message_id=?, data=? WHERE enrollment_step_id=?",
                 (
                     step.mail_campaign_id,
                     step.enrollment_id,
@@ -205,6 +258,7 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
                     step.sent_at.isoformat() if step.sent_at else None,
                     step.claimed_at.isoformat() if step.claimed_at else None,
                     step.open_tracking_token,
+                    step.rfc_message_id,
                     step.model_dump_json(),
                     step.enrollment_step_id,
                 ),
@@ -218,7 +272,7 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
         async with sqlite_write(self._connection):
             cursor = await self._connection.execute(
                 "UPDATE mail_enrollment_steps SET status=?, next_send_at=?, mailbox_id=?, sent_at=?, claimed_at=?, "
-                "open_tracking_token=?, data=? WHERE enrollment_step_id=? AND status=?",
+                "open_tracking_token=?, rfc_message_id=?, data=? WHERE enrollment_step_id=? AND status=?",
                 (
                     updated.status.value,
                     updated.next_send_at.isoformat() if updated.next_send_at else None,
@@ -226,6 +280,7 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
                     updated.sent_at.isoformat() if updated.sent_at else None,
                     updated.claimed_at.isoformat() if updated.claimed_at else None,
                     updated.open_tracking_token,
+                    updated.rfc_message_id,
                     updated.model_dump_json(),
                     enrollment_step_id,
                     expected_status.value,

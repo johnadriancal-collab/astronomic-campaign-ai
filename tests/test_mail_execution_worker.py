@@ -134,16 +134,23 @@ async def env():
     }
 
 
-async def make_worker(env, holder_id="worker-A", lease_store=None, activity_log=None, mail_reply_detection_service=None, reply_poll_interval_seconds=None):
+async def make_worker(
+    env, holder_id="worker-A", lease_store=None, activity_log=None,
+    mail_reply_detection_service=None, reply_poll_interval_seconds=None,
+    mail_bounce_detection_service=None, bounce_poll_interval_seconds=None,
+):
     sender = RecordingSender()
     lease_service = WorkerLeaseService(lease_store or MemoryWorkerLeaseStore(), holder_id=holder_id)
     kwargs = {}
     if reply_poll_interval_seconds is not None:
         kwargs["reply_poll_interval_seconds"] = reply_poll_interval_seconds
+    if bounce_poll_interval_seconds is not None:
+        kwargs["bounce_poll_interval_seconds"] = bounce_poll_interval_seconds
     worker = MailExecutionWorker(
         mail_sending_service=env["mail_sending_service"], mail_campaign_service=env["mail_campaign_service"],
         lease_service=lease_service, sender=sender, lease_duration_seconds=90, poll_interval_seconds=45,
-        activity_log=activity_log, mail_reply_detection_service=mail_reply_detection_service, **kwargs,
+        activity_log=activity_log, mail_reply_detection_service=mail_reply_detection_service,
+        mail_bounce_detection_service=mail_bounce_detection_service, **kwargs,
     )
     return worker, sender
 
@@ -478,6 +485,72 @@ async def test_reply_poll_failure_does_not_abort_due_step_processing_in_the_same
     assert len(detector.calls) == 1  # the poll really was attempted
     assert result.is_leader is True
     assert result.due_rows_seen == 1  # the reply-poll failure never short-circuited due-row processing
+
+
+class _CountingBounceDetectionService:
+    """Same stand-in shape as _CountingReplyDetectionService above, for
+    MailBounceDetectionService.poll_all_mailboxes() -- proves tick()'s
+    own bounce-poll cadence gate and isolation, independent of the real
+    DSN-detection logic (covered in test_mail_bounce_detection_service.py)."""
+
+    def __init__(self, raise_error: Exception | None = None):
+        self.calls: list[datetime] = []
+        self.raise_error = raise_error
+
+    async def poll_all_mailboxes(self, now: datetime) -> int:
+        self.calls.append(now)
+        if self.raise_error is not None:
+            raise self.raise_error
+        return 0
+
+
+async def test_tick_polls_for_bounces_on_its_own_cadence(env):
+    detector = _CountingBounceDetectionService()
+    worker, _ = await make_worker(env, mail_bounce_detection_service=detector, bounce_poll_interval_seconds=300)
+
+    await worker.tick(NOW)
+    assert len(detector.calls) == 1  # runs immediately on the first tick, like the recovery sweep
+
+    await worker.tick(NOW + timedelta(seconds=30))  # well inside the 300s cadence
+    assert len(detector.calls) == 1  # NOT re-run yet
+
+    await worker.tick(NOW + timedelta(seconds=301))
+    assert len(detector.calls) == 2  # cadence elapsed -- runs again
+
+
+async def test_tick_never_polls_for_bounces_when_no_detection_service_configured(env):
+    worker, _ = await make_worker(env)  # mail_bounce_detection_service defaults to None
+    result = await worker.tick(NOW)
+    assert result.is_leader is True  # tick() itself must not raise/short-circuit
+
+
+async def test_bounce_poll_failure_does_not_abort_due_step_processing_in_the_same_tick(env):
+    """A poll_all_mailboxes() failure must never block outbound sending
+    in the SAME tick -- the user's own explicit requirement (spec
+    section 15) -- same isolation discipline as Trigger-processing and
+    reply-poll above."""
+    detector = _CountingBounceDetectionService(raise_error=RuntimeError("Gmail is down"))
+    worker, sender = await make_worker(env, mail_bounce_detection_service=detector)
+    await enroll_and_queue(env)
+
+    result = await worker.tick(NOW)
+
+    assert len(detector.calls) == 1  # the poll really was attempted
+    assert result.is_leader is True
+    assert result.due_rows_seen == 1  # the bounce-poll failure never short-circuited due-row processing
+
+
+async def test_reply_poll_and_bounce_poll_run_independently_in_the_same_tick(env):
+    """Both optional services, each on its own cadence, must both run
+    inside a single tick without interfering with one another."""
+    reply_detector = _CountingReplyDetectionService()
+    bounce_detector = _CountingBounceDetectionService()
+    worker, _ = await make_worker(env, mail_reply_detection_service=reply_detector, mail_bounce_detection_service=bounce_detector)
+
+    await worker.tick(NOW)
+
+    assert len(reply_detector.calls) == 1
+    assert len(bounce_detector.calls) == 1
 
 
 class _FakeMailboxService:

@@ -15,13 +15,16 @@ Bounce rate, requested for the campaign Dashboard tab):
   `open_rate_percent` is None both when tracking is OFF and when nothing
   has SENT yet -- see that field's own model docstring for why the
   frontend must tell those two apart using `open_tracking_enabled`.
-- Bounces: no provider bounce webhook exists anywhere. MailSuppression
-  Reason.HARD_BOUNCE is a real enum value but nothing ever sets it
-  automatically -- it would only ever be a manual entry. Conflating
-  MailEnrollmentStepStatus.FAILED (OUR OWN send attempt failing, before
-  or during the provider call) with an actual bounce would be wrong --
-  those are different events. No field for it exists on this model
-  either -- also "Not tracked", static copy, frontend-side.
+- Bounces (2026-09-18, bounce detection): real, automatic, no per-campaign
+  toggle -- computed by the EXACT same query as MailCampaignListService's
+  own `_build_item()` (unique bounced leads, grouped by enrollment_id,
+  over the SAME unique-sent-leads denominator Open rate above already
+  builds), so the Campaigns list's Bounce rate column and this stats
+  strip's Bounce rate can never silently disagree. FAILED (our own send
+  attempt failing) stays a wholly separate concept -- never conflated
+  with a bounce, which by definition only happens after a successful
+  send. `bounce_rate_percent` is None only when nothing has SENT yet
+  (no toggle means no second None case, unlike Open rate).
 - Replies: real and reliable -- MailReply/MailEnrollment.status ==
   REPLIED, set exclusively by MailSendingService.mark_enrollment_
   replied(). Numerator/denominator/rounding convention matches
@@ -45,6 +48,7 @@ methods) rather than adding new store methods for this one read.
 
 from app.models.crm import normalize_email
 from app.models.mail import MailCampaignStats, MailEnrollmentStatus, MailEnrollmentStepStatus, MailSuppressionReason
+from app.repositories.mail_bounce_store import MailBounceStore
 from app.repositories.mail_campaign_store import MailCampaignStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
@@ -65,12 +69,14 @@ class MailCampaignStatsService:
         enrollment_step_store: MailEnrollmentStepStore,
         open_event_store: MailOpenEventStore,
         suppression_store: MailSuppressionStore,
+        bounce_store: MailBounceStore,
     ):
         self.campaign_store = campaign_store
         self.enrollment_store = enrollment_store
         self.enrollment_step_store = enrollment_step_store
         self.open_event_store = open_event_store
         self.suppression_store = suppression_store
+        self.bounce_store = bounce_store
 
     async def get_stats(self, mail_campaign_id: str) -> MailCampaignStats:
         campaign = await self.campaign_store.get(mail_campaign_id)
@@ -91,15 +97,24 @@ class MailCampaignStatsService:
         )
         unsub_rate_percent = round((unsubscribed / total) * 100, 1) if total > 0 else 0.0
 
+        # Shared sent-denominator set -- see this module's own docstring
+        # for why Open rate and Bounce rate must both read it from here.
+        steps = await self.enrollment_step_store.list_for_campaign(mail_campaign_id)
+        sent_enrollment_ids = {step.enrollment_id for step in steps if step.status == MailEnrollmentStepStatus.SENT}
+
         open_rate_percent = None
-        if campaign.open_tracking_enabled:
-            steps = await self.enrollment_step_store.list_for_campaign(mail_campaign_id)
-            sent_enrollment_ids = {step.enrollment_id for step in steps if step.status == MailEnrollmentStepStatus.SENT}
-            if sent_enrollment_ids:
-                open_events = await self.open_event_store.list_for_campaign(mail_campaign_id)
-                opened_enrollment_ids = {event.enrollment_id for event in open_events}
-                unique_opens = len(opened_enrollment_ids & sent_enrollment_ids)
-                open_rate_percent = round((unique_opens / len(sent_enrollment_ids)) * 100, 1)
+        if campaign.open_tracking_enabled and sent_enrollment_ids:
+            open_events = await self.open_event_store.list_for_campaign(mail_campaign_id)
+            opened_enrollment_ids = {event.enrollment_id for event in open_events}
+            unique_opens = len(opened_enrollment_ids & sent_enrollment_ids)
+            open_rate_percent = round((unique_opens / len(sent_enrollment_ids)) * 100, 1)
+
+        bounce_rate_percent = None
+        if sent_enrollment_ids:
+            bounces = await self.bounce_store.list_for_campaign(mail_campaign_id)
+            bounced_enrollment_ids = {bounce.enrollment_id for bounce in bounces}
+            unique_bounces = len(bounced_enrollment_ids & sent_enrollment_ids)
+            bounce_rate_percent = round((unique_bounces / len(sent_enrollment_ids)) * 100, 1)
 
         return MailCampaignStats(
             mail_campaign_id=mail_campaign_id,
@@ -110,4 +125,5 @@ class MailCampaignStatsService:
             unsub_rate_percent=unsub_rate_percent,
             open_tracking_enabled=campaign.open_tracking_enabled,
             open_rate_percent=open_rate_percent,
+            bounce_rate_percent=bounce_rate_percent,
         )

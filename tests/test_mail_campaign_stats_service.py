@@ -1,9 +1,9 @@
 """
 MailCampaignStatsService -- campaign detail stats strip (2026-09-17,
-real Open rate added 2026-09-18). Reply rate / Unsub rate / Open rate --
-see that service's own module docstring for why Bounce rate has no field
-at all (nothing tracks it for Astronomic Mail) and for the exact Open
-rate query (shared with MailCampaignListService).
+real Open rate added 2026-09-18, real Bounce rate added 2026-09-18).
+Reply rate / Unsub rate / Open rate / Bounce rate -- see that service's
+own module docstring for the exact Open rate/Bounce rate queries, both
+shared with MailCampaignListService so the two can never disagree.
 """
 
 from datetime import datetime, timezone
@@ -12,6 +12,8 @@ import pytest
 import pytest_asyncio
 
 from app.models.mail import (
+    MailBounce,
+    MailBounceType,
     MailCampaign,
     MailCampaignStatus,
     MailEnrollment,
@@ -21,6 +23,7 @@ from app.models.mail import (
     MailSuppression,
     MailSuppressionReason,
 )
+from app.repositories.mail_bounce_store import MemoryMailBounceStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
@@ -83,6 +86,23 @@ def make_step(enrollment_id: str, campaign_id: str, step_number: int = 1, **over
     return MailEnrollmentStep(**fields)
 
 
+def make_bounce(enrollment_id: str, campaign_id: str, gmail_message_id: str, **overrides) -> MailBounce:
+    fields = dict(
+        gmail_message_id=gmail_message_id,
+        mailbox_id="mbx-1",
+        mail_campaign_id=campaign_id,
+        enrollment_id=enrollment_id,
+        enrollment_step_id=f"{enrollment_id}-step1",
+        original_message_id=f"rfc-{enrollment_id}",
+        recipient_email=f"contact-{enrollment_id}@example.com",
+        bounce_type=MailBounceType.HARD,
+        bounced_at=NOW,
+        created_at=NOW,
+    )
+    fields.update(overrides)
+    return MailBounce(**fields)
+
+
 @pytest_asyncio.fixture
 async def stores():
     return {
@@ -91,6 +111,7 @@ async def stores():
         "enrollment_step_store": MemoryMailEnrollmentStepStore(),
         "open_event_store": MemoryMailOpenEventStore(),
         "suppression_store": MemoryMailSuppressionStore(),
+        "bounce_store": MemoryMailBounceStore(),
     }
 
 
@@ -111,6 +132,7 @@ async def test_zero_enrollments_gives_zero_rates_not_a_divide_by_zero(stores, se
     assert stats.reply_rate_percent == 0.0
     assert stats.unsub_rate_percent == 0.0
     assert stats.open_rate_percent is None
+    assert stats.bounce_rate_percent is None
 
 
 # --- Open rate (2026-09-18) --------------------------------------------
@@ -148,6 +170,57 @@ async def test_open_rate_is_unique_opens_over_unique_sent(stores, service):
 
     stats = await service.get_stats("c1")
     assert stats.open_rate_percent == 40.0
+
+
+# --- Bounce rate (2026-09-18) -------------------------------------------
+
+
+async def test_bounce_rate_is_none_when_nothing_sent_yet(stores, service):
+    """No campaign-level toggle at all -- the ONLY None case is 'no sent
+    denominator yet' (unlike Open rate's two distinct None cases)."""
+    await stores["campaign_store"].create(make_campaign("c1"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", "a@example.com"))
+
+    stats = await service.get_stats("c1")
+    assert stats.bounce_rate_percent is None
+
+
+async def test_bounce_rate_is_unique_bounces_over_unique_sent(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1"))
+    for i in range(5):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}", f"p{i}@example.com"))
+        await stores["enrollment_step_store"].create(make_step(f"e{i}", "c1"))
+    # 2 of 5 bounced -- one of them with TWO DSN rows, which must still count as ONE unique bounced lead.
+    await stores["bounce_store"].create(make_bounce("e0", "c1", "gm-1", bounce_type=MailBounceType.SOFT))
+    await stores["bounce_store"].create(make_bounce("e0", "c1", "gm-2", bounce_type=MailBounceType.HARD))
+    await stores["bounce_store"].create(make_bounce("e1", "c1", "gm-3"))
+
+    stats = await service.get_stats("c1")
+    assert stats.bounce_rate_percent == 40.0
+
+
+async def test_bounce_rate_and_open_rate_share_the_same_sent_denominator(stores, service):
+    """Open rate (tracking on) and Bounce rate (always on) must each be
+    computed over the exact same unique-sent-leads set -- proven here by
+    checking both together rather than assuming it from separate tests."""
+    await stores["campaign_store"].create(make_campaign("c1", open_tracking_enabled=True))
+    for i in range(4):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}", f"p{i}@example.com"))
+        await stores["enrollment_step_store"].create(make_step(f"e{i}", "c1"))
+    await stores["open_event_store"].record_open(enrollment_step_id="e0-step1", mail_campaign_id="c1", enrollment_id="e0", at=NOW)
+    await stores["bounce_store"].create(make_bounce("e1", "c1", "gm-1"))
+
+    stats = await service.get_stats("c1")
+    assert stats.open_rate_percent == 25.0
+    assert stats.bounce_rate_percent == 25.0
+
+
+async def test_bounce_rate_never_fabricated_to_zero_percent_with_no_denominator(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1"))
+
+    stats = await service.get_stats("c1")
+    assert stats.bounce_rate_percent is None
+    assert stats.bounce_rate_percent != 0.0
 
 
 async def test_reply_rate_is_replied_over_total(stores, service):

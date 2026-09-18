@@ -1605,6 +1605,10 @@ export interface MailCampaignListItem {
   reply_rate_percent: number;
   suppressed: number;
   failed: number;
+  // Bounce detection (2026-09-18) -- automatic for every campaign, NO
+  // per-campaign toggle -- unlike open_rate_percent, this has only ONE
+  // None case: no sent denominator yet. Never a fabricated 0%.
+  bounce_rate_percent: number | null;
   finished_leads: number;
   in_progress_leads: number;
   progress_percent: number;
@@ -1627,6 +1631,7 @@ export type MailCampaignListSortBy =
   | "total_leads"
   | "reply_rate"
   | "open_rate"
+  | "bounce_rate"
   | "replied"
   | "progress"
   | "created_at"
@@ -2087,13 +2092,8 @@ export function getMailCampaignMailboxNextSend(mailCampaignId: string): Promise<
   return request<MailCampaignMailboxNextSend[]>(`/mail/campaigns/${mailCampaignId}/mailbox-next-send`);
 }
 
-// --- Campaign stats strip (2026-09-17) -- Reply rate / Unsub rate only ----
-//
-// Deliberately no open_rate/bounce_rate fields -- neither is tracked
-// anywhere for Astronomic Mail (see MailCampaignStatsService's own
-// docstring for the investigation this is based on). The Dashboard tab
-// renders "Not tracked" for those two as static copy, never derived from
-// this type.
+// --- Campaign stats strip (2026-09-17, real Open rate + Bounce rate ------
+// added 2026-09-18) -- Reply rate / Unsub rate / Open rate / Bounce rate.
 
 export interface MailCampaignStats {
   mail_campaign_id: string;
@@ -2106,6 +2106,9 @@ export interface MailCampaignStats {
   // as MailCampaignListItem.open_tracking_enabled/open_rate_percent.
   open_tracking_enabled: boolean;
   open_rate_percent: number | null;
+  // Bounce detection (2026-09-18) -- same one-None-case contract as
+  // MailCampaignListItem.bounce_rate_percent.
+  bounce_rate_percent: number | null;
 }
 
 export function getMailCampaignStats(mailCampaignId: string): Promise<MailCampaignStats> {
