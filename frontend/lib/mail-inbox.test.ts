@@ -336,10 +336,10 @@ test("the campaign filter <select> has a base full-width class, not just a sm: w
 
 // --- Explicit table headers + Subject column (2026-09-18) --------------------
 
-test("the Inbox list renders an explicit header row with exactly Lead, Email, Subject, Campaign, Last reply, in that order", () => {
+test("the Inbox list renders an explicit header row with exactly Lead, Email, Subject, Reply, Campaign, Last reply, in that order", () => {
   const theadBlock = INBOX_PAGE_SOURCE.slice(INBOX_PAGE_SOURCE.indexOf("<thead"), INBOX_PAGE_SOURCE.indexOf("</thead>"));
   const headers = [...theadBlock.matchAll(/<th[^>]*>([^<]+)<\/th>/g)].map((m) => m[1].trim());
-  assert.deepEqual(headers, ["Lead", "Email", "Subject", "Campaign", "Last reply"]);
+  assert.deepEqual(headers, ["Lead", "Email", "Subject", "Reply", "Campaign", "Last reply"]);
 });
 
 test("the Replied badge no longer renders in the Inbox list", () => {
@@ -352,28 +352,44 @@ test("each row renders the real subject (falling back to an em dash, never a fab
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /reply\.campaign_name.*subject|subject.*=.*campaign_name/);
 });
 
-test("every cell (Lead, Email, Subject, Campaign, Last reply) wraps its content in a Link to the same row href -- the whole row is clickable, still a real navigation", () => {
+test("every cell (Lead, Email, Subject, Reply, Campaign, Last reply) wraps its content in a Link to the same row href -- the whole row is clickable, still a real navigation", () => {
   const mapStart = INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)");
   const rowBlock = INBOX_PAGE_SOURCE.slice(mapStart, INBOX_PAGE_SOURCE.indexOf("</tr>", mapStart) + 10);
   const linkCount = [...rowBlock.matchAll(/<Link\b/g)].length;
-  assert.equal(linkCount, 5);
+  assert.equal(linkCount, 6);
   const hrefCount = [...rowBlock.matchAll(/href=\{href\}/g)].length;
-  assert.equal(hrefCount, 5);
+  assert.equal(hrefCount, 6);
 });
 
-test("Lead, Email, Subject, and Campaign each truncate to one line with their own title tooltip", () => {
+test("Lead, Email, Subject, Reply, and Campaign each truncate to one line with their own title tooltip", () => {
   assert.match(INBOX_PAGE_SOURCE, /title=\{name\}/);
   assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.email\}/);
   assert.match(INBOX_PAGE_SOURCE, /title=\{subject\}/);
+  assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.reply_preview \?\? undefined\}/);
   assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.campaign_name\}/);
   // Every truncating cell also carries the CSS that actually makes
   // truncation happen -- not just a tooltip with no ellipsis behind it.
-  for (const marker of ["title={name}", "title={reply.email}", "title={subject}", "title={reply.campaign_name}"]) {
+  for (const marker of [
+    "title={name}",
+    "title={reply.email}",
+    "title={subject}",
+    "title={reply.reply_preview ?? undefined}",
+    "title={reply.campaign_name}",
+  ]) {
     const idx = INBOX_PAGE_SOURCE.indexOf(marker);
     const cellBlock = INBOX_PAGE_SOURCE.slice(idx - 40, idx + 200);
     assert.match(cellBlock, /truncate/);
     assert.match(cellBlock, /whitespace-nowrap/);
   }
+});
+
+test("the Reply column renders reply_preview, falling back to an em dash, and sits between Subject and Campaign", () => {
+  assert.match(INBOX_PAGE_SOURCE, /const replyPreview = reply\.reply_preview \?\? "—"/);
+  const subjectIdx = INBOX_PAGE_SOURCE.indexOf(">Subject<");
+  const replyHeaderIdx = INBOX_PAGE_SOURCE.indexOf(">Reply<");
+  const campaignHeaderIdx = INBOX_PAGE_SOURCE.lastIndexOf(">Campaign<", INBOX_PAGE_SOURCE.indexOf("</thead>"));
+  assert.ok(subjectIdx !== -1 && replyHeaderIdx !== -1 && campaignHeaderIdx !== -1);
+  assert.ok(subjectIdx < replyHeaderIdx && replyHeaderIdx < campaignHeaderIdx);
 });
 
 test("stored contact names/emails/subjects/campaign names are never manually shortened -- truncation is CSS-only", () => {
@@ -401,17 +417,23 @@ test("formatRelativeTime produces QuickMail-style phrasing and never mutates/rep
   assert.doesNotMatch(fnBlock, /setReplies|reply\.replied_at\s*=/);
 });
 
-test("search now also matches on subject, in addition to the existing name/email/campaign fields", () => {
+test("search now also matches on subject and reply preview, in addition to the existing name/email/campaign fields", () => {
   const filterBlock = INBOX_PAGE_SOURCE.slice(INBOX_PAGE_SOURCE.indexOf("const filtered = useMemo"), INBOX_PAGE_SOURCE.indexOf("}, [replies, search, campaignFilter]);"));
   assert.match(filterBlock, /r\.contact_name/);
   assert.match(filterBlock, /r\.email\.toLowerCase/);
   assert.match(filterBlock, /r\.campaign_name\.toLowerCase/);
   assert.match(filterBlock, /r\.subject \?\? ""/);
+  assert.match(filterBlock, /r\.reply_preview \?\? ""/);
+});
+
+test("search never makes a Gmail call -- it only filters the already-loaded replies array", () => {
+  const filterBlock = INBOX_PAGE_SOURCE.slice(INBOX_PAGE_SOURCE.indexOf("const filtered = useMemo"), INBOX_PAGE_SOURCE.indexOf("}, [replies, search, campaignFilter]);"));
+  assert.doesNotMatch(filterBlock, /await|fetch\(|getInboxReplyBody/);
 });
 
 test("the reply list scrolls horizontally in its own container rather than corrupting the page on narrow screens", () => {
   assert.match(INBOX_PAGE_SOURCE, /overflow-x-auto/);
-  assert.match(INBOX_PAGE_SOURCE, /min-w-\[1080px\]/);
+  assert.match(INBOX_PAGE_SOURCE, /min-w-\[1380px\]/);
 });
 
 test("row cell padding is tighter than the original px-6/px-8 py-4 pass", () => {
@@ -420,9 +442,14 @@ test("row cell padding is tighter than the original px-6/px-8 py-4 pass", () => 
   assert.match(INBOX_PAGE_SOURCE, /px-3 py-1\.5/);
 });
 
-test("Subject and Campaign are the wider columns; Last reply stays compact", () => {
+test("Subject, Reply, and Campaign are the wider columns; Last reply stays compact", () => {
   const theadBlock = INBOX_PAGE_SOURCE.slice(INBOX_PAGE_SOURCE.indexOf("<thead"), INBOX_PAGE_SOURCE.indexOf("</thead>"));
-  assert.match(theadBlock, /max-w-\[360px\][^>]*>Subject/);
+  assert.match(theadBlock, /max-w-\[300px\][^>]*>Subject/);
+  assert.match(theadBlock, /max-w-\[300px\][^>]*>Reply/);
   assert.match(theadBlock, /w-\[220px\][^>]*>Campaign/);
   assert.match(theadBlock, /w-\[140px\][^>]*>Last reply/);
+});
+
+test("the Reply column never fetches the full reply body -- it only ever reads reply.reply_preview, already present on the list payload", () => {
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /getInboxReplyBody/);
 });

@@ -43,6 +43,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
+from loguru import logger
 
 from app.api.activity import router as activity_router
 from app.api.astro import router as astro_router
@@ -148,6 +149,7 @@ from app.services.mail_campaign_stats_service import MailCampaignStatsService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
+from app.services.mail_reply_preview_backfill import backfill_reply_previews
 from app.services.mail_sending_service import MailSendingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mail_trigger_service import MailTriggerService
@@ -504,6 +506,21 @@ async def lifespan(app: FastAPI):
         mailbox_service=app.state.mailbox_service,
     )
     app.state.mail_reply_detection_service = mail_reply_detection_service
+
+    # Reply-preview one-time backfill (2026-09-18) -- see
+    # mail_reply_preview_backfill.py's own module docstring for why this
+    # runs here (at startup, reusing this process's own already-open
+    # store connections) rather than as a separate script: idempotent,
+    # a no-op once every existing MailReply row has a preview, and a
+    # failure here must never block the app from starting.
+    try:
+        await backfill_reply_previews(
+            reply_store=mail_reply_store,
+            mailbox_store=mailbox_store,
+            mailbox_service=app.state.mailbox_service,
+        )
+    except Exception:
+        logger.exception("Reply-preview backfill failed at startup; continuing without it.")
 
     # Astronomic Mail Phase C (Campaign Execution Worker). Connects Phase
     # A's execution model, B1's OAuth foundation, B2's Gmail sender, and

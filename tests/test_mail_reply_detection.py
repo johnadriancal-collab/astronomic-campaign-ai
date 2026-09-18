@@ -514,11 +514,14 @@ async def test_paused_then_replied_then_hypothetically_resumed_still_blocked(svc
 # =====================================================================
 
 
-def _message(message_id: str, from_addr: str, in_reply_to: str | None = None) -> dict:
+def _message(message_id: str, from_addr: str, in_reply_to: str | None = None, snippet: str | None = None) -> dict:
     headers = [{"name": "From", "value": from_addr}, {"name": "To", "value": "mbx-1@astronomic.com"}]
     if in_reply_to:
         headers.append({"name": "In-Reply-To", "value": in_reply_to})
-    return {"id": message_id, "payload": {"headers": headers}}
+    message: dict = {"id": message_id, "payload": {"headers": headers}}
+    if snippet is not None:
+        message["snippet"] = snippet
+    return message
 
 
 def _thread(thread_id: str, messages: list[dict]) -> dict:
@@ -599,6 +602,49 @@ async def test_reply_from_matching_thread_marks_enrollment_replied(detection_env
     assert updated.status == MailEnrollmentStatus.REPLIED
     reply = await svc.reply_store.get(enrollment.enrollment_id)
     assert reply.gmail_message_id == "m-reply-1"
+
+
+async def test_reply_preview_is_captured_from_the_same_metadata_response_used_to_detect_the_reply(detection_env):
+    """2026-09-18 -- snippet capture reuses the SAME get_thread() call
+    detection already makes; no second Gmail call for the preview."""
+    svc, detector, _mailbox_service, reader = detection_env
+    enrollment = await _enroll(svc)
+    sent1 = await _sent_step1(svc, enrollment)
+    reader.threads[sent1.gmail_thread_id] = _thread(
+        sent1.gmail_thread_id,
+        [
+            _message("m-out-1", "mbx-1@astronomic.com"),
+            _message(
+                "m-reply-1",
+                "lead@example.com",
+                in_reply_to=sent1.rfc_message_id,
+                snippet="got it, thanks. On Thu, Sep 17, 2026 at 12:46 PM &lt;mbx-1@astronomic.com&gt; wrote: Hi there,",
+            ),
+        ],
+    )
+
+    detected = await detector.poll_for_replies(NOW + PACING_STEP)
+
+    assert detected == 1
+    reply = await svc.reply_store.get(enrollment.enrollment_id)
+    assert reply.reply_preview == "got it, thanks."
+    # Exactly one get_thread() call -- no second Gmail request for the preview.
+    assert len(reader.get_thread_calls) == 1
+
+
+async def test_reply_preview_is_none_when_the_message_has_no_snippet(detection_env):
+    svc, detector, _mailbox_service, reader = detection_env
+    enrollment = await _enroll(svc)
+    sent1 = await _sent_step1(svc, enrollment)
+    reader.threads[sent1.gmail_thread_id] = _thread(
+        sent1.gmail_thread_id,
+        [_message("m-out-1", "mbx-1@astronomic.com"), _message("m-reply-1", "lead@example.com", in_reply_to=sent1.rfc_message_id)],
+    )
+
+    await detector.poll_for_replies(NOW + PACING_STEP)
+
+    reply = await svc.reply_store.get(enrollment.enrollment_id)
+    assert reply.reply_preview is None
 
 
 async def test_inbound_from_unrelated_address_is_not_a_reply(detection_env):

@@ -66,3 +66,28 @@ class SQLiteMailReplyStore(MailReplyStore):
         replies = [MailReply.model_validate_json(row["data"]) for row in rows]
         replies.sort(key=lambda r: r.detected_at, reverse=True)
         return replies
+
+    async def set_reply_preview_if_absent(self, enrollment_id: str, reply_preview: str) -> bool:
+        # Re-reads the current row, checks-then-writes the WHOLE blob
+        # back (this table has no per-field columns -- see this file's
+        # own docstring) -- fine at V1 pilot scale/backfill-once usage;
+        # never called from a hot path. See MailReplyStore.
+        # set_reply_preview_if_absent()'s own docstring for the narrow
+        # "only if currently absent" contract this must uphold.
+        async with sqlite_write(self._connection):
+            cursor = await self._connection.execute(
+                "SELECT data FROM mail_replies WHERE enrollment_id = ?", (enrollment_id,)
+            )
+            row = await cursor.fetchone()
+            await cursor.close()
+            if row is None:
+                return False
+            reply = MailReply.model_validate_json(row["data"])
+            if reply.reply_preview:
+                return False
+            updated = reply.model_copy(update={"reply_preview": reply_preview})
+            await self._connection.execute(
+                "UPDATE mail_replies SET data = ? WHERE enrollment_id = ?",
+                (updated.model_dump_json(), enrollment_id),
+            )
+            return True

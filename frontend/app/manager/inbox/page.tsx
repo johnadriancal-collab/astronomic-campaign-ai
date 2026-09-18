@@ -83,7 +83,8 @@ export default function InboxPage() {
         (r.contact_name ?? "").toLowerCase().includes(query) ||
         r.email.toLowerCase().includes(query) ||
         r.campaign_name.toLowerCase().includes(query) ||
-        (r.subject ?? "").toLowerCase().includes(query)
+        (r.subject ?? "").toLowerCase().includes(query) ||
+        (r.reply_preview ?? "").toLowerCase().includes(query)
       );
     });
   }, [replies, search, campaignFilter]);
@@ -160,12 +161,13 @@ export default function InboxPage() {
           ) : (
             <Card>
               <CardContent className="overflow-x-auto p-0">
-                <table className="w-full min-w-[1080px] text-sm">
+                <table className="w-full min-w-[1380px] text-sm">
                   <thead className="border-b border-border bg-secondary/30 text-xs">
                     <tr>
                       <th className="w-[160px] px-3 py-2 text-left font-medium text-muted-foreground">Lead</th>
                       <th className="w-[200px] px-3 py-2 text-left font-medium text-muted-foreground">Email</th>
-                      <th className="max-w-[360px] px-3 py-2 text-left font-medium text-muted-foreground">Subject</th>
+                      <th className="max-w-[300px] px-3 py-2 text-left font-medium text-muted-foreground">Subject</th>
+                      <th className="max-w-[300px] px-3 py-2 text-left font-medium text-muted-foreground">Reply</th>
                       <th className="w-[220px] px-3 py-2 text-left font-medium text-muted-foreground">Campaign</th>
                       <th className="w-[140px] px-3 py-2 text-right font-medium text-muted-foreground">Last reply</th>
                     </tr>
@@ -175,6 +177,7 @@ export default function InboxPage() {
                       const name = reply.contact_name ?? reply.email;
                       const href = `/manager/inbox/${reply.enrollment_id}`;
                       const subject = reply.subject ?? "—";
+                      const replyPreview = reply.reply_preview ?? "—";
                       const exactReplyTime = new Date(reply.replied_at).toLocaleString();
                       return (
                         <tr key={reply.enrollment_id} className="hover:bg-secondary/20">
@@ -192,9 +195,18 @@ export default function InboxPage() {
                               {reply.email}
                             </Link>
                           </td>
-                          <td className="max-w-[360px] p-0">
+                          <td className="max-w-[300px] p-0">
                             <Link href={href} title={subject} className="block truncate whitespace-nowrap px-3 py-1.5 text-muted-foreground">
                               {subject}
+                            </Link>
+                          </td>
+                          <td className="max-w-[300px] p-0">
+                            <Link
+                              href={href}
+                              title={reply.reply_preview ?? undefined}
+                              className="block truncate whitespace-nowrap px-3 py-1.5 text-muted-foreground"
+                            >
+                              {replyPreview}
                             </Link>
                           </td>
                           <td className="w-[220px] max-w-[220px] p-0">

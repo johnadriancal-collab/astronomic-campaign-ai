@@ -1252,6 +1252,7 @@ class MailSendingService:
         gmail_message_id: str,
         reply_email_normalized: str,
         now: datetime,
+        reply_preview: str | None = None,
     ) -> bool:
         """Reply detection V1 (2026-09-15) -- the SUPPRESSED-shaped sibling
         for a reply: moves every not-yet-sent, not-in-flight row
@@ -1264,6 +1265,13 @@ class MailSendingService:
         never touched -- see MailReply's own docstring: "preserve SENT
         history" is not a suggestion, nothing here ever mutates a SENT
         row.
+
+        `reply_preview` (2026-09-18): the caller (MailReplyDetectionService)
+        already derived this from the SAME metadata-scope Gmail response
+        used to detect the reply -- see app/services/mail_reply_preview.py.
+        Optional/None is fully valid (e.g. no snippet, or nothing confident
+        enough was derived) and simply persists as None -- never fabricated
+        here.
 
         IDEMPOTENT, and this is the ACTUAL duplicate-processing guard,
         not a courtesy check: `self.reply_store.create()` is a no-op if
@@ -1285,6 +1293,7 @@ class MailSendingService:
             reply_email_normalized=reply_email_normalized,
             detected_at=now,
             created_at=now,
+            reply_preview=reply_preview,
         )
         created = await self.reply_store.create(reply)
         if not created:

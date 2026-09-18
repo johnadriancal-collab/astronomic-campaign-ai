@@ -429,6 +429,37 @@ async def test_subject_falls_back_from_rendered_subject_to_frozen_subject(stores
     assert view.subject == "Quick hello from Astronomic"
 
 
+async def test_reply_preview_passes_through_from_the_mail_reply_row(stores, service):
+    """2026-09-18 -- a straight passthrough, never recomputed by this view."""
+    await stores["campaign_store"].create(make_campaign())
+    await stores["mailbox_store"].create(make_mailbox())
+    contact = make_contact("c1", "Chris", "Beaman", "chris@galaxysway.com")
+    await stores["contact_store"].create(contact)
+    enrollment = make_enrollment("e1", contact.crm_contact_id, contact.email)
+    await stores["enrollment_store"].create(enrollment)
+    await stores["enrollment_step_store"].create(make_step1(enrollment.enrollment_id, contact.crm_contact_id))
+    await stores["reply_store"].create(
+        make_reply(enrollment.enrollment_id, contact.crm_contact_id, contact.email, reply_preview="got it, thanks.")
+    )
+
+    [view] = await service.list_replies()
+    assert view.reply_preview == "got it, thanks."
+
+
+async def test_reply_preview_is_none_when_the_underlying_reply_has_no_preview(stores, service):
+    await stores["campaign_store"].create(make_campaign())
+    await stores["mailbox_store"].create(make_mailbox())
+    contact = make_contact("c1", "Chris", "Beaman", "chris@galaxysway.com")
+    await stores["contact_store"].create(contact)
+    enrollment = make_enrollment("e1", contact.crm_contact_id, contact.email)
+    await stores["enrollment_store"].create(enrollment)
+    await stores["enrollment_step_store"].create(make_step1(enrollment.enrollment_id, contact.crm_contact_id))
+    await stores["reply_store"].create(make_reply(enrollment.enrollment_id, contact.crm_contact_id, contact.email))
+
+    [view] = await service.list_replies()
+    assert view.reply_preview is None
+
+
 async def test_skipped_step_numbers_reflect_steps_the_reply_actually_skipped(stores, service):
     await stores["campaign_store"].create(make_campaign())
     await stores["mailbox_store"].create(make_mailbox())

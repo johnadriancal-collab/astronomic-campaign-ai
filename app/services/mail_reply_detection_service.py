@@ -14,14 +14,15 @@ gmail_thread_id, no MailReply yet).
 V1 reply definition (deliberately narrow, see the approved design):
 an inbound message in the enrollment's known Gmail thread whose
 normalized `From` address equals exactly `enrollment.email_at_enrollment`
--- nothing else. No body inspection (structurally impossible anyway
-under gmail.metadata), no sentiment classification, no autoresponder/OOO
-distinction (a real, accepted V1 simplification). Excluding our own
-outbound messages and any other sender (a bounce, a CC'd third party, a
-system message) is the SAME positive-match rule in reverse: only a
-message whose `From` equals the enrolled recipient's own address ever
-counts -- never a blocklist of known system/bounce senders, which could
-never enumerate every address it doesn't anticipate.
+-- nothing else decides REPLIED vs not-yet. No FULL body inspection
+(the MIME payload/body genuinely is never returned under gmail.metadata
+format), no sentiment classification, no autoresponder/OOO distinction
+(a real, accepted V1 simplification). Excluding our own outbound
+messages and any other sender (a bounce, a CC'd third party, a system
+message) is the SAME positive-match rule in reverse: only a message
+whose `From` equals the enrolled recipient's own address ever counts --
+never a blocklist of known system/bounce senders, which could never
+enumerate every address it doesn't anticipate.
 
 Resilience: EVERY candidate is processed independently inside its own
 try/except -- one candidate's mailbox needing reauth, or one Gmail read
@@ -32,9 +33,16 @@ a skip as terminal.
 NOT reply-detection's own reply history: MailReply records THAT an
 enrollment replied, once, ever (see that model's own docstring) -- this
 service does not track every message in a thread, does not re-check an
-enrollment once a MailReply exists (excluded from candidates entirely),
-and never inspects a thread's content beyond the one From-address match
-needed to decide REPLIED vs not-yet.
+enrollment once a MailReply exists (excluded from candidates entirely).
+The REPLIED decision itself never uses more than the one From-address
+match. The ONE additional thing this service reads from the same
+already-fetched response (2026-09-18): the qualifying message's own
+`snippet` field -- confirmed present even under gmail.metadata format,
+a separate, top-level field from the MIME body/payload -- fed through
+app/services/mail_reply_preview.py's heuristic to derive a short,
+already-quote-trimmed `reply_preview` for Campaign Manager's Inbox list.
+Zero new Gmail calls, zero new scope; this is not the "body inspection"
+the REPLIED decision itself deliberately avoids.
 """
 
 from datetime import datetime
@@ -45,6 +53,7 @@ from loguru import logger
 from app.google.gmail_thread_reader_client import GmailReadError, GmailThreadReaderClient, extract_headers
 from app.google.oauth_client import GoogleRefreshTokenInvalidError, GoogleTokenRefreshError
 from app.models.crm import normalize_email
+from app.services.mail_reply_preview import derive_reply_preview
 from app.services.mail_sending_service import MailSendingService, ReplyPollCandidate
 from app.services.mailbox_service import MailboxCredentialMissingError, MailboxNotFound, MailboxService
 
@@ -136,6 +145,18 @@ class MailReplyDetectionService:
         if reply_message is None:
             return False
 
+        # 2026-09-18 -- derived from the SAME metadata-scope get_thread()
+        # response already fetched above; zero new Gmail calls, zero new
+        # scope. See mail_reply_preview.py's own docstring for why
+        # Gmail's `snippet` field is usable here despite this module's
+        # own (accurate, for the full body) claim that gmail.metadata
+        # can't return body content -- `snippet` is a separate, top-
+        # level Message-resource field, confirmed present under metadata
+        # format on this app's real production replies.
+        reply_preview = derive_reply_preview(
+            reply_message.get("snippet"), mailbox.email if mailbox is not None else None
+        )
+
         return await self.sending_service.mark_enrollment_replied(
             candidate.enrollment,
             mailbox_id=candidate.mailbox_id,
@@ -143,4 +164,5 @@ class MailReplyDetectionService:
             gmail_message_id=reply_message.get("id", ""),
             reply_email_normalized=expected_from_normalized,
             now=now,
+            reply_preview=reply_preview,
         )

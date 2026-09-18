@@ -126,6 +126,7 @@ class MailInboxService:
             mailbox_id=reply.mailbox_id,
             mailbox_email=mailbox.email if mailbox is not None else None,
             subject=subject,
+            reply_preview=reply.reply_preview,
             replied_at=reply.detected_at,
             gmail_thread_id=reply.gmail_thread_id,
             gmail_message_id=reply.gmail_message_id,

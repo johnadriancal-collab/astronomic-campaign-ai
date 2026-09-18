@@ -1052,6 +1052,21 @@ class MailReply(BaseModel):
     MailReplyDetectionService's matching rule), kept here anyway as a
     durable, self-contained audit fact that doesn't require re-deriving
     from the enrollment row to inspect later.
+
+    `reply_preview` (2026-09-18, Inbox "Reply" column) is the ONE
+    deliberate exception to "never mutated after creation" above: a
+    short (<=200 char), derived, plain-text preview of the reply's NEW
+    content ONLY -- see app/services/mail_reply_preview.py's own
+    docstring for the heuristic -- set either at creation time (a
+    future reply, from the SAME metadata-scope Gmail call detection
+    already makes) or once, later, by the one-time startup backfill (see
+    app/services/mail_reply_preview_backfill.py) for a reply that
+    predates this field. Every other field on this row is still exactly
+    what it was at detection time, forever -- this one is allowed to go
+    from None to a real value, and ONLY in that direction (never
+    recomputed/overwritten once set -- see MailReplyStore.
+    set_reply_preview_if_absent()'s own docstring). Never the full reply
+    body, never the quoted prior message, never raw HTML.
     """
 
     enrollment_id: str
@@ -1063,6 +1078,7 @@ class MailReply(BaseModel):
     reply_email_normalized: str
     detected_at: datetime
     created_at: datetime
+    reply_preview: str | None = None
 
 
 class MailInboxReplyView(BaseModel):
@@ -1070,21 +1086,26 @@ class MailInboxReplyView(BaseModel):
     MailReply, unified across every Astronomic Mail campaign. Composed
     entirely from existing data (MailReply + MailEnrollment + MailCampaign
     + CrmContact + Mailbox + the replied enrollment's Step 1
-    MailEnrollmentStep) -- no new reply state, no message body/snippet
-    (see MailReply's own docstring: this system has never had access to
-    reply body content under the gmail.metadata scope it holds today, and
-    this view does not change that). `contact_name`/`mailbox_email` are
-    None on a best-effort lookup miss (a deleted Contact or mailbox must
-    never break the Inbox), matching MailExecutionStepView's precedent.
-    `subject` is the Step 1 row's `rendered_subject` (the exact line
-    actually transmitted) falling back to its frozen `subject` for a row
-    that predates rendered_subject, or None if even Step 1's row is
-    somehow missing. `skipped_step_numbers` lists every step number this
-    reply caused MailSendingService.mark_enrollment_replied() to skip --
-    empty for a reply on the campaign's final step. Still returned for an
-    archived/paused/completed campaign -- the Inbox is historical, a
-    reply never disappears just because its campaign later changed
-    lifecycle state."""
+    MailEnrollmentStep) -- no new reply state, no FULL message body (this
+    system has never fetched/exposed the full reply body from the Inbox
+    LIST -- that remains exclusively the dedicated detail page's on-
+    demand, one-call-per-open job; see MailInboxReplyBody). `contact_name`/
+    `mailbox_email` are None on a best-effort lookup miss (a deleted
+    Contact or mailbox must never break the Inbox), matching
+    MailExecutionStepView's precedent. `subject` is the Step 1 row's
+    `rendered_subject` (the exact line actually transmitted) falling back
+    to its frozen `subject` for a row that predates rendered_subject, or
+    None if even Step 1's row is somehow missing. `reply_preview` (2026-
+    09-18) is a straight passthrough of MailReply.reply_preview -- see
+    that field's own docstring; a short, already-quote-trimmed excerpt of
+    the reply's NEW content only, never the full body, never persisted or
+    computed by THIS view (it's already sitting on the MailReply row by
+    the time this runs). `skipped_step_numbers` lists every step number
+    this reply caused MailSendingService.mark_enrollment_replied() to
+    skip -- empty for a reply on the campaign's final step. Still
+    returned for an archived/paused/completed campaign -- the Inbox is
+    historical, a reply never disappears just because its campaign later
+    changed lifecycle state."""
 
     enrollment_id: str
     mail_campaign_id: str
@@ -1096,6 +1117,7 @@ class MailInboxReplyView(BaseModel):
     mailbox_id: str
     mailbox_email: str | None
     subject: str | None
+    reply_preview: str | None
     replied_at: datetime
     gmail_thread_id: str
     gmail_message_id: str

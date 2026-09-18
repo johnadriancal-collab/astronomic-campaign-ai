@@ -1412,6 +1412,12 @@ export interface MailInboxReplyView {
   mailbox_id: string;
   mailbox_email: string | null;
   subject: string | null;
+  // 2026-09-18 -- a short (<=200 char), already-quote-trimmed preview of
+  // the reply's NEW content only, derived from Gmail's own metadata-
+  // scope response (see app/services/mail_reply_preview.py) -- never
+  // the full message, never the quoted prior text. null if no preview
+  // could be confidently derived.
+  reply_preview: string | null;
   replied_at: string;
   gmail_thread_id: string;
   gmail_message_id: string;
