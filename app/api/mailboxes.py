@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import RedirectResponse
 
 from app.config import settings
-from app.dependencies import get_mailbox_service
+from app.dependencies import get_mailbox_metrics_service, get_mailbox_service
 from app.google.oauth_client import (
     GoogleOAuthNotConfiguredError,
     GoogleRefreshTokenInvalidError,
@@ -44,6 +44,7 @@ from app.google.gmail_thread_reader_client import (
 )
 from app.models.mailbox import Mailbox, MailboxListItem
 from app.services.mailbox_authorization_health import compute_authorization_health
+from app.services.mailbox_metrics_service import MailboxMetricsService
 from app.services.mailbox_service import (
     MailboxCredentialMissingError,
     MailboxNotFound,
@@ -67,16 +68,23 @@ def _frontend_url(path: str) -> str:
 
 
 @router.get("", response_model=list[MailboxListItem])
-async def list_mailboxes(service: MailboxService = Depends(get_mailbox_service)):
+async def list_mailboxes(
+    service: MailboxService = Depends(get_mailbox_service),
+    metrics_service: MailboxMetricsService = Depends(get_mailbox_metrics_service),
+):
     """Every field on the underlying Mailbox row, plus the derived
     authorization-health fields (see MailboxListItem's own docstring and
-    app/services/mailbox_authorization_health.py) -- computed fresh on
-    every call, never cached or persisted."""
+    app/services/mailbox_authorization_health.py) and the real
+    campaigns_count/emails_sent_today/queue_count metrics (see
+    MailboxMetricsService's own module docstring) -- all computed fresh
+    on every call, never cached or persisted."""
     mailboxes = await service.list_mailboxes()
     now = datetime.now(timezone.utc)
+    metrics_by_mailbox = await metrics_service.compute_for_mailboxes([m.mailbox_id for m in mailboxes], now)
     items = []
     for mailbox in mailboxes:
         health = compute_authorization_health(mailbox, now)
+        metrics = metrics_by_mailbox[mailbox.mailbox_id]
         items.append(
             MailboxListItem(
                 **mailbox.model_dump(),
@@ -85,6 +93,9 @@ async def list_mailboxes(service: MailboxService = Depends(get_mailbox_service))
                 authorized_at_is_estimated=health.authorized_at_is_estimated,
                 authorized_age_seconds=health.age_seconds,
                 estimated_expires_at=health.estimated_expires_at,
+                campaigns_count=metrics.campaigns_count,
+                emails_sent_today=metrics.emails_sent_today,
+                queue_count=metrics.queue_count,
             )
         )
     return items

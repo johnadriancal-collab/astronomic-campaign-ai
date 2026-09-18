@@ -214,3 +214,11 @@ class MailboxListItem(Mailbox):
     # mailbox_authorization_health.OAUTH_TESTING_MODE_EXPIRY_ENABLED) or
     # for a disconnected mailbox.
     estimated_expires_at: datetime | None
+    # Real per-mailbox metrics (2026-09-18) -- see
+    # app/services/mailbox_metrics_service.py's own module docstring.
+    # No deliverability field here: zero real signal exists anywhere in
+    # this codebase for Astronomic Mail, so the frontend keeps showing
+    # "Not available" rather than this model carrying a fabricated score.
+    campaigns_count: int
+    emails_sent_today: int
+    queue_count: int

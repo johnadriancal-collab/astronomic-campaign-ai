@@ -17,10 +17,15 @@ from loguru import logger as loguru_logger
 
 from app.api.mailboxes import router as mailboxes_router
 from app.config import settings
-from app.dependencies import get_mailbox_service
+from app.dependencies import get_mailbox_metrics_service, get_mailbox_service
+from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
+from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
+from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mailbox_credential_store import MemoryMailboxCredentialStore
 from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services import token_encryption
+from app.services.mailbox_metrics_service import MailboxMetricsService
 from app.services.mailbox_service import MailboxService
 from tests.test_mailbox_service import FakeGoogleOAuthClient
 
@@ -46,10 +51,21 @@ def mailbox_service(oauth_client):
 
 
 @pytest.fixture
-def client(mailbox_service):
+def mailbox_metrics_service():
+    return MailboxMetricsService(
+        campaign_store=MemoryMailCampaignStore(),
+        channel_store=MemoryMailCampaignMailboxStore(),
+        enrollment_store=MemoryMailEnrollmentStore(),
+        enrollment_step_store=MemoryMailEnrollmentStepStore(),
+    )
+
+
+@pytest.fixture
+def client(mailbox_service, mailbox_metrics_service):
     app = FastAPI()
     app.include_router(mailboxes_router)
     app.dependency_overrides[get_mailbox_service] = lambda: mailbox_service
+    app.dependency_overrides[get_mailbox_metrics_service] = lambda: mailbox_metrics_service
     with TestClient(app) as c:
         yield c
 

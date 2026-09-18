@@ -260,11 +260,13 @@ function EmailsPageContent() {
                       </Badge>
                     </td>
                     <td className="whitespace-nowrap px-3 py-1.5 text-muted-foreground" title={DELIVERABILITY_TOOLTIP}>
-                      —
+                      Not available
                     </td>
-                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">0</td>
-                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">{formatSendUsage(0, null)}</td>
-                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">0</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">{mailbox.campaigns_count}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">
+                      {formatSendUsage(mailbox.emails_sent_today, null)}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">{mailbox.queue_count}</td>
                     <td className="whitespace-nowrap px-3 py-1.5">
                       <span
                         className={cn(

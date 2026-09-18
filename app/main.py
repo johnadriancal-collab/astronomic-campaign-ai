@@ -145,6 +145,7 @@ from app.services.mail_batch_reconciliation_worker import MailBatchReconciliatio
 from app.services.mail_execution_worker import MailExecutionWorker
 from app.services.mail_campaign_list_service import MailCampaignListService
 from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
+from app.services.mailbox_metrics_service import MailboxMetricsService
 from app.services.mail_campaign_stats_service import MailCampaignStatsService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
@@ -495,6 +496,19 @@ async def lifespan(app: FastAPI):
         campaign_store=mail_campaign_store,
         enrollment_store=mail_enrollment_store,
         suppression_store=mail_suppression_store,
+    )
+
+    # Emails page mailbox metrics (2026-09-18) -- real Campaigns/Emails
+    # Sent Today/Queue counts per mailbox, replacing hardcoded
+    # placeholders. Read-only, no new persistence. See
+    # MailboxMetricsService's own module docstring, in particular
+    # _attribute_queue_step() for exactly which Queue steps count
+    # against which mailbox and why.
+    app.state.mailbox_metrics_service = MailboxMetricsService(
+        campaign_store=mail_campaign_store,
+        channel_store=mail_campaign_mailbox_store,
+        enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
     )
 
     # Reply Detection V1 (2026-09-15). Read-only, gmail.metadata-scoped

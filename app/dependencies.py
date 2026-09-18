@@ -37,6 +37,7 @@ from app.services.mail_campaign_service import MailCampaignService
 from app.services.mail_campaign_list_service import MailCampaignListService
 from app.services.mail_campaign_mailbox_next_send_service import MailCampaignMailboxNextSendService
 from app.services.mail_campaign_stats_service import MailCampaignStatsService
+from app.services.mailbox_metrics_service import MailboxMetricsService
 from app.services.mail_inbox_service import MailInboxService
 from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_sending_service import MailSendingService
@@ -120,6 +121,10 @@ async def get_mail_campaign_mailbox_next_send_service(request: Request) -> MailC
 
 async def get_mail_campaign_stats_service(request: Request) -> MailCampaignStatsService:
     return request.app.state.mail_campaign_stats_service
+
+
+async def get_mailbox_metrics_service(request: Request) -> MailboxMetricsService:
+    return request.app.state.mailbox_metrics_service
 
 
 async def get_mail_sending_service(request: Request) -> MailSendingService:

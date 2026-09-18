@@ -1949,6 +1949,14 @@ export interface Mailbox {
   // null when the Testing-mode 7-day assumption is disabled on the
   // backend, or for a disconnected mailbox.
   estimated_expires_at: string | null;
+  // Real per-mailbox metrics (2026-09-18, see MailboxMetricsService) --
+  // computed fresh by the backend on every GET /mailboxes call, never
+  // hardcoded placeholders. No deliverability field: zero real signal
+  // exists anywhere for Astronomic Mail, so the Emails page keeps
+  // showing "Not available" for that column instead.
+  campaigns_count: number;
+  emails_sent_today: number;
+  queue_count: number;
 }
 
 export function listMailboxes(): Promise<Mailbox[]> {

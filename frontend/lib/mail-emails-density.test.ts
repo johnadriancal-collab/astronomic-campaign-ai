@@ -83,3 +83,29 @@ test("search and Connect Email remain wired exactly as before", () => {
   assert.match(PAGE_SOURCE, /filterMailboxes\(mailboxes, query\)/);
   assert.match(PAGE_SOURCE, /Connect Email/);
 });
+
+// Real mailbox metrics (2026-09-18, see MailboxMetricsService) -- the
+// Campaigns/Emails Sent Today/Queue cells read live per-mailbox fields
+// instead of the old hardcoded <td>0</td> placeholders, and the
+// Deliverability Index cell shows an honest "Not available" instead of a
+// bare dash, since no real deliverability signal exists anywhere in this
+// codebase for Astronomic Mail (see lib/mailboxes.ts's
+// DELIVERABILITY_TOOLTIP).
+
+test("the Campaigns and Queue cells read the mailbox's own real counts, never a hardcoded 0", () => {
+  assert.match(PAGE_SOURCE, /\{mailbox\.campaigns_count\}/);
+  assert.match(PAGE_SOURCE, /\{mailbox\.queue_count\}/);
+  assert.doesNotMatch(PAGE_SOURCE, /<td className="whitespace-nowrap px-3 py-1\.5 text-right text-muted-foreground">0<\/td>/);
+});
+
+test("the Emails Sent Today cell formats the mailbox's own real sent-today count, never a hardcoded 0", () => {
+  assert.match(PAGE_SOURCE, /formatSendUsage\(mailbox\.emails_sent_today, null\)/);
+  assert.doesNotMatch(PAGE_SOURCE, /formatSendUsage\(0, null\)/);
+});
+
+test("the Deliverability Index cell shows an honest unavailable state, never a fabricated score", () => {
+  const cellIndex = PAGE_SOURCE.indexOf("title={DELIVERABILITY_TOOLTIP}");
+  assert.ok(cellIndex !== -1, "expected a Deliverability Index cell with title={DELIVERABILITY_TOOLTIP}");
+  const cellBlock = PAGE_SOURCE.slice(cellIndex, cellIndex + 100);
+  assert.match(cellBlock, /Not available/);
+});

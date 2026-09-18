@@ -84,6 +84,9 @@ function makeMailbox(overrides: Partial<Mailbox> = {}): Mailbox {
     authorized_at_is_estimated: false,
     authorized_age_seconds: 3600,
     estimated_expires_at: "2026-08-26T00:00:00Z",
+    campaigns_count: 0,
+    emails_sent_today: 0,
+    queue_count: 0,
     ...overrides,
   };
 }
