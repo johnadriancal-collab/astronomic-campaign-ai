@@ -58,6 +58,23 @@ const ERROR_MESSAGES: Record<string, string> = {
   reconnect_needs_retry: "Google didn't return the confirmation needed to renew this inbox -- please try again.",
 };
 
+// Density pass (2026-09-18) -- same table-standard as the Campaigns list
+// page: identity/context columns (Name, Email, Authorization) get real
+// width; small numeric/compact columns are pinned narrow so they never
+// steal space from those. Keyed by EMAIL_ACCOUNT_TABLE_COLUMNS' own
+// labels so header and body width stay in lockstep without duplicating
+// the column list itself.
+const COLUMN_WIDTH_CLASS: Record<string, string> = {
+  Name: "w-[170px]",
+  Email: "w-[210px]",
+  TLD: "w-[56px]",
+  Provider: "w-[120px]",
+  "Deliverability Index": "w-[70px]",
+  Campaigns: "w-[74px]",
+  "Emails Sent Today": "w-[92px]",
+  Queue: "w-[60px]",
+};
+
 // useSearchParams() requires a Suspense boundary above it -- this wrapper
 // is the only reason EmailsPageContent isn't the default export directly.
 export default function EmailsPage() {
@@ -202,46 +219,53 @@ function EmailsPageContent() {
 
       {!error && mailboxes !== null && hasAnyMailboxes && filtered.length > 0 && (
         <div className="overflow-x-auto rounded-xl border border-border/60">
-          <table className="w-full text-sm">
+          <table className="w-full min-w-[1180px] text-sm">
             <thead className="bg-secondary/40 text-xs text-muted-foreground">
               <tr>
                 {EMAIL_ACCOUNT_TABLE_COLUMNS.map((column) => (
                   <th
                     key={column}
                     className={cn(
-                      "px-3 py-2 text-left font-medium",
+                      "whitespace-nowrap px-3 py-2 text-left font-medium",
+                      COLUMN_WIDTH_CLASS[column],
                       ["Campaigns", "Emails Sent Today", "Queue"].includes(column) && "text-right"
                     )}
                   >
                     {column}
                   </th>
                 ))}
-                <th className="px-3 py-2 text-right font-medium">Status</th>
-                <th className="px-3 py-2 text-left font-medium">Authorization</th>
-                <th className="px-3 py-2 text-right font-medium">Gmail Sending</th>
+                <th className="whitespace-nowrap px-3 py-2 text-left font-medium">Status</th>
+                <th className="w-[230px] whitespace-nowrap px-3 py-2 text-left font-medium">Authorization</th>
+                <th className="w-[160px] whitespace-nowrap px-3 py-2 text-left font-medium">Gmail Sending</th>
                 <th className="px-3 py-2" />
               </tr>
             </thead>
             <tbody className="divide-y divide-border/60">
               {filtered.map((mailbox) => {
                 const tld = deriveTld(mailbox.email);
+                const name = mailboxDisplayName(mailbox);
+                const atRisk = mailbox.authorization_health === "reconnect_soon" || mailbox.authorization_health === "needs_reauth";
                 return (
                   <tr key={mailbox.mailbox_id} className="hover:bg-secondary/30">
-                    <td className="px-3 py-2.5 font-medium">{mailboxDisplayName(mailbox)}</td>
-                    <td className="px-3 py-2.5 text-muted-foreground">{mailbox.email}</td>
-                    <td className="px-3 py-2.5 text-muted-foreground">{tld ?? "—"}</td>
-                    <td className="px-3 py-2.5">
+                    <td className="max-w-[170px] truncate whitespace-nowrap px-3 py-1.5 font-medium" title={name}>
+                      {name}
+                    </td>
+                    <td className="max-w-[210px] truncate whitespace-nowrap px-3 py-1.5 text-muted-foreground" title={mailbox.email}>
+                      {mailbox.email}
+                    </td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-muted-foreground">{tld ?? "—"}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5">
                       <Badge variant="outline" className="rounded-full font-normal text-muted-foreground">
                         {providerLabel(mailbox.provider)}
                       </Badge>
                     </td>
-                    <td className="px-3 py-2.5 text-muted-foreground" title={DELIVERABILITY_TOOLTIP}>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-muted-foreground" title={DELIVERABILITY_TOOLTIP}>
                       —
                     </td>
-                    <td className="px-3 py-2.5 text-right text-muted-foreground">0</td>
-                    <td className="px-3 py-2.5 text-right text-muted-foreground">{formatSendUsage(0, null)}</td>
-                    <td className="px-3 py-2.5 text-right text-muted-foreground">0</td>
-                    <td className="px-3 py-2.5 text-right">
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">0</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">{formatSendUsage(0, null)}</td>
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground">0</td>
+                    <td className="whitespace-nowrap px-3 py-1.5">
                       <span
                         className={cn(
                           "rounded-full px-2 py-0.5 text-xs font-medium",
@@ -251,12 +275,12 @@ function EmailsPageContent() {
                         {mailboxStatusLabel(mailbox.status)}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5">
+                    <td className="px-3 py-1.5">
                       {mailbox.authorization_health === null ? (
                         <span className="text-muted-foreground">—</span>
                       ) : (
-                        <div className="flex flex-col gap-1">
-                          <div className="flex items-center gap-2">
+                        <div className="flex flex-col gap-0.5">
+                          <div className="flex items-center gap-1.5 whitespace-nowrap">
                             <span
                               className={cn(
                                 "rounded-full px-2 py-0.5 text-xs font-medium",
@@ -265,8 +289,11 @@ function EmailsPageContent() {
                             >
                               {mailboxAuthorizationHealthLabel(mailbox.authorization_health)}
                             </span>
-                            {(mailbox.authorization_health === "reconnect_soon" ||
-                              mailbox.authorization_health === "needs_reauth") && (
+                            <span className="text-xs text-muted-foreground">
+                              {formatAuthorizationAge(mailbox.authorized_age_seconds)}
+                              {mailbox.authorized_at_is_estimated ? " (est.)" : ""}
+                            </span>
+                            {atRisk && (
                               <Button
                                 type="button"
                                 variant="outline"
@@ -278,43 +305,54 @@ function EmailsPageContent() {
                               </Button>
                             )}
                           </div>
-                          <span className="text-xs text-muted-foreground">
-                            Last authorized {formatAuthorizationAge(mailbox.authorized_age_seconds)}
-                            {mailbox.authorized_at_is_estimated ? " (estimated)" : ""}
-                          </span>
                           {mailbox.authorization_health !== "connected" && (
-                            <span className="text-xs text-amber-700">
+                            <span className="whitespace-nowrap text-xs text-amber-700">
                               {estimatedExpiryLabel(mailbox.estimated_expires_at)}
                             </span>
                           )}
                         </div>
                       )}
                     </td>
-                    <td className="px-3 py-2.5 text-right">
+                    <td className="whitespace-nowrap px-3 py-1.5">
                       {(() => {
                         const upgradeState = gmailSendUpgradeState(mailbox);
                         if (upgradeState === "enabled") {
                           return (
-                            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700">
+                            <span
+                              className="inline-flex items-center gap-1 text-xs font-medium text-emerald-700"
+                              title="Gmail sending enabled"
+                            >
                               <CheckCircle2 className="h-3.5 w-3.5" />
-                              Gmail sending enabled
+                              Enabled
                             </span>
                           );
                         }
                         if (upgradeState === "needs_reconnect") {
                           return (
-                            <span className="text-xs text-muted-foreground">Reconnect this inbox to enable Gmail sending</span>
+                            <span
+                              className="text-xs text-muted-foreground"
+                              title="Reconnect this inbox to enable Gmail sending"
+                            >
+                              Reconnect needed
+                            </span>
                           );
                         }
                         return (
-                          <Button type="button" variant="outline" size="sm" className="gap-1.5" onClick={() => setUpgradeTarget(mailbox)}>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 gap-1.5 px-2 text-xs"
+                            title="Enable Gmail sending for this inbox"
+                            onClick={() => setUpgradeTarget(mailbox)}
+                          >
                             <Send className="h-3.5 w-3.5" />
-                            Enable Gmail sending
+                            Enable sending
                           </Button>
                         );
                       })()}
                     </td>
-                    <td className="px-3 py-2.5 text-right">
+                    <td className="whitespace-nowrap px-3 py-1.5 text-right">
                       {mailbox.status !== "disconnected" && (
                         <Button
                           type="button"
