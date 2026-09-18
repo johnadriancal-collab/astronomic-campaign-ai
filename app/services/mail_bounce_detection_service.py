@@ -262,7 +262,11 @@ class MailBounceDetectionService:
         created = await self.bounce_store.create(bounce)
         if created:
             logger.info(
-                f"Bounce-poll: recorded a {bounce.bounce_type.value} bounce for campaign {step.mail_campaign_id}, "
-                f"enrollment {step.enrollment_id} (mailbox {mailbox_id})."
+                f"Bounce-poll: recorded a {bounce.bounce_type.value} bounce -- "
+                f"gmail_message_id={bounce.gmail_message_id} mailbox_id={bounce.mailbox_id} "
+                f"campaign_id={bounce.mail_campaign_id} enrollment_id={bounce.enrollment_id} "
+                f"enrollment_step_id={bounce.enrollment_step_id} original_message_id={bounce.original_message_id} "
+                f"recipient_email={bounce.recipient_email} action={bounce.action} status_code={bounce.status_code} "
+                f"diagnostic_code={bounce.diagnostic_code} bounced_at={bounce.bounced_at.isoformat()}."
             )
         return created
