@@ -4,6 +4,13 @@
 
 import type { MailCampaignStatus, MailEnrollmentStatus, MailExecutionStepStatus, MailSuppressionReason } from "@/lib/api";
 
+// 2026-09-18 -- same "no fabricated engagement metric" stance as
+// frontend/lib/mailboxes.ts's DELIVERABILITY_TOOLTIP: zero open-tracking
+// signal exists anywhere for Astronomic Mail (see MailCampaignStats's own
+// backend docstring), so the Campaigns list's Open rate column always
+// renders this static copy instead of a real value.
+export const OPEN_RATE_TOOLTIP = "Open tracking not available yet.";
+
 export const MAIL_CAMPAIGN_STATUS_OPTIONS: { value: MailCampaignStatus; label: string }[] = [
   { value: "draft", label: "Draft" },
   { value: "ready", label: "Ready" },

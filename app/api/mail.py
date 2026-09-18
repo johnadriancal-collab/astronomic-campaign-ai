@@ -160,7 +160,6 @@ async def list_campaigns(service: MailCampaignService = Depends(get_mail_campaig
 async def list_campaigns_wide(
     q: str | None = None,
     status: str | None = None,
-    mailbox_email: str | None = None,
     sort_by: str = "updated_at",
     sort_dir: str = "desc",
     page: int = 1,
@@ -172,14 +171,14 @@ async def list_campaigns_wide(
     exactly as it was: the full, unpaginated list[MailCampaign], relied
     on by existing callers). See MailCampaignListService's own module
     docstring for exactly what's aggregated in. `sort_by` is one of
-    "name" | "status" | "total_leads" | "replied" | "progress" |
-    "updated_at" (default, newest first). `mailbox_email` matches a
-    campaign's first selected channel mailbox only (see
-    MailCampaignListItem's own docstring)."""
+    "name" | "status" | "available" | "total_leads" | "reply_rate" |
+    "replied" | "progress" | "created_at" | "updated_at" (default,
+    newest first). No `mailbox_email` filter any more (2026-09-18) --
+    Mailbox was dropped from this read model entirely; see
+    MailCampaignListItem's own docstring."""
     return await service.list_campaigns(
         q=q,
         status=status,
-        mailbox_email=mailbox_email,
         sort_by=sort_by,
         sort_dir=sort_dir,
         page=page,

@@ -2,14 +2,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-// Source-level regression coverage for Campaign Manager Campaigns V1
-// (2026-09-17) -- same source-inspection pattern as mail-leads.test.ts,
+// Source-level regression coverage for Campaign Manager Campaigns
+// (V1 2026-09-17, QuickMail-style column/progress redefinition
+// 2026-09-18) -- same source-inspection pattern as mail-leads.test.ts,
 // since this project has no DOM render harness (see package.json's test
-// script). Real aggregation logic (workload counts, progress calc,
+// script). Real aggregation logic (available/progress/reply-rate calc,
 // search/filter/sort/pagination) is unit-tested directly against
 // MailCampaignListService in tests/test_mail_campaign_list_service.py;
 // these tests verify the frontend actually wires that data in as a wide
-// table -- never side-by-side cards -- and never fabricates a metric.
+// table -- never side-by-side cards, never Mailbox/Sent columns any
+// more -- and never fabricates a metric (Open rate stays a static
+// "not tracked" cell, never a real-looking number).
 
 const LIST_PAGE_SOURCE = readFileSync(new URL("../app/manager/campaigns/page.tsx", import.meta.url), "utf-8");
 const API_SOURCE = readFileSync(new URL("./api.ts", import.meta.url), "utf-8");
@@ -30,6 +33,11 @@ test("the Campaigns page renders campaigns as table rows, not a side-by-side car
   assert.doesNotMatch(LIST_PAGE_SOURCE, /grid gap-4 sm:grid-cols-2/);
 });
 
+test("the total-campaigns label is compact QuickMail-style text, using the real dynamic total", () => {
+  assert.match(LIST_PAGE_SOURCE, /Total campaigns: \{total\}/);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /Campaigns \(\{total\}\)/);
+});
+
 test("the Campaigns page sends search and status filter to the backend", () => {
   assert.match(LIST_PAGE_SOURCE, /q: search\.trim\(\)/);
   assert.match(LIST_PAGE_SOURCE, /status: statusFilter/);
@@ -41,11 +49,15 @@ test("the Campaigns page sends sort_by/sort_dir and defaults to updated_at, newe
   assert.match(LIST_PAGE_SOURCE, /sortBy,\s*\n\s*sortDir,/);
 });
 
-test("the Campaigns page allows sorting by name, leads, replied, and progress via clickable headers", () => {
+test("the Campaigns page allows sorting by every column the spec calls sortable", () => {
   assert.match(LIST_PAGE_SOURCE, /column="name"/);
+  assert.match(LIST_PAGE_SOURCE, /column="status"/);
+  assert.match(LIST_PAGE_SOURCE, /column="available"/);
   assert.match(LIST_PAGE_SOURCE, /column="total_leads"/);
-  assert.match(LIST_PAGE_SOURCE, /column="replied"/);
   assert.match(LIST_PAGE_SOURCE, /column="progress"/);
+  assert.match(LIST_PAGE_SOURCE, /column="reply_rate"/);
+  assert.match(LIST_PAGE_SOURCE, /column="replied"/);
+  assert.match(LIST_PAGE_SOURCE, /column="created_at"/);
   assert.match(LIST_PAGE_SOURCE, /column="updated_at"/);
   assert.match(LIST_PAGE_SOURCE, /function handleSort/);
 });
@@ -78,13 +90,73 @@ test("the Campaigns page reuses the real mailCampaignStatus label/badge helpers,
   assert.match(LIST_PAGE_SOURCE, /mailCampaignStatusBadgeClass/);
 });
 
-test("the Campaigns page never renders fabricated engagement metrics like opens/clicks/reply rate", () => {
-  assert.doesNotMatch(LIST_PAGE_SOURCE, /open_rate|click_rate|opens|clicks|reply_rate|replyRate/i);
+test("Mailbox and Sent columns are gone -- Mailbox is a Channels-tab concept now, Sent is superseded by Available/Progress", () => {
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /mailbox_email|mailbox_count|mailbox_id/);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, />Mailbox</);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /campaign\.sent\b/);
+});
+
+test("there is no separate Leads column -- Total is the only lead-count column, using total_leads", () => {
+  assert.doesNotMatch(LIST_PAGE_SOURCE, />Leads</);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /label="Leads"/);
+  assert.match(LIST_PAGE_SOURCE, /label="Total"/);
+  assert.match(LIST_PAGE_SOURCE, /campaign\.total_leads/);
+});
+
+test("Available renders the campaign's own real available_leads field", () => {
+  assert.match(LIST_PAGE_SOURCE, /label="Available"/);
+  assert.match(LIST_PAGE_SOURCE, /campaign\.available_leads/);
+});
+
+test("Open rate is a static unsupported-state cell, never a real-looking percentage or a fabricated 0%", () => {
+  const cellIndex = LIST_PAGE_SOURCE.indexOf("title={OPEN_RATE_TOOLTIP}");
+  assert.ok(cellIndex !== -1, "expected an Open rate cell with title={OPEN_RATE_TOOLTIP}");
+  const cellBlock = LIST_PAGE_SOURCE.slice(cellIndex, cellIndex + 120);
+  assert.match(cellBlock, /—/);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /open_rate/);
+});
+
+test("Reply rate renders the campaign's own real reply_rate_percent field", () => {
+  assert.match(LIST_PAGE_SOURCE, /label="Reply rate"/);
+  assert.match(LIST_PAGE_SOURCE, /campaign\.reply_rate_percent/);
+});
+
+test("Campaign created renders the campaign's own real created_at as a compact date, distinct from Last updated", () => {
+  assert.match(LIST_PAGE_SOURCE, /label="Campaign created"/);
+  assert.match(LIST_PAGE_SOURCE, /function formatDate\(/);
+  assert.match(LIST_PAGE_SOURCE, /formatDate\(campaign\.created_at\)/);
+  assert.match(LIST_PAGE_SOURCE, /formatDateTime\(campaign\.updated_at\)/);
 });
 
 test("Create Campaign stays prominent on the Campaigns page", () => {
   assert.match(LIST_PAGE_SOURCE, /href="\/manager\/campaigns\/new"/);
   assert.match(LIST_PAGE_SOURCE, /Create Campaign/);
+});
+
+// --- Column order (the exact spec) ------------------------------------------
+
+test("the header row renders columns in the exact required order", () => {
+  // Sortable headers are rendered via <SortHeader label="X" .../> (no
+  // literal ">X<" text node); the rest (Open rate/Suppressed/Failed/
+  // Steps) are plain static <th> text, but JSX formatting puts
+  // whitespace/newlines between the ">" and the label. Locate each by
+  // whichever marker actually appears, tolerating that whitespace, and
+  // confirm their positions are in the exact required order.
+  const sortableLabels = new Set(["Status", "Campaign", "Available", "Total", "Progress", "Reply rate", "Replied", "Campaign created", "Last updated"]);
+  const order = ["Status", "Campaign", "Available", "Total", "Progress", "Open rate", "Reply rate", "Replied", "Suppressed", "Failed", "Steps", "Campaign created", "Last updated"];
+  const headSection = LIST_PAGE_SOURCE.slice(LIST_PAGE_SOURCE.indexOf("<thead"), LIST_PAGE_SOURCE.indexOf("</thead>"));
+  const indices = order.map((label) => {
+    if (sortableLabels.has(label)) {
+      const idx = headSection.indexOf(`label="${label}"`);
+      assert.ok(idx !== -1, `expected a sortable header for "${label}"`);
+      return idx;
+    }
+    const match = headSection.match(new RegExp(`>\\s*${label}\\s*<`));
+    assert.ok(match, `expected a static header for "${label}"`);
+    return match.index;
+  });
+  const sorted = [...indices].sort((a, b) => a - b);
+  assert.deepEqual(indices, sorted, "header columns are not in the required order");
 });
 
 // --- API client ---------------------------------------------------------------
@@ -96,18 +168,31 @@ test("MailCampaignListItem/MailCampaignListPage (api.ts) are distinct types from
   assert.match(API_SOURCE, /export interface MailCampaign\b/);
 });
 
-test("listMailCampaignList sends page/search/filter/sort as query params to GET /mail/campaign-list", () => {
+test("MailCampaignListItem (api.ts) carries available_leads/reply_rate_percent and no mailbox/sent/completed fields", () => {
+  const start = API_SOURCE.indexOf("export interface MailCampaignListItem");
+  const end = API_SOURCE.indexOf("export interface MailCampaignListPage");
+  const block = API_SOURCE.slice(start, end);
+  assert.match(block, /available_leads: number/);
+  assert.match(block, /reply_rate_percent: number/);
+  assert.doesNotMatch(block, /mailbox_id|mailbox_email|mailbox_count|\bsent:|\bcompleted:/);
+});
+
+test("listMailCampaignList sends page/search/filter/sort as query params to GET /mail/campaign-list, with no mailbox_email filter any more", () => {
   assert.match(API_SOURCE, /`\/mail\/campaign-list\?\$\{query\.toString\(\)\}`/);
+  assert.doesNotMatch(API_SOURCE, /mailboxEmail/);
 });
 
 // --- Backend model / route -----------------------------------------------------
 
-test("MailCampaignListItem (backend model) has no fabricated engagement fields", () => {
+test("MailCampaignListItem (backend model) has no open/click-rate field, but does carry the real reply_rate_percent", () => {
   const modelBlock = MODEL_SOURCE.slice(
     MODEL_SOURCE.indexOf("class MailCampaignListItem"),
     MODEL_SOURCE.indexOf("class MailCampaignListPage")
   );
-  assert.doesNotMatch(modelBlock, /open_rate|click_rate|reply_rate/i);
+  assert.doesNotMatch(modelBlock, /open_rate|click_rate/i);
+  assert.match(modelBlock, /reply_rate_percent: float/);
+  assert.match(modelBlock, /available_leads: int/);
+  assert.doesNotMatch(modelBlock, /mailbox_id|mailbox_email|mailbox_count/);
 });
 
 test("GET /mail/campaign-list exists, is read-only, and is a separate route from GET /mail/campaigns", () => {
@@ -121,13 +206,29 @@ test("MailCampaignListService is a pure aggregation over existing stores -- no n
   assert.match(SERVICE_SOURCE, /enrollment_store: MailEnrollmentStore/);
 });
 
-test("progress_percent is terminal enrollments over total, never fabricated to look stuck at 0% for an active campaign", () => {
+test("available_leads is total minus leads whose Step 1 actually reached SENT -- never a terminal-enrollment ratio", () => {
   const methodBlock = SERVICE_SOURCE.slice(
     SERVICE_SOURCE.indexOf("async def _build_item"),
     SERVICE_SOURCE.indexOf("async def list_campaigns")
   );
-  assert.match(methodBlock, /terminal \/ total/);
-  assert.match(methodBlock, /if total > 0 else 0\.0/);
+  assert.match(methodBlock, /step\.step_number == 1 and step\.status == MailEnrollmentStepStatus\.SENT/);
+  assert.match(methodBlock, /available = total - started/);
+});
+
+test("progress_percent is started/total (lead-start progress), never total-sequence-step completion", () => {
+  const methodBlock = SERVICE_SOURCE.slice(
+    SERVICE_SOURCE.indexOf("async def _build_item"),
+    SERVICE_SOURCE.indexOf("async def list_campaigns")
+  );
+  assert.match(methodBlock, /round\(\(started \/ total\) \* 100, 1\) if total > 0 else 0\.0/);
+});
+
+test("reply_rate_percent uses the exact same replied/total formula as the campaign Dashboard stats strip", () => {
+  const methodBlock = SERVICE_SOURCE.slice(
+    SERVICE_SOURCE.indexOf("async def _build_item"),
+    SERVICE_SOURCE.indexOf("async def list_campaigns")
+  );
+  assert.match(methodBlock, /round\(\(replied \/ total\) \* 100, 1\) if total > 0 else 0\.0/);
 });
 
 test("a zero-enrollment campaign (e.g. a fresh Draft) shows 0% progress rather than dividing by zero", () => {
@@ -170,26 +271,31 @@ test("table cell padding is tighter than the original px-4 py-2.5 pass, for a mo
   assert.match(LIST_PAGE_SOURCE, /px-3 py-2\b/);
 });
 
-test("Status, Mailbox, and Last Updated cells never wrap, keeping every row's height consistent", () => {
-  const statusCell = LIST_PAGE_SOURCE.slice(
-    LIST_PAGE_SOURCE.indexOf('rounded-full px-2 py-0.5 text-xs font-medium",\n                            mailCampaignStatusBadgeClass') - 200,
-    LIST_PAGE_SOURCE.indexOf('rounded-full px-2 py-0.5 text-xs font-medium",\n                            mailCampaignStatusBadgeClass')
-  );
-  assert.match(statusCell, /whitespace-nowrap/);
-  assert.match(LIST_PAGE_SOURCE, /whitespace-nowrap px-3 py-2 text-muted-foreground">\s*\{campaign\.mailbox_email/);
-  assert.match(LIST_PAGE_SOURCE, /whitespace-nowrap px-3 py-2 text-right text-muted-foreground">\{formatDateTime/);
+test("narrow numeric/status columns are pinned to a fixed width so they never steal space from Campaign", () => {
+  assert.match(LIST_PAGE_SOURCE, /Status:\s*"w-\[90px\]"/);
+  assert.match(LIST_PAGE_SOURCE, /Available:\s*"w-\[80px\]"/);
+  assert.match(LIST_PAGE_SOURCE, /Total:\s*"w-\[70px\]"/);
+  assert.match(LIST_PAGE_SOURCE, /Steps:\s*"w-\[60px\]"/);
 });
 
-test("Last Updated still renders a real formatted date/time, just a more compact one", () => {
+test("Status and date cells never wrap, keeping every row's height consistent", () => {
+  const statusCellStart = LIST_PAGE_SOURCE.indexOf('className={cn("whitespace-nowrap px-3 py-2", COLUMN_WIDTH_CLASS.Status)}');
+  assert.ok(statusCellStart !== -1);
+  assert.match(LIST_PAGE_SOURCE, /whitespace-nowrap px-3 py-2 text-right text-muted-foreground",\s*COLUMN_WIDTH_CLASS\["Campaign created"\]/);
+  assert.match(LIST_PAGE_SOURCE, /whitespace-nowrap px-3 py-2 text-right text-muted-foreground",\s*COLUMN_WIDTH_CLASS\["Last updated"\]/);
+});
+
+test("Last updated still renders a real formatted date/time, just a more compact one, with the exact timestamp in a tooltip", () => {
   assert.match(LIST_PAGE_SOURCE, /function formatDateTime/);
   assert.match(LIST_PAGE_SOURCE, /month: "short", day: "numeric", hour: "numeric", minute: "2-digit"/);
+  assert.match(LIST_PAGE_SOURCE, /function exactTimestamp/);
 });
 
 test("the table still scrolls horizontally in its own container rather than corrupting the page on narrow screens", () => {
   assert.match(LIST_PAGE_SOURCE, /overflow-x-auto/);
 });
 
-test("search, sort, filter, and pagination wiring are unchanged by the density pass", () => {
+test("search, sort, filter, and pagination wiring are unchanged by the column redefinition", () => {
   assert.match(LIST_PAGE_SOURCE, /q: search\.trim\(\)/);
   assert.match(LIST_PAGE_SOURCE, /status: statusFilter/);
   assert.match(LIST_PAGE_SOURCE, /function handleSort/);

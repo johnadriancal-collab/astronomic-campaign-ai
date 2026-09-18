@@ -1,10 +1,10 @@
 """
-Campaigns list V1 (2026-09-17) -- MailCampaignListService.list_campaigns().
-Plain in-memory stores directly, same convention as
-test_mail_leads_service.py. A pure read-side aggregation over existing
-MailCampaign/MailEnrollment/MailEnrollmentStep/MailSequenceStep/channel
-data -- these tests exercise exactly that join/aggregation logic, never
-touch persistence.
+Campaigns list V1 (2026-09-17), lead-start progress redefinition
+(2026-09-18) -- MailCampaignListService.list_campaigns(). Plain
+in-memory stores directly, same convention as test_mail_leads_service.py.
+A pure read-side aggregation over existing MailCampaign/MailEnrollment/
+MailEnrollmentStep/MailSequenceStep data -- these tests exercise exactly
+that join/aggregation logic, never touch persistence.
 """
 
 from datetime import datetime, timezone
@@ -21,13 +21,10 @@ from app.models.mail import (
     MailEnrollmentStepStatus,
     MailSequenceStep,
 )
-from app.models.mailbox import Mailbox, MailboxProvider, MailboxStatus
-from app.repositories.mail_campaign_mailbox_store import MemoryMailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
 from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
-from app.repositories.mailbox_store import MemoryMailboxStore
 from app.services.mail_campaign_list_service import MailCampaignListService
 
 pytestmark = pytest.mark.asyncio
@@ -42,22 +39,6 @@ def make_campaign(campaign_id: str, name: str, **overrides) -> MailCampaign:
     )
     fields.update(overrides)
     return MailCampaign(**fields)
-
-
-def make_mailbox(**overrides) -> Mailbox:
-    fields = dict(
-        mailbox_id=MAILBOX_ID,
-        provider=MailboxProvider.GOOGLE,
-        email="victoria@useastronomic.com",
-        display_name=None,
-        status=MailboxStatus.CONNECTED,
-        google_user_id="g-victoria",
-        granted_scopes=[],
-        connected_at=NOW,
-        updated_at=NOW,
-    )
-    fields.update(overrides)
-    return Mailbox(**fields)
 
 
 def make_enrollment(enrollment_id: str, campaign_id: str, contact_id: str, **overrides) -> MailEnrollment:
@@ -119,8 +100,6 @@ async def stores():
         "enrollment_store": MemoryMailEnrollmentStore(),
         "enrollment_step_store": MemoryMailEnrollmentStepStore(),
         "sequence_step_store": MemoryMailSequenceStepStore(),
-        "channel_store": MemoryMailCampaignMailboxStore(),
-        "mailbox_store": MemoryMailboxStore(),
     }
 
 
@@ -134,43 +113,135 @@ async def test_campaign_with_no_enrollments_has_zero_progress_not_fabricated(sto
     page = await service.list_campaigns()
     [item] = page.items
     assert item.total_leads == 0
+    assert item.available_leads == 0
     assert item.progress_percent == 0.0
-    assert item.sent == 0
+    assert item.reply_rate_percent == 0.0
 
 
-async def test_progress_is_terminal_enrollments_over_total(stores, service):
-    await stores["campaign_store"].create(make_campaign("c1", "Progress Test"))
-    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.COMPLETED))
-    await stores["enrollment_store"].create(make_enrollment("e2", "c1", "contact2", status=MailEnrollmentStatus.REPLIED))
-    await stores["enrollment_store"].create(make_enrollment("e3", "c1", "contact3", status=MailEnrollmentStatus.ACTIVE))
-    await stores["enrollment_store"].create(make_enrollment("e4", "c1", "contact4", status=MailEnrollmentStatus.ACTIVE))
-
-    [item] = (await service.list_campaigns()).items
-    # 2 terminal (completed + replied) out of 4 total = 50%
-    assert item.total_leads == 4
-    assert item.progress_percent == 50.0
+# --- Available / Started / Progress (2026-09-18 redefinition) -------------
 
 
-async def test_active_campaign_with_nothing_terminal_yet_is_not_fabricated_to_zero_or_full(stores, service):
-    await stores["campaign_store"].create(make_campaign("c1", "All Active"))
-    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.ACTIVE))
-    await stores["enrollment_store"].create(make_enrollment("e2", "c1", "contact2", status=MailEnrollmentStatus.ACTIVE))
+async def test_available_is_total_minus_leads_whose_step1_was_actually_sent(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Available Test"))
+    for i in range(6):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}"))
+    # 4 of 6 have a SENT Step 1 -- "started."
+    for i in range(4):
+        await stores["enrollment_step_store"].create(
+            make_step(f"e{i}", "c1", f"contact{i}", 1, status=MailEnrollmentStepStatus.SENT)
+        )
 
     [item] = (await service.list_campaigns()).items
-    assert item.progress_percent == 0.0  # genuinely true: nothing terminal yet
-    assert item.status == MailCampaignStatus.ACTIVE  # campaign lifecycle status is untouched by progress
+    assert item.total_leads == 6
+    assert item.available_leads == 2
+    assert item.progress_percent == round((4 / 6) * 100, 1)
 
 
-async def test_sent_counts_only_steps_that_actually_reached_sent_status(stores, service):
-    await stores["campaign_store"].create(make_campaign("c1", "Sent Count Test"))
-    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.ACTIVE))
-    await stores["enrollment_step_store"].create(make_step("e1", "c1", "contact1", 1, status=MailEnrollmentStepStatus.SENT))
+async def test_a_lead_who_replied_after_step1_sent_is_not_available(stores, service):
+    """The user's own example: outreach already started, so this lead is
+    NOT available even though it's now REPLIED, not ACTIVE."""
+    await stores["campaign_store"].create(make_campaign("c1", "Replied Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.REPLIED))
     await stores["enrollment_step_store"].create(
-        make_step("e1", "c1", "contact1", 2, status=MailEnrollmentStepStatus.QUEUED, sent_at=None)
+        make_step("e1", "c1", "contact1", 1, status=MailEnrollmentStepStatus.SENT)
     )
 
     [item] = (await service.list_campaigns()).items
-    assert item.sent == 1
+    assert item.available_leads == 0
+    assert item.progress_percent == 100.0
+
+
+async def test_a_lead_whose_step1_never_sent_is_available_regardless_of_enrollment_status(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Not Started Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.ACTIVE))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.available_leads == 1
+    assert item.progress_percent == 0.0
+
+
+async def test_a_pending_queued_or_claimed_step1_leaves_the_lead_available(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Pending Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
+    await stores["enrollment_step_store"].create(
+        make_step("e1", "c1", "contact1", 1, status=MailEnrollmentStepStatus.QUEUED, sent_at=None)
+    )
+
+    [item] = (await service.list_campaigns()).items
+    assert item.available_leads == 1
+
+
+async def test_a_failed_step1_attempt_still_counts_as_available_never_sent(stores, service):
+    """A real provider-attempt failure is not a confirmed send -- the
+    literal 'has the initial email been sent' rule keeps this lead
+    Available, since no message was ever delivered."""
+    await stores["campaign_store"].create(make_campaign("c1", "Failed Attempt Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.FAILED))
+    await stores["enrollment_step_store"].create(
+        make_step("e1", "c1", "contact1", 1, status=MailEnrollmentStepStatus.FAILED, sent_at=None)
+    )
+
+    [item] = (await service.list_campaigns()).items
+    assert item.available_leads == 1
+    assert item.progress_percent == 0.0
+
+
+async def test_a_sent_step2_never_counts_toward_started_only_step1_does(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Step Number Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
+    # Step 1 never sent, but a (contrived) later step is -- started must
+    # still be keyed on step_number == 1 specifically.
+    await stores["enrollment_step_store"].create(
+        make_step("e1", "c1", "contact1", 2, status=MailEnrollmentStepStatus.SENT)
+    )
+
+    [item] = (await service.list_campaigns()).items
+    assert item.available_leads == 1
+
+
+# --- Total (replaces the old Leads column) ---------------------------------
+
+
+async def test_total_leads_is_the_unique_enrollment_count(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Total Test"))
+    for i in range(3):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}"))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.total_leads == 3
+
+
+# --- Reply rate --------------------------------------------------------------
+
+
+async def test_reply_rate_matches_replied_over_total(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Reply Rate Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.REPLIED))
+    await stores["enrollment_store"].create(make_enrollment("e2", "c1", "contact2", status=MailEnrollmentStatus.REPLIED))
+    await stores["enrollment_store"].create(make_enrollment("e3", "c1", "contact3", status=MailEnrollmentStatus.ACTIVE))
+    await stores["enrollment_store"].create(make_enrollment("e4", "c1", "contact4", status=MailEnrollmentStatus.ACTIVE))
+    await stores["enrollment_store"].create(make_enrollment("e5", "c1", "contact5", status=MailEnrollmentStatus.ACTIVE))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.replied == 2
+    assert item.reply_rate_percent == 40.0
+
+
+# --- Suppressed / Failed (unchanged buckets) --------------------------------
+
+
+async def test_suppressed_and_failed_counts_come_from_real_enrollment_status(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Suppressed/Failed Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.SUPPRESSED))
+    await stores["enrollment_store"].create(make_enrollment("e2", "c1", "contact2", status=MailEnrollmentStatus.FAILED))
+    await stores["enrollment_store"].create(make_enrollment("e3", "c1", "contact3", status=MailEnrollmentStatus.ACTIVE))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.suppressed == 1
+    assert item.failed == 1
+
+
+# --- Steps ---------------------------------------------------------------
 
 
 async def test_step_count_reflects_the_sequence_definition_not_execution_rows(stores, service):
@@ -183,23 +254,20 @@ async def test_step_count_reflects_the_sequence_definition_not_execution_rows(st
     assert item.step_count == 3
 
 
-async def test_mailbox_resolved_from_the_campaigns_own_channel_selection(stores, service):
-    await stores["campaign_store"].create(make_campaign("c1", "Mailbox Test"))
-    await stores["mailbox_store"].create(make_mailbox())
-    await stores["channel_store"].replace_for_campaign("c1", [MAILBOX_ID])
+# --- created_at / updated_at ------------------------------------------------
+
+
+async def test_created_at_and_updated_at_are_the_campaigns_own_real_timestamps(stores, service):
+    created = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    updated = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    await stores["campaign_store"].create(make_campaign("c1", "Timestamps Test", created_at=created, updated_at=updated))
 
     [item] = (await service.list_campaigns()).items
-    assert item.mailbox_email == "victoria@useastronomic.com"
-    assert item.mailbox_id == MAILBOX_ID
-    assert item.mailbox_count == 1
+    assert item.created_at == created
+    assert item.updated_at == updated
 
 
-async def test_campaign_with_no_channel_mailbox_has_none_not_a_fabricated_default(stores, service):
-    await stores["campaign_store"].create(make_campaign("c1", "No Mailbox Yet", status=MailCampaignStatus.DRAFT))
-    [item] = (await service.list_campaigns()).items
-    assert item.mailbox_email is None
-    assert item.mailbox_id is None
-    assert item.mailbox_count == 0
+# --- Search / filter / sort / pagination (unchanged wiring) ---------------
 
 
 async def test_search_by_campaign_name(stores, service):
@@ -219,19 +287,6 @@ async def test_status_filter(stores, service):
     active_page = await service.list_campaigns(status="active")
     assert active_page.total == 1
     assert active_page.items[0].mail_campaign_id == "c1"
-
-
-async def test_mailbox_email_filter(stores, service):
-    await stores["mailbox_store"].create(make_mailbox())
-    await stores["mailbox_store"].create(make_mailbox(mailbox_id="mbx-2", email="other@useastronomic.com"))
-    await stores["campaign_store"].create(make_campaign("c1", "Victoria Campaign"))
-    await stores["campaign_store"].create(make_campaign("c2", "Other Campaign"))
-    await stores["channel_store"].replace_for_campaign("c1", [MAILBOX_ID])
-    await stores["channel_store"].replace_for_campaign("c2", ["mbx-2"])
-
-    page = await service.list_campaigns(mailbox_email="victoria@useastronomic.com")
-    assert page.total == 1
-    assert page.items[0].mail_campaign_id == "c1"
 
 
 async def test_default_sort_is_newest_updated_first(stores, service):
@@ -254,15 +309,43 @@ async def test_sortable_by_name(stores, service):
     assert [item.name for item in page.items] == ["Alpha Campaign", "Zebra Campaign"]
 
 
-async def test_sortable_by_total_leads_and_replied_and_progress(stores, service):
-    await stores["campaign_store"].create(make_campaign("c-small", "Small"))
-    await stores["campaign_store"].create(make_campaign("c-big", "Big"))
+async def test_sortable_by_status(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Active One", status=MailCampaignStatus.ACTIVE))
+    await stores["campaign_store"].create(make_campaign("c2", "Archived One", status=MailCampaignStatus.ARCHIVED))
+
+    page = await service.list_campaigns(sort_by="status", sort_dir="asc")
+    assert [item.mail_campaign_id for item in page.items] == ["c1", "c2"]  # "active" < "archived"
+
+
+async def test_sortable_by_available(stores, service):
+    await stores["campaign_store"].create(make_campaign("c-none-started", "None Started"))
+    await stores["campaign_store"].create(make_campaign("c-all-started", "All Started"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c-none-started", "contact1"))
+    await stores["enrollment_store"].create(make_enrollment("e2", "c-all-started", "contact2"))
+    await stores["enrollment_step_store"].create(
+        make_step("e2", "c-all-started", "contact2", 1, status=MailEnrollmentStepStatus.SENT)
+    )
+
+    page = await service.list_campaigns(sort_by="available", sort_dir="desc")
+    assert [item.mail_campaign_id for item in page.items] == ["c-none-started", "c-all-started"]
+
+
+async def test_sortable_by_total_leads_replied_progress_reply_rate_and_created_at(stores, service):
+    await stores["campaign_store"].create(
+        make_campaign("c-small", "Small", created_at=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    )
+    await stores["campaign_store"].create(
+        make_campaign("c-big", "Big", created_at=datetime(2026, 9, 10, tzinfo=timezone.utc))
+    )
     await stores["enrollment_store"].create(make_enrollment("e1", "c-small", "contact1"))
     for i in range(5):
         await stores["enrollment_store"].create(make_enrollment(f"e-big-{i}", "c-big", f"contact{i}"))
 
     by_leads = await service.list_campaigns(sort_by="total_leads", sort_dir="desc")
     assert [item.mail_campaign_id for item in by_leads.items] == ["c-big", "c-small"]
+
+    by_created = await service.list_campaigns(sort_by="created_at", sort_dir="desc")
+    assert [item.mail_campaign_id for item in by_created.items] == ["c-big", "c-small"]
 
 
 async def test_pagination(stores, service):
@@ -279,12 +362,32 @@ async def test_pagination(stores, service):
     assert ids1.isdisjoint(ids2)
 
 
-async def test_completed_campaign_handled_correctly(stores, service):
+# --- Lifecycle statuses all render correctly --------------------------------
+
+
+async def test_completed_campaign_with_every_lead_started_shows_full_progress(stores, service):
     await stores["campaign_store"].create(make_campaign("c1", "Done Campaign", status=MailCampaignStatus.COMPLETED))
     await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.COMPLETED))
+    await stores["enrollment_step_store"].create(
+        make_step("e1", "c1", "contact1", 1, status=MailEnrollmentStepStatus.SENT)
+    )
     [item] = (await service.list_campaigns()).items
     assert item.status == MailCampaignStatus.COMPLETED
     assert item.progress_percent == 100.0
+    assert item.available_leads == 0
+
+
+async def test_paused_campaign_with_partial_start_shows_real_partial_progress(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Paused Campaign", status=MailCampaignStatus.PAUSED))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
+    await stores["enrollment_store"].create(make_enrollment("e2", "c1", "contact2"))
+    await stores["enrollment_step_store"].create(
+        make_step("e1", "c1", "contact1", 1, status=MailEnrollmentStepStatus.SENT)
+    )
+    [item] = (await service.list_campaigns()).items
+    assert item.status == MailCampaignStatus.PAUSED
+    assert item.progress_percent == 50.0
+    assert item.available_leads == 1
 
 
 async def test_archived_historical_campaign_still_appears(stores, service):
@@ -292,3 +395,13 @@ async def test_archived_historical_campaign_still_appears(stores, service):
     page = await service.list_campaigns()
     assert page.total == 1
     assert page.items[0].status == MailCampaignStatus.ARCHIVED
+
+
+async def test_draft_and_ready_campaigns_with_no_enrollments_show_zero_not_fabricated(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Draft", status=MailCampaignStatus.DRAFT))
+    await stores["campaign_store"].create(make_campaign("c2", "Ready", status=MailCampaignStatus.READY))
+    page = await service.list_campaigns()
+    for item in page.items:
+        assert item.total_leads == 0
+        assert item.available_leads == 0
+        assert item.progress_percent == 0.0

@@ -1271,33 +1271,61 @@ class MailLeadDetail(BaseModel):
 
 
 class MailCampaignListItem(BaseModel):
-    """One row. `progress_percent` is
-    (completed + replied + suppressed + failed) / total * 100 -- every
-    enrollment status that will never advance further on its own
-    (terminal), against the total ever snapshotted. Deliberately NOT
-    "steps sent / theoretical total sends": an ACTIVE campaign with
-    every lead still mid-sequence (nothing terminal yet) correctly
-    shows a real, low, non-zero-looking number as leads actually
-    finish -- not a step-completion ratio that can never reach 100%
-    for a still-active multi-step sequence. 0.0 for a DRAFT/READY
-    campaign with zero enrollments (nothing to divide), never fabricated.
-    `mailbox_email`/`mailbox_id` are this campaign's FIRST selected
-    channel mailbox only (`mailbox_count` says how many it actually
-    has) -- a V1 simplification for the list view; the campaign detail
-    page's own Channels tab remains the source of truth for the full set."""
+    """One row (2026-09-18 redefinition -- QuickMail-style lead-start
+    progress, replacing the original terminal-enrollment-ratio
+    progress_percent).
+
+    `available_leads` -- leads whose Step 1 has NOT been SENT yet. Exact
+    definition: an enrollment counts as STARTED (not Available) iff a
+    MailEnrollmentStep row exists for step_number == 1 with
+    status == SENT. `available_leads = total_leads - started`.
+    Deliberately status-based, not enrollment-status-based: a lead that
+    replied AFTER Step 1 sent (status REPLIED, mid-sequence) is correctly
+    NOT Available, because outreach already started -- but a Step 1 that
+    was attempted and came back FAILED (or is stuck in SENDING/UNKNOWN)
+    is still counted as Available, since no message was ever confirmed
+    delivered; this is a deliberate, literal reading of "has the initial
+    email been sent," not "was an attempt made." A pre-suppressed
+    enrollment (SUPPRESSED at snapshot time, so Step 1 is never even
+    materialized -- see MailEnrollment's own docstring) is likewise
+    Available by this same literal rule, even though it will never
+    actually be started automatically.
+
+    `progress_percent` is now `started / total_leads * 100` -- started
+    being that same Step-1-SENT count, i.e. `(total_leads -
+    available_leads) / total_leads * 100`. This is lead-level INITIAL
+    outreach progress, deliberately NOT total-sequence-step completion
+    and NOT the old terminal-enrollment ratio (completed + replied +
+    suppressed + failed / total) -- an ACTIVE campaign where every lead
+    has received Step 1 but nothing has terminated yet now correctly
+    shows 100%, not 0%. 0.0 for a zero-enrollment campaign (nothing to
+    divide), never fabricated.
+
+    `reply_rate_percent` is `replied / total_leads * 100` -- the EXACT
+    same numerator/denominator/rounding convention as
+    MailCampaignStatsService.get_stats()'s own reply_rate_percent (the
+    campaign Dashboard stats strip), so the two never silently disagree.
+
+    No field on this model represents an open rate at all: zero
+    open-tracking signal exists anywhere for Astronomic Mail (same
+    investigation as MailCampaignStats -- see that model's own
+    docstring) -- the frontend renders a static "not tracked" state for
+    that column rather than this model carrying an always-null/
+    always-zero placeholder.
+
+    Mailbox is deliberately NOT on this row any more (2026-09-18) -- a
+    campaign's channel mailboxes are a Channels-tab concept now shown
+    only on the campaign detail page, not duplicated here."""
 
     mail_campaign_id: str
     name: str
     status: MailCampaignStatus
-    mailbox_id: str | None
-    mailbox_email: str | None
-    mailbox_count: int
     total_leads: int
-    sent: int
+    available_leads: int
     replied: int
+    reply_rate_percent: float
     suppressed: int
     failed: int
-    completed: int
     progress_percent: float
     step_count: int
     created_at: datetime

@@ -1,14 +1,19 @@
 """
-MailCampaignListService -- Campaigns list V1 (2026-09-17). A wide,
-table-shaped read model over every existing campaign, built purely from
-data that already exists (MailCampaign + MailEnrollment +
-MailEnrollmentStep + MailSequenceStep + the campaign's channel
-mailboxes). No new persistence, no duplicated analytics state -- the
-per-enrollment-status counting here is the EXACT same computation
-MailCampaignService.get_workload() already does (this file does not
-call that method directly, to avoid depending on MailCampaignService's
-much larger constructor for a handful of enrollment-status counts, but
-performs the identical bucketing over the same MailEnrollmentStore rows).
+MailCampaignListService -- Campaigns list V1 (2026-09-17), lead-start
+progress redefinition (2026-09-18). A wide, table-shaped read model over
+every existing campaign, built purely from data that already exists
+(MailCampaign + MailEnrollment + MailEnrollmentStep + MailSequenceStep).
+No new persistence, no duplicated analytics state.
+
+2026-09-18: `progress_percent`/`available_leads` were redefined around
+QuickMail-style lead-start progress (see MailCampaignListItem's own
+docstring for the exact rule) instead of the original terminal-
+enrollment ratio. `reply_rate_percent` was added, matching
+MailCampaignStatsService.get_stats()'s own formula exactly. The Mailbox
+column (mailbox_id/mailbox_email/mailbox_count) and the raw `sent`/
+`completed` counts were dropped from this read model -- Mailbox is a
+Channels-tab concept now, and `sent`/`completed` are superseded by
+`available_leads`/`progress_percent`.
 
 V1 pilot scale, same stance as MailInboxService/MailLeadsService: every
 read here loops MailCampaignStore.list() and calls the EXISTING
@@ -23,14 +28,12 @@ from app.models.mail import (
     MailEnrollmentStatus,
     MailEnrollmentStepStatus,
 )
-from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
 from app.repositories.mail_sequence_step_store import MailSequenceStepStore
-from app.repositories.mailbox_store import MailboxStore
 
-MailCampaignSortBy = str  # "name" | "status" | "total_leads" | "replied" | "progress" | "updated_at"
+MailCampaignSortBy = str  # "name" | "status" | "available" | "total_leads" | "progress" | "reply_rate" | "replied" | "created_at" | "updated_at"
 
 
 class MailCampaignListService:
@@ -40,15 +43,11 @@ class MailCampaignListService:
         enrollment_store: MailEnrollmentStore,
         enrollment_step_store: MailEnrollmentStepStore,
         sequence_step_store: MailSequenceStepStore,
-        channel_store: MailCampaignMailboxStore,
-        mailbox_store: MailboxStore,
     ):
         self.campaign_store = campaign_store
         self.enrollment_store = enrollment_store
         self.enrollment_step_store = enrollment_step_store
         self.sequence_step_store = sequence_step_store
-        self.channel_store = channel_store
-        self.mailbox_store = mailbox_store
 
     async def _build_item(self, campaign: MailCampaign) -> MailCampaignListItem:
         enrollments = await self.enrollment_store.list_for_campaign(campaign.mail_campaign_id)
@@ -57,39 +56,37 @@ class MailCampaignListService:
             counts[enrollment.status] += 1
         total = len(enrollments)
 
-        terminal = (
-            counts[MailEnrollmentStatus.COMPLETED]
-            + counts[MailEnrollmentStatus.REPLIED]
-            + counts[MailEnrollmentStatus.SUPPRESSED]
-            + counts[MailEnrollmentStatus.FAILED]
-        )
-        progress_percent = round((terminal / total) * 100, 1) if total > 0 else 0.0
-
         steps = await self.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
-        sent_count = sum(1 for step in steps if step.status == MailEnrollmentStepStatus.SENT)
+        # STARTED = a lead whose Step 1 execution row actually reached
+        # SENT -- see MailCampaignListItem's own docstring for exactly
+        # why this is a literal "has the email been sent" reading, not
+        # "was an attempt made." At most one step_number == 1 row exists
+        # per enrollment (UNIQUE(enrollment_id, step_id)), so this set's
+        # size is already a count of distinct leads, never double-counted.
+        started_enrollment_ids = {
+            step.enrollment_id
+            for step in steps
+            if step.step_number == 1 and step.status == MailEnrollmentStepStatus.SENT
+        }
+        started = len(started_enrollment_ids)
+        available = total - started
+        progress_percent = round((started / total) * 100, 1) if total > 0 else 0.0
+
+        replied = counts[MailEnrollmentStatus.REPLIED]
+        reply_rate_percent = round((replied / total) * 100, 1) if total > 0 else 0.0
 
         sequence_steps = await self.sequence_step_store.list_for_campaign(campaign.mail_campaign_id)
-
-        mailbox_ids = await self.channel_store.list_mailbox_ids_for_campaign(campaign.mail_campaign_id)
-        mailbox_id = mailbox_ids[0] if mailbox_ids else None
-        mailbox_email = None
-        if mailbox_id:
-            mailbox = await self.mailbox_store.get(mailbox_id)
-            mailbox_email = mailbox.email if mailbox is not None else None
 
         return MailCampaignListItem(
             mail_campaign_id=campaign.mail_campaign_id,
             name=campaign.name,
             status=campaign.status,
-            mailbox_id=mailbox_id,
-            mailbox_email=mailbox_email,
-            mailbox_count=len(mailbox_ids),
             total_leads=total,
-            sent=sent_count,
-            replied=counts[MailEnrollmentStatus.REPLIED],
+            available_leads=available,
+            replied=replied,
+            reply_rate_percent=reply_rate_percent,
             suppressed=counts[MailEnrollmentStatus.SUPPRESSED],
             failed=counts[MailEnrollmentStatus.FAILED],
-            completed=counts[MailEnrollmentStatus.COMPLETED],
             progress_percent=progress_percent,
             step_count=len(sequence_steps),
             created_at=campaign.created_at,
@@ -101,7 +98,6 @@ class MailCampaignListService:
         *,
         q: str | None = None,
         status: str | None = None,
-        mailbox_email: str | None = None,
         sort_by: MailCampaignSortBy = "updated_at",
         sort_dir: str = "desc",
         page: int = 1,
@@ -124,20 +120,23 @@ class MailCampaignListService:
         if status:
             items = [item for item in items if item.status.value == status]
 
-        if mailbox_email:
-            items = [item for item in items if item.mailbox_email == mailbox_email]
-
         reverse = sort_dir != "asc"
         if sort_by == "name":
             items.sort(key=lambda item: item.name.lower(), reverse=reverse)
         elif sort_by == "status":
             items.sort(key=lambda item: item.status.value, reverse=reverse)
+        elif sort_by == "available":
+            items.sort(key=lambda item: item.available_leads, reverse=reverse)
         elif sort_by == "total_leads":
             items.sort(key=lambda item: item.total_leads, reverse=reverse)
+        elif sort_by == "reply_rate":
+            items.sort(key=lambda item: item.reply_rate_percent, reverse=reverse)
         elif sort_by == "replied":
             items.sort(key=lambda item: item.replied, reverse=reverse)
         elif sort_by == "progress":
             items.sort(key=lambda item: item.progress_percent, reverse=reverse)
+        elif sort_by == "created_at":
+            items.sort(key=lambda item: item.created_at, reverse=reverse)
         else:
             items.sort(key=lambda item: item.updated_at, reverse=reverse)
 

@@ -1566,19 +1566,23 @@ export function getMailLead(crmContactId: string): Promise<MailLeadDetail> {
 // from the existing listMailCampaigns()/MailCampaign below (which stays
 // exactly as-is, still relied on elsewhere).
 
+// 2026-09-18: redefined around QuickMail-style lead-start progress (see
+// MailCampaignListItem's own backend docstring for the exact rule) --
+// Mailbox (mailbox_id/mailbox_email/mailbox_count) and the raw sent/
+// completed counts were dropped; available_leads/reply_rate_percent
+// were added. No open_rate field -- zero open-tracking signal exists
+// for Astronomic Mail, so the Campaigns page renders a static
+// "not tracked" state for that column instead.
 export interface MailCampaignListItem {
   mail_campaign_id: string;
   name: string;
   status: MailCampaignStatus;
-  mailbox_id: string | null;
-  mailbox_email: string | null;
-  mailbox_count: number;
   total_leads: number;
-  sent: number;
+  available_leads: number;
   replied: number;
+  reply_rate_percent: number;
   suppressed: number;
   failed: number;
-  completed: number;
   progress_percent: number;
   step_count: number;
   created_at: string;
@@ -1592,12 +1596,20 @@ export interface MailCampaignListPage {
   page_size: number;
 }
 
-export type MailCampaignListSortBy = "name" | "status" | "total_leads" | "replied" | "progress" | "updated_at";
+export type MailCampaignListSortBy =
+  | "name"
+  | "status"
+  | "available"
+  | "total_leads"
+  | "reply_rate"
+  | "replied"
+  | "progress"
+  | "created_at"
+  | "updated_at";
 
 export interface ListMailCampaignListParams {
   q?: string;
   status?: MailCampaignStatus;
-  mailboxEmail?: string;
   sortBy?: MailCampaignListSortBy;
   sortDir?: "asc" | "desc";
   page?: number;
@@ -1608,7 +1620,6 @@ export function listMailCampaignList(params: ListMailCampaignListParams = {}): P
   const query = new URLSearchParams();
   if (params.q) query.set("q", params.q);
   if (params.status) query.set("status", params.status);
-  if (params.mailboxEmail) query.set("mailbox_email", params.mailboxEmail);
   if (params.sortBy) query.set("sort_by", params.sortBy);
   if (params.sortDir) query.set("sort_dir", params.sortDir);
   query.set("page", String(params.page ?? 1));

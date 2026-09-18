@@ -476,8 +476,6 @@ async def lifespan(app: FastAPI):
         enrollment_store=mail_enrollment_store,
         enrollment_step_store=mail_enrollment_step_store,
         sequence_step_store=mail_sequence_step_store,
-        channel_store=mail_campaign_mailbox_store,
-        mailbox_store=mailbox_store,
     )
 
     # Proactive OAuth expiration warnings (2026-09-17, mailbox-attribution

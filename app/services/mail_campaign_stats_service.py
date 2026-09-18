@@ -20,9 +20,10 @@ Bounce rate, requested for the campaign Dashboard tab):
   either -- also "Not tracked", static copy, frontend-side.
 - Replies: real and reliable -- MailReply/MailEnrollment.status ==
   REPLIED, set exclusively by MailSendingService.mark_enrollment_
-  replied(). Numerator/denominator convention matches
-  MailCampaignListItem.progress_percent exactly (replied / total * 100,
-  1 decimal, 0.0 when total == 0).
+  replied(). Numerator/denominator/rounding convention matches
+  MailCampaignListItem.reply_rate_percent exactly (replied / total * 100,
+  1 decimal, 0.0 when total == 0) -- the Campaigns list's own Reply rate
+  column and this stats strip's Reply rate can never silently disagree.
 - Unsubscribes: real, but requires a join no existing store method
   provides -- MailEnrollment carries no suppression-reason field, and
   MailCampaignWorkload.suppressed lumps every MailSuppressionReason
