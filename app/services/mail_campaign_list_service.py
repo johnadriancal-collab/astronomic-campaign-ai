@@ -1,19 +1,25 @@
 """
 MailCampaignListService -- Campaigns list V1 (2026-09-17), lead-start
-progress redefinition (2026-09-18). A wide, table-shaped read model over
-every existing campaign, built purely from data that already exists
+progress redefinition (2026-09-18), sequence-completion progress
+redefinition (2026-09-18b). A wide, table-shaped read model over every
+existing campaign, built purely from data that already exists
 (MailCampaign + MailEnrollment + MailEnrollmentStep + MailSequenceStep).
 No new persistence, no duplicated analytics state.
 
-2026-09-18: `progress_percent`/`available_leads` were redefined around
-QuickMail-style lead-start progress (see MailCampaignListItem's own
-docstring for the exact rule) instead of the original terminal-
-enrollment ratio. `reply_rate_percent` was added, matching
-MailCampaignStatsService.get_stats()'s own formula exactly. The Mailbox
-column (mailbox_id/mailbox_email/mailbox_count) and the raw `sent`/
-`completed` counts were dropped from this read model -- Mailbox is a
-Channels-tab concept now, and `sent`/`completed` are superseded by
-`available_leads`/`progress_percent`.
+2026-09-18b: `progress_percent` moved AGAIN -- now `finished_leads /
+total_leads`, where `finished_leads` counts only MailEnrollmentStatus.
+COMPLETED (the one status this codebase's own state machine defines as
+"every step terminal AND nothing left to materialize" -- see
+MailCampaignListItem's own docstring for exactly why REPLIED/SUPPRESSED/
+FAILED don't count, even though each is also terminal). `available_leads`
+(lead-start progress, added 2026-09-18) is UNCHANGED and stays a
+separate concept -- "has outreach started" vs. "has the sequence
+finished" are now two independent columns, never conflated.
+
+`reply_rate_percent` matches MailCampaignStatsService.get_stats()'s own
+formula exactly. The Mailbox column (mailbox_id/mailbox_email/
+mailbox_count) and the raw `sent`/`completed` counts were dropped from
+this read model (2026-09-18) -- Mailbox is a Channels-tab concept now.
 
 V1 pilot scale, same stance as MailInboxService/MailLeadsService: every
 read here loops MailCampaignStore.list() and calls the EXISTING
@@ -70,10 +76,18 @@ class MailCampaignListService:
         }
         started = len(started_enrollment_ids)
         available = total - started
-        progress_percent = round((started / total) * 100, 1) if total > 0 else 0.0
 
         replied = counts[MailEnrollmentStatus.REPLIED]
         reply_rate_percent = round((replied / total) * 100, 1) if total > 0 else 0.0
+
+        # FINISHED = the sequence ran to actual completion -- exactly
+        # MailEnrollmentStatus.COMPLETED, never REPLIED/SUPPRESSED/FAILED
+        # (each of those is also terminal, but represents the sequence
+        # being cut short before every applicable step ran; see
+        # MailCampaignListItem's own docstring for the full reasoning).
+        finished = counts[MailEnrollmentStatus.COMPLETED]
+        in_progress = total - finished
+        progress_percent = round((finished / total) * 100, 1) if total > 0 else 0.0
 
         sequence_steps = await self.sequence_step_store.list_for_campaign(campaign.mail_campaign_id)
 
@@ -87,6 +101,8 @@ class MailCampaignListService:
             reply_rate_percent=reply_rate_percent,
             suppressed=counts[MailEnrollmentStatus.SUPPRESSED],
             failed=counts[MailEnrollmentStatus.FAILED],
+            finished_leads=finished,
+            in_progress_leads=in_progress,
             progress_percent=progress_percent,
             step_count=len(sequence_steps),
             created_at=campaign.created_at,

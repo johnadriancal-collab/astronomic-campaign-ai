@@ -1573,6 +1573,12 @@ export function getMailLead(crmContactId: string): Promise<MailLeadDetail> {
 // were added. No open_rate field -- zero open-tracking signal exists
 // for Astronomic Mail, so the Campaigns page renders a static
 // "not tracked" state for that column instead.
+//
+// 2026-09-18b: progress_percent moved again -- now finished_leads /
+// total_leads (sequence-completion progress: finished_leads counts
+// ONLY MailEnrollmentStatus.COMPLETED), a separate concept from
+// available_leads (lead-start progress, unchanged). in_progress_leads
+// is total_leads - finished_leads.
 export interface MailCampaignListItem {
   mail_campaign_id: string;
   name: string;
@@ -1583,6 +1589,8 @@ export interface MailCampaignListItem {
   reply_rate_percent: number;
   suppressed: number;
   failed: number;
+  finished_leads: number;
+  in_progress_leads: number;
   progress_percent: number;
   step_count: number;
   created_at: string;

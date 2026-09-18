@@ -1291,15 +1291,28 @@ class MailCampaignListItem(BaseModel):
     Available by this same literal rule, even though it will never
     actually be started automatically.
 
-    `progress_percent` is now `started / total_leads * 100` -- started
-    being that same Step-1-SENT count, i.e. `(total_leads -
-    available_leads) / total_leads * 100`. This is lead-level INITIAL
-    outreach progress, deliberately NOT total-sequence-step completion
-    and NOT the old terminal-enrollment ratio (completed + replied +
-    suppressed + failed / total) -- an ACTIVE campaign where every lead
-    has received Step 1 but nothing has terminated yet now correctly
-    shows 100%, not 0%. 0.0 for a zero-enrollment campaign (nothing to
-    divide), never fabricated.
+    `progress_percent` (redefined again, 2026-09-18b) is now
+    `finished_leads / total_leads * 100` -- SEQUENCE-COMPLETION progress,
+    deliberately separate from `available_leads` above (which stays
+    "has outreach started," never touched by this redefinition).
+    `finished_leads` counts ONLY enrollments whose `status ==
+    MailEnrollmentStatus.COMPLETED` -- the ONE status this codebase's own
+    enrollment state machine defines as "every MailEnrollmentStep row
+    reached a terminal status AND there is no further MailSequenceStep
+    left to materialize" (see MailEnrollmentStatus's own docstring).
+    REPLIED/SUPPRESSED/FAILED are each also terminal (nothing further
+    will ever be attempted for that enrollment), but deliberately do
+    NOT count as "finished" here -- each represents the sequence being
+    cut short before every applicable step ran, not the sequence
+    running to completion, so lumping them in would silently overstate
+    how many leads actually finished. `in_progress_leads = total_leads -
+    finished_leads` -- everything not COMPLETED, including PENDING/
+    ACTIVE/PAUSED and the three early-stopped terminal statuses above.
+    0.0 for a zero-enrollment campaign (nothing to divide), never
+    fabricated. An ACTIVE campaign with leads still mid-sequence (or
+    stopped early by a reply/suppression/failure) correctly shows less
+    than 100% -- this is NOT lead-start progress (that's
+    `available_leads` above) and NOT a step-send count.
 
     `reply_rate_percent` is `replied / total_leads * 100` -- the EXACT
     same numerator/denominator/rounding convention as
@@ -1326,6 +1339,8 @@ class MailCampaignListItem(BaseModel):
     reply_rate_percent: float
     suppressed: int
     failed: int
+    finished_leads: int
+    in_progress_leads: int
     progress_percent: float
     step_count: int
     created_at: datetime

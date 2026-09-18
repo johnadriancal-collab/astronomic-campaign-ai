@@ -1,8 +1,9 @@
 """
 Campaigns list V1 (2026-09-17), lead-start progress redefinition
-(2026-09-18) -- MailCampaignListService.list_campaigns(). Plain
-in-memory stores directly, same convention as test_mail_leads_service.py.
-A pure read-side aggregation over existing MailCampaign/MailEnrollment/
+(2026-09-18), sequence-completion progress redefinition (2026-09-18b) --
+MailCampaignListService.list_campaigns(). Plain in-memory stores
+directly, same convention as test_mail_leads_service.py. A pure
+read-side aggregation over existing MailCampaign/MailEnrollment/
 MailEnrollmentStep/MailSequenceStep data -- these tests exercise exactly
 that join/aggregation logic, never touch persistence.
 """
@@ -134,12 +135,17 @@ async def test_available_is_total_minus_leads_whose_step1_was_actually_sent(stor
     [item] = (await service.list_campaigns()).items
     assert item.total_leads == 6
     assert item.available_leads == 2
-    assert item.progress_percent == round((4 / 6) * 100, 1)
+    # progress_percent is now finished(COMPLETED)/total, a SEPARATE
+    # concept from available_leads -- none of these enrollments are
+    # COMPLETED, so it's 0.0 even though 4 of 6 have started.
+    assert item.progress_percent == 0.0
 
 
 async def test_a_lead_who_replied_after_step1_sent_is_not_available(stores, service):
     """The user's own example: outreach already started, so this lead is
-    NOT available even though it's now REPLIED, not ACTIVE."""
+    NOT available even though it's now REPLIED, not ACTIVE. Note this
+    lead is also NOT 'finished' (progress_percent) -- REPLIED stopped
+    the sequence early, it didn't complete it."""
     await stores["campaign_store"].create(make_campaign("c1", "Replied Test"))
     await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.REPLIED))
     await stores["enrollment_step_store"].create(
@@ -148,7 +154,7 @@ async def test_a_lead_who_replied_after_step1_sent_is_not_available(stores, serv
 
     [item] = (await service.list_campaigns()).items
     assert item.available_leads == 0
-    assert item.progress_percent == 100.0
+    assert item.progress_percent == 0.0
 
 
 async def test_a_lead_whose_step1_never_sent_is_available_regardless_of_enrollment_status(stores, service):
@@ -197,6 +203,136 @@ async def test_a_sent_step2_never_counts_toward_started_only_step1_does(stores, 
 
     [item] = (await service.list_campaigns()).items
     assert item.available_leads == 1
+
+
+# --- Progress (sequence completion, 2026-09-18b) ---------------------------
+#
+# Deliberately a SEPARATE concept from Available/started above: Progress
+# answers "has the lead finished the whole sequence," not "has outreach
+# started." finished_leads counts ONLY MailEnrollmentStatus.COMPLETED --
+# see MailCampaignListItem's own docstring for exactly why REPLIED/
+# SUPPRESSED/FAILED (each also terminal) don't count as finished.
+
+
+async def test_completed_enrollment_counts_as_finished(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Finished Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.COMPLETED))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.finished_leads == 1
+    assert item.in_progress_leads == 0
+    assert item.progress_percent == 100.0
+
+
+async def test_active_enrollment_with_future_steps_remains_in_progress(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Active Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.ACTIVE))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 1
+    assert item.progress_percent == 0.0
+
+
+async def test_replied_enrollment_does_not_count_as_finished(stores, service):
+    """Explicit definition: REPLIED stops the sequence early -- it is
+    terminal (nothing further will ever be attempted) but did NOT run
+    every applicable step, so it stays 'in progress' for this column."""
+    await stores["campaign_store"].create(make_campaign("c1", "Replied Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.REPLIED))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 1
+
+
+async def test_suppressed_enrollment_does_not_count_as_finished(stores, service):
+    """Same explicit reasoning as REPLIED above -- terminal, but not a
+    completed sequence."""
+    await stores["campaign_store"].create(make_campaign("c1", "Suppressed Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.SUPPRESSED))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 1
+
+
+async def test_failed_enrollment_does_not_count_as_finished(stores, service):
+    """Same explicit reasoning again -- FAILED is terminal but not a
+    completed sequence."""
+    await stores["campaign_store"].create(make_campaign("c1", "Failed Test"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.FAILED))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 1
+
+
+async def test_zero_total_leads_handled_safely(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Empty Test", status=MailCampaignStatus.DRAFT))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.total_leads == 0
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 0
+    assert item.progress_percent == 0.0
+
+
+async def test_every_lead_finished_renders_full_progress(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "All Finished Test"))
+    for i in range(5):
+        await stores["enrollment_store"].create(
+            make_enrollment(f"e{i}", "c1", f"contact{i}", status=MailEnrollmentStatus.COMPLETED)
+        )
+
+    [item] = (await service.list_campaigns()).items
+    assert item.progress_percent == 100.0
+    assert item.in_progress_leads == 0
+
+
+async def test_no_lead_finished_renders_zero_progress(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "None Finished Test"))
+    for i in range(5):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}", status=MailEnrollmentStatus.ACTIVE))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.progress_percent == 0.0
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 5
+
+
+async def test_sortable_by_progress_uses_finished_over_total(stores, service):
+    await stores["campaign_store"].create(make_campaign("c-none-finished", "None Finished"))
+    await stores["campaign_store"].create(make_campaign("c-all-finished", "All Finished"))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c-none-finished", "contact1", status=MailEnrollmentStatus.ACTIVE))
+    await stores["enrollment_store"].create(make_enrollment("e2", "c-all-finished", "contact2", status=MailEnrollmentStatus.COMPLETED))
+
+    page = await service.list_campaigns(sort_by="progress", sort_dir="desc")
+    assert [item.mail_campaign_id for item in page.items] == ["c-all-finished", "c-none-finished"]
+
+
+async def test_live_pilot_production_equivalent_case(stores, service):
+    """5 leads, mixed real states: 3 REPLIED (stopped early, not
+    finished), 2 still ACTIVE mid-sequence (also not finished) -- the
+    exact shape of the real 5-Person External Pilot at verification
+    time. Progress must be 0%, never fabricated to 100% just because
+    every lead already started (that's Available's job, not Progress's)."""
+    await stores["campaign_store"].create(make_campaign("c1", "Pilot-Equivalent", status=MailCampaignStatus.ACTIVE))
+    for i in range(3):
+        await stores["enrollment_store"].create(
+            make_enrollment(f"e-replied-{i}", "c1", f"contact-replied-{i}", status=MailEnrollmentStatus.REPLIED)
+        )
+    for i in range(2):
+        await stores["enrollment_store"].create(
+            make_enrollment(f"e-active-{i}", "c1", f"contact-active-{i}", status=MailEnrollmentStatus.ACTIVE)
+        )
+
+    [item] = (await service.list_campaigns()).items
+    assert item.total_leads == 5
+    assert item.replied == 3
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 5
+    assert item.progress_percent == 0.0
 
 
 # --- Total (replaces the old Leads column) ---------------------------------
@@ -365,7 +501,7 @@ async def test_pagination(stores, service):
 # --- Lifecycle statuses all render correctly --------------------------------
 
 
-async def test_completed_campaign_with_every_lead_started_shows_full_progress(stores, service):
+async def test_completed_campaign_with_every_lead_finished_shows_full_progress(stores, service):
     await stores["campaign_store"].create(make_campaign("c1", "Done Campaign", status=MailCampaignStatus.COMPLETED))
     await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1", status=MailEnrollmentStatus.COMPLETED))
     await stores["enrollment_step_store"].create(
@@ -374,10 +510,15 @@ async def test_completed_campaign_with_every_lead_started_shows_full_progress(st
     [item] = (await service.list_campaigns()).items
     assert item.status == MailCampaignStatus.COMPLETED
     assert item.progress_percent == 100.0
+    assert item.finished_leads == 1
+    assert item.in_progress_leads == 0
     assert item.available_leads == 0
 
 
-async def test_paused_campaign_with_partial_start_shows_real_partial_progress(stores, service):
+async def test_paused_campaign_with_partial_start_and_nothing_finished_yet_shows_zero_progress(stores, service):
+    """Available (lead-start) and Progress (sequence-completion) are
+    independent: e1 already started (Step 1 sent) but hasn't COMPLETED,
+    so Available correctly drops to 1 while Progress stays 0%."""
     await stores["campaign_store"].create(make_campaign("c1", "Paused Campaign", status=MailCampaignStatus.PAUSED))
     await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
     await stores["enrollment_store"].create(make_enrollment("e2", "c1", "contact2"))
@@ -386,7 +527,9 @@ async def test_paused_campaign_with_partial_start_shows_real_partial_progress(st
     )
     [item] = (await service.list_campaigns()).items
     assert item.status == MailCampaignStatus.PAUSED
-    assert item.progress_percent == 50.0
+    assert item.progress_percent == 0.0
+    assert item.finished_leads == 0
+    assert item.in_progress_leads == 2
     assert item.available_leads == 1
 
 

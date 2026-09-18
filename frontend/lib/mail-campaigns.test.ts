@@ -168,11 +168,13 @@ test("MailCampaignListItem/MailCampaignListPage (api.ts) are distinct types from
   assert.match(API_SOURCE, /export interface MailCampaign\b/);
 });
 
-test("MailCampaignListItem (api.ts) carries available_leads/reply_rate_percent and no mailbox/sent/completed fields", () => {
+test("MailCampaignListItem (api.ts) carries available_leads/finished_leads/in_progress_leads/reply_rate_percent and no mailbox/sent/completed fields", () => {
   const start = API_SOURCE.indexOf("export interface MailCampaignListItem");
   const end = API_SOURCE.indexOf("export interface MailCampaignListPage");
   const block = API_SOURCE.slice(start, end);
   assert.match(block, /available_leads: number/);
+  assert.match(block, /finished_leads: number/);
+  assert.match(block, /in_progress_leads: number/);
   assert.match(block, /reply_rate_percent: number/);
   assert.doesNotMatch(block, /mailbox_id|mailbox_email|mailbox_count|\bsent:|\bcompleted:/);
 });
@@ -192,6 +194,8 @@ test("MailCampaignListItem (backend model) has no open/click-rate field, but doe
   assert.doesNotMatch(modelBlock, /open_rate|click_rate/i);
   assert.match(modelBlock, /reply_rate_percent: float/);
   assert.match(modelBlock, /available_leads: int/);
+  assert.match(modelBlock, /finished_leads: int/);
+  assert.match(modelBlock, /in_progress_leads: int/);
   assert.doesNotMatch(modelBlock, /mailbox_id|mailbox_email|mailbox_count/);
 });
 
@@ -215,12 +219,26 @@ test("available_leads is total minus leads whose Step 1 actually reached SENT --
   assert.match(methodBlock, /available = total - started/);
 });
 
-test("progress_percent is started/total (lead-start progress), never total-sequence-step completion", () => {
+test("progress_percent is finished/total (sequence-completion progress), never lead-start progress or a step-send count", () => {
   const methodBlock = SERVICE_SOURCE.slice(
     SERVICE_SOURCE.indexOf("async def _build_item"),
     SERVICE_SOURCE.indexOf("async def list_campaigns")
   );
-  assert.match(methodBlock, /round\(\(started \/ total\) \* 100, 1\) if total > 0 else 0\.0/);
+  assert.match(methodBlock, /round\(\(finished \/ total\) \* 100, 1\) if total > 0 else 0\.0/);
+  assert.match(methodBlock, /finished = counts\[MailEnrollmentStatus\.COMPLETED\]/);
+  assert.match(methodBlock, /in_progress = total - finished/);
+});
+
+test("finished_leads counts only COMPLETED -- REPLIED/SUPPRESSED/FAILED (each also terminal) are explicitly excluded", () => {
+  const methodBlock = SERVICE_SOURCE.slice(
+    SERVICE_SOURCE.indexOf("async def _build_item"),
+    SERVICE_SOURCE.indexOf("async def list_campaigns")
+  );
+  // Only one counts[...] read feeds `finished` -- COMPLETED -- never a
+  // sum that also folds in REPLIED/SUPPRESSED/FAILED.
+  const finishedLine = methodBlock.match(/finished = .+/)?.[0] ?? "";
+  assert.match(finishedLine, /MailEnrollmentStatus\.COMPLETED/);
+  assert.doesNotMatch(finishedLine, /REPLIED|SUPPRESSED|FAILED/);
 });
 
 test("reply_rate_percent uses the exact same replied/total formula as the campaign Dashboard stats strip", () => {
@@ -300,4 +318,47 @@ test("search, sort, filter, and pagination wiring are unchanged by the column re
   assert.match(LIST_PAGE_SOURCE, /status: statusFilter/);
   assert.match(LIST_PAGE_SOURCE, /function handleSort/);
   assert.match(LIST_PAGE_SOURCE, /page,\s*\n\s*pageSize,/);
+});
+
+// --- Progress bar redefinition (2026-09-18b) --------------------------------
+//
+// Colored = finished the sequence (finished_leads), neutral = still in
+// progress (in_progress_leads) -- a SEPARATE concept from Available
+// (lead-start progress). No visible percentage text any more; a
+// compact native-tooltip hover carries the exact counts instead. The
+// bar itself is roughly double its original width.
+
+const PROGRESS_CELL_SOURCE = LIST_PAGE_SOURCE.slice(
+  LIST_PAGE_SOURCE.indexOf("function ProgressCell"),
+  LIST_PAGE_SOURCE.indexOf("// Narrow/pinned columns")
+);
+
+test("ProgressCell takes finished/inProgress/total, never a bare percent prop", () => {
+  assert.match(PROGRESS_CELL_SOURCE, /finished: number; inProgress: number; total: number/);
+  assert.doesNotMatch(PROGRESS_CELL_SOURCE, /percent: number \}: \{ percent/);
+});
+
+test("no visible percentage text renders next to the Progress bar any more", () => {
+  assert.doesNotMatch(PROGRESS_CELL_SOURCE, /<span[^>]*>\{percent\}%<\/span>/);
+  assert.doesNotMatch(PROGRESS_CELL_SOURCE, /\{percent\}%/);
+});
+
+test("hovering the Progress bar shows a compact tooltip with the exact in-progress and completed/total counts", () => {
+  assert.match(PROGRESS_CELL_SOURCE, /\$\{inProgress\} leads in progress/);
+  assert.match(PROGRESS_CELL_SOURCE, /\$\{finished\} completed of \$\{total\} total/);
+  assert.match(PROGRESS_CELL_SOURCE, /title=\{tooltip\}/);
+});
+
+test("the Progress bar itself is roughly double its original width, both the column and the inner track", () => {
+  assert.match(LIST_PAGE_SOURCE, /Progress:\s*"w-\[300px\]"/); // was w-[150px]
+  assert.match(PROGRESS_CELL_SOURCE, /w-32/); // was w-16
+});
+
+test("the ProgressCell call site passes real finished_leads/in_progress_leads/total_leads, never a raw progress_percent prop", () => {
+  const callSiteIndex = LIST_PAGE_SOURCE.indexOf("<ProgressCell");
+  const callSite = LIST_PAGE_SOURCE.slice(callSiteIndex, LIST_PAGE_SOURCE.indexOf("/>", callSiteIndex));
+  assert.match(callSite, /finished=\{campaign\.finished_leads\}/);
+  assert.match(callSite, /inProgress=\{campaign\.in_progress_leads\}/);
+  assert.match(callSite, /total=\{campaign\.total_leads\}/);
+  assert.doesNotMatch(callSite, /percent=\{campaign\.progress_percent\}/);
 });
