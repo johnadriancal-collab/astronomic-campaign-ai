@@ -18,9 +18,9 @@ import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel, OPEN_RATE_TOOLTI
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
 import { cn } from "@/lib/utils";
 
-// Campaign Manager Campaigns V1 (2026-09-17), lead-start progress
-// redefinition (2026-09-18), sequence-completion progress redefinition
-// (2026-09-18b) -- one row per campaign, wide table -- see
+// Campaign Manager Campaigns V1 (2026-09-17), sequence-completion
+// progress redefinition (2026-09-18b), Available redefinition
+// (2026-09-18c) -- one row per campaign, wide table -- see
 // MailCampaignListService's backend docstring for exactly what each row
 // aggregates and MailCampaignListItem's own docstring for the
 // available_leads/finished_leads/progress_percent/reply_rate_percent
@@ -30,11 +30,11 @@ import { cn } from "@/lib/utils";
 // which is why it's a static "not tracked" cell rather than a field on
 // the model at all.
 //
-// Available (lead-start) and Progress (sequence-completion) are
-// deliberately SEPARATE concepts, never conflated: Available answers
-// "has outreach started," Progress answers "has the whole sequence
-// finished" -- see ProgressCell's own comment for exactly what counts
-// as finished and why.
+// Available and Progress now share the SAME finished-sequence
+// semantics (2026-09-18c): Available is the raw count of leads that
+// have NOT finished (total - finished), and Progress's colored portion
+// is the finished count -- see ProgressCell's own comment for exactly
+// what counts as finished and why.
 //
 // Mailbox and Sent were dropped from this table (2026-09-18): Mailbox is
 // a Channels-tab concept now, and Sent is superseded by Available/
@@ -96,7 +96,7 @@ function SortHeader({
       type="button"
       onClick={() => onSort(column)}
       className={cn(
-        "inline-flex items-center gap-1 font-medium hover:text-foreground",
+        "inline-flex items-center gap-1 whitespace-nowrap font-semibold hover:text-foreground",
         active ? "text-foreground" : "text-muted-foreground",
         align === "right" && "flex-row-reverse"
       )}
@@ -129,15 +129,19 @@ function ProgressCell({ finished, inProgress, total }: { finished: number; inPro
 // width stay in lockstep without duplicating the column list itself.
 // Campaign is deliberately absent here -- it keeps its own wider,
 // truncating w-[240px] treatment below, same as before. Progress is
-// roughly double its original w-[150px] to give the longer bar real
-// room (2026-09-18b).
+// sized to snugly fit the long w-32 bar (2026-09-18b) plus its cell
+// padding -- NOT the earlier w-[300px], which left a large blank gap
+// after the bar (2026-09-18d fix). Open rate/Reply rate are widened
+// just enough that their two-word labels never wrap onto a second
+// line (see SortHeader's own whitespace-nowrap, which is the actual
+// wrap fix -- these widths just keep the declared size truthful).
 const COLUMN_WIDTH_CLASS: Record<string, string> = {
   Status: "w-[90px]",
   Available: "w-[80px]",
   Total: "w-[70px]",
-  Progress: "w-[300px]",
-  "Open rate": "w-[80px]",
-  "Reply rate": "w-[80px]",
+  Progress: "w-[170px]",
+  "Open rate": "w-[90px]",
+  "Reply rate": "w-[110px]",
   Replied: "w-[70px]",
   Suppressed: "w-[90px]",
   Failed: "w-[70px]",
@@ -279,16 +283,16 @@ export default function CampaignsPage() {
         <>
           <Card>
             <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[1550px] text-sm">
+              <table className="w-full min-w-[1460px] text-sm">
                 <thead className="border-b border-border bg-secondary/30 text-xs">
                   <tr>
-                    <th className={cn("px-3 py-2 text-left", COLUMN_WIDTH_CLASS.Status)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-left", COLUMN_WIDTH_CLASS.Status)}>
                       <SortHeader label="Status" column="status" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                     </th>
-                    <th className="w-[240px] px-3 py-2 text-left">
+                    <th className="w-[240px] whitespace-nowrap px-3 py-2 text-left">
                       <SortHeader label="Campaign" column="name" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                     </th>
-                    <th className={cn("px-3 py-2 text-right", COLUMN_WIDTH_CLASS.Available)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS.Available)}>
                       <SortHeader
                         label="Available"
                         column="available"
@@ -298,7 +302,7 @@ export default function CampaignsPage() {
                         align="right"
                       />
                     </th>
-                    <th className={cn("px-3 py-2 text-right", COLUMN_WIDTH_CLASS.Total)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS.Total)}>
                       <SortHeader
                         label="Total"
                         column="total_leads"
@@ -308,13 +312,13 @@ export default function CampaignsPage() {
                         align="right"
                       />
                     </th>
-                    <th className={cn("px-3 py-2 text-left", COLUMN_WIDTH_CLASS.Progress)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-left", COLUMN_WIDTH_CLASS.Progress)}>
                       <SortHeader label="Progress" column="progress" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                     </th>
-                    <th className={cn("px-3 py-2 text-right font-medium text-muted-foreground", COLUMN_WIDTH_CLASS["Open rate"])}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right font-semibold text-muted-foreground", COLUMN_WIDTH_CLASS["Open rate"])}>
                       Open rate
                     </th>
-                    <th className={cn("px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Reply rate"])}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Reply rate"])}>
                       <SortHeader
                         label="Reply rate"
                         column="reply_rate"
@@ -324,7 +328,7 @@ export default function CampaignsPage() {
                         align="right"
                       />
                     </th>
-                    <th className={cn("px-3 py-2 text-right", COLUMN_WIDTH_CLASS.Replied)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS.Replied)}>
                       <SortHeader
                         label="Replied"
                         column="replied"
@@ -334,16 +338,16 @@ export default function CampaignsPage() {
                         align="right"
                       />
                     </th>
-                    <th className={cn("px-3 py-2 text-right font-medium text-muted-foreground", COLUMN_WIDTH_CLASS.Suppressed)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right font-semibold text-muted-foreground", COLUMN_WIDTH_CLASS.Suppressed)}>
                       Suppressed
                     </th>
-                    <th className={cn("px-3 py-2 text-right font-medium text-muted-foreground", COLUMN_WIDTH_CLASS.Failed)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right font-semibold text-muted-foreground", COLUMN_WIDTH_CLASS.Failed)}>
                       Failed
                     </th>
-                    <th className={cn("px-3 py-2 text-right font-medium text-muted-foreground", COLUMN_WIDTH_CLASS.Steps)}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right font-semibold text-muted-foreground", COLUMN_WIDTH_CLASS.Steps)}>
                       Steps
                     </th>
-                    <th className={cn("px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Campaign created"])}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Campaign created"])}>
                       <SortHeader
                         label="Campaign created"
                         column="created_at"
@@ -353,7 +357,7 @@ export default function CampaignsPage() {
                         align="right"
                       />
                     </th>
-                    <th className={cn("px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Last updated"])}>
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Last updated"])}>
                       <SortHeader
                         label="Last updated"
                         column="updated_at"
@@ -382,15 +386,15 @@ export default function CampaignsPage() {
                         <Link
                           href={`/manager/campaigns/mail/${campaign.mail_campaign_id}`}
                           title={campaign.name}
-                          className="block truncate whitespace-nowrap px-3 py-2 font-medium hover:underline"
+                          className="block truncate whitespace-nowrap px-3 py-2 font-normal hover:underline"
                         >
                           {campaign.name}
                         </Link>
                       </td>
-                      <td className={cn("px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Available)}>
+                      <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Available)}>
                         {campaign.available_leads}
                       </td>
-                      <td className={cn("px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Total)}>
+                      <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Total)}>
                         {campaign.total_leads}
                       </td>
                       <td className={cn("px-3 py-2", COLUMN_WIDTH_CLASS.Progress)}>
@@ -406,19 +410,19 @@ export default function CampaignsPage() {
                       >
                         —
                       </td>
-                      <td className={cn("px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS["Reply rate"])}>
+                      <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS["Reply rate"])}>
                         {campaign.reply_rate_percent}%
                       </td>
-                      <td className={cn("px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Replied)}>
+                      <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Replied)}>
                         {campaign.replied}
                       </td>
-                      <td className={cn("px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Suppressed)}>
+                      <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Suppressed)}>
                         {campaign.suppressed}
                       </td>
-                      <td className={cn("px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Failed)}>
+                      <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Failed)}>
                         {campaign.failed}
                       </td>
-                      <td className={cn("px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Steps)}>
+                      <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS.Steps)}>
                         {campaign.step_count}
                       </td>
                       <td

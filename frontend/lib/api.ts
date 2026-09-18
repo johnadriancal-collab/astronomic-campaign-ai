@@ -1576,9 +1576,14 @@ export function getMailLead(crmContactId: string): Promise<MailLeadDetail> {
 //
 // 2026-09-18b: progress_percent moved again -- now finished_leads /
 // total_leads (sequence-completion progress: finished_leads counts
-// ONLY MailEnrollmentStatus.COMPLETED), a separate concept from
-// available_leads (lead-start progress, unchanged). in_progress_leads
-// is total_leads - finished_leads.
+// ONLY MailEnrollmentStatus.COMPLETED). in_progress_leads is
+// total_leads - finished_leads.
+//
+// 2026-09-18c: available_leads redefined AGAIN -- now the SAME value
+// as in_progress_leads ("has NOT finished the sequence"), replacing
+// the intermediate "Step 1 hasn't sent yet" definition above. Kept as
+// its own named field only so the Available column reads naturally;
+// it is not computed independently from in_progress_leads.
 export interface MailCampaignListItem {
   mail_campaign_id: string;
   name: string;

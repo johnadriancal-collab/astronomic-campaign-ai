@@ -474,7 +474,6 @@ async def lifespan(app: FastAPI):
     app.state.mail_campaign_list_service = MailCampaignListService(
         campaign_store=mail_campaign_store,
         enrollment_store=mail_enrollment_store,
-        enrollment_step_store=mail_enrollment_step_store,
         sequence_step_store=mail_sequence_step_store,
     )
 

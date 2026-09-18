@@ -1271,48 +1271,33 @@ class MailLeadDetail(BaseModel):
 
 
 class MailCampaignListItem(BaseModel):
-    """One row (2026-09-18 redefinition -- QuickMail-style lead-start
-    progress, replacing the original terminal-enrollment-ratio
-    progress_percent).
+    """One row (2026-09-18c: Available redefined to match Progress's
+    sequence-completion semantics, replacing two earlier definitions --
+    see git history/prior docstrings for the original terminal-
+    enrollment ratio and the intermediate Step-1-lead-start version).
 
-    `available_leads` -- leads whose Step 1 has NOT been SENT yet. Exact
-    definition: an enrollment counts as STARTED (not Available) iff a
-    MailEnrollmentStep row exists for step_number == 1 with
-    status == SENT. `available_leads = total_leads - started`.
-    Deliberately status-based, not enrollment-status-based: a lead that
-    replied AFTER Step 1 sent (status REPLIED, mid-sequence) is correctly
-    NOT Available, because outreach already started -- but a Step 1 that
-    was attempted and came back FAILED (or is stuck in SENDING/UNKNOWN)
-    is still counted as Available, since no message was ever confirmed
-    delivered; this is a deliberate, literal reading of "has the initial
-    email been sent," not "was an attempt made." A pre-suppressed
-    enrollment (SUPPRESSED at snapshot time, so Step 1 is never even
-    materialized -- see MailEnrollment's own docstring) is likewise
-    Available by this same literal rule, even though it will never
-    actually be started automatically.
-
-    `progress_percent` (redefined again, 2026-09-18b) is now
-    `finished_leads / total_leads * 100` -- SEQUENCE-COMPLETION progress,
-    deliberately separate from `available_leads` above (which stays
-    "has outreach started," never touched by this redefinition).
     `finished_leads` counts ONLY enrollments whose `status ==
-    MailEnrollmentStatus.COMPLETED` -- the ONE status this codebase's own
-    enrollment state machine defines as "every MailEnrollmentStep row
-    reached a terminal status AND there is no further MailSequenceStep
-    left to materialize" (see MailEnrollmentStatus's own docstring).
-    REPLIED/SUPPRESSED/FAILED are each also terminal (nothing further
-    will ever be attempted for that enrollment), but deliberately do
-    NOT count as "finished" here -- each represents the sequence being
-    cut short before every applicable step ran, not the sequence
-    running to completion, so lumping them in would silently overstate
-    how many leads actually finished. `in_progress_leads = total_leads -
-    finished_leads` -- everything not COMPLETED, including PENDING/
-    ACTIVE/PAUSED and the three early-stopped terminal statuses above.
-    0.0 for a zero-enrollment campaign (nothing to divide), never
-    fabricated. An ACTIVE campaign with leads still mid-sequence (or
-    stopped early by a reply/suppression/failure) correctly shows less
-    than 100% -- this is NOT lead-start progress (that's
-    `available_leads` above) and NOT a step-send count.
+    MailEnrollmentStatus.COMPLETED` -- the ONE status this codebase's
+    own enrollment state machine defines as "every MailEnrollmentStep
+    row reached a terminal status AND there is no further
+    MailSequenceStep left to materialize" (see MailEnrollmentStatus's
+    own docstring). REPLIED/SUPPRESSED/FAILED are each also terminal
+    (nothing further will ever be attempted for that enrollment), but
+    deliberately do NOT count as "finished" -- each represents the
+    sequence being cut short before every applicable step ran, not the
+    sequence running to completion. This is intentional under the
+    current definition, not a gap to silently patch: a REPLIED/
+    SUPPRESSED/FAILED enrollment that stopped early stays Available/
+    in-progress until Finished is ever redefined.
+
+    `available_leads` and `in_progress_leads` are now the SAME value --
+    both `total_leads - finished_leads`, i.e. "has NOT finished the
+    sequence" -- kept as two separately-named response fields only so
+    the Available column and the Progress tooltip each read naturally
+    on their own; they are not computed independently and can never
+    disagree. `progress_percent` is `finished_leads / total_leads *
+    100` -- the Progress bar's colored portion. 0.0 for a
+    zero-enrollment campaign (nothing to divide), never fabricated.
 
     `reply_rate_percent` is `replied / total_leads * 100` -- the EXACT
     same numerator/denominator/rounding convention as

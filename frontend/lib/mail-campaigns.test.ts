@@ -210,13 +210,14 @@ test("MailCampaignListService is a pure aggregation over existing stores -- no n
   assert.match(SERVICE_SOURCE, /enrollment_store: MailEnrollmentStore/);
 });
 
-test("available_leads is total minus leads whose Step 1 actually reached SENT -- never a terminal-enrollment ratio", () => {
+test("available_leads (2026-09-18c) is total minus finished (not-finished-sequence), never the old Step-1-sent or terminal-enrollment-ratio definitions", () => {
   const methodBlock = SERVICE_SOURCE.slice(
     SERVICE_SOURCE.indexOf("async def _build_item"),
     SERVICE_SOURCE.indexOf("async def list_campaigns")
   );
-  assert.match(methodBlock, /step\.step_number == 1 and step\.status == MailEnrollmentStepStatus\.SENT/);
-  assert.match(methodBlock, /available = total - started/);
+  assert.match(methodBlock, /available_leads=not_finished/);
+  assert.doesNotMatch(SERVICE_SOURCE, /step_number == 1/);
+  assert.doesNotMatch(SERVICE_SOURCE, /MailEnrollmentStepStore/);
 });
 
 test("progress_percent is finished/total (sequence-completion progress), never lead-start progress or a step-send count", () => {
@@ -226,7 +227,16 @@ test("progress_percent is finished/total (sequence-completion progress), never l
   );
   assert.match(methodBlock, /round\(\(finished \/ total\) \* 100, 1\) if total > 0 else 0\.0/);
   assert.match(methodBlock, /finished = counts\[MailEnrollmentStatus\.COMPLETED\]/);
-  assert.match(methodBlock, /in_progress = total - finished/);
+  assert.match(methodBlock, /not_finished = total - finished/);
+});
+
+test("available_leads and in_progress_leads are the same computation, never independently derived", () => {
+  const methodBlock = SERVICE_SOURCE.slice(
+    SERVICE_SOURCE.indexOf("async def _build_item"),
+    SERVICE_SOURCE.indexOf("async def list_campaigns")
+  );
+  assert.match(methodBlock, /available_leads=not_finished/);
+  assert.match(methodBlock, /in_progress_leads=not_finished/);
 });
 
 test("finished_leads counts only COMPLETED -- REPLIED/SUPPRESSED/FAILED (each also terminal) are explicitly excluded", () => {
@@ -282,6 +292,31 @@ test("the campaign name's full text is preserved as the stored name and exposed 
 
 test("the Campaign column has a bounded width so it can't consume the whole table or collapse to near-zero", () => {
   assert.match(LIST_PAGE_SOURCE, /w-\[240px\]/);
+});
+
+// --- Header/row typography hierarchy (2026-09-18e) --------------------------
+//
+// Headers carry the stronger visual weight (semibold); campaign names --
+// and every other row cell -- render at normal weight, never bold.
+
+test("the campaign name renders at normal font weight, never bold/medium", () => {
+  assert.match(NAME_CELL, /font-normal/);
+  assert.doesNotMatch(NAME_CELL, /font-medium|font-semibold|font-bold/);
+});
+
+test("sortable column headers (SortHeader) carry a stronger, semibold weight", () => {
+  const sortHeaderBlock = LIST_PAGE_SOURCE.slice(
+    LIST_PAGE_SOURCE.indexOf("function SortHeader"),
+    LIST_PAGE_SOURCE.indexOf("function ProgressCell")
+  );
+  assert.match(sortHeaderBlock, /font-semibold/);
+});
+
+test("static (non-sortable) headers -- Open rate/Suppressed/Failed/Steps -- also carry the semibold weight", () => {
+  assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\["Open rate"\]/);
+  assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\.Suppressed/);
+  assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\.Failed/);
+  assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\.Steps/);
 });
 
 test("table cell padding is tighter than the original px-4 py-2.5 pass, for a more compact row height", () => {
@@ -349,9 +384,41 @@ test("hovering the Progress bar shows a compact tooltip with the exact in-progre
   assert.match(PROGRESS_CELL_SOURCE, /title=\{tooltip\}/);
 });
 
-test("the Progress bar itself is roughly double its original width, both the column and the inner track", () => {
-  assert.match(LIST_PAGE_SOURCE, /Progress:\s*"w-\[300px\]"/); // was w-[150px]
-  assert.match(PROGRESS_CELL_SOURCE, /w-32/); // was w-16
+test("the Progress bar track itself stays the long, doubled width -- only the surrounding column shrank to remove the excess gap", () => {
+  assert.match(PROGRESS_CELL_SOURCE, /w-32/); // was w-16 -- unchanged by the 2026-09-18d density fix
+});
+
+// --- Header/column density fix (2026-09-18d) --------------------------------
+//
+// Two production issues: a large blank gap after the Progress bar
+// (column was far wider than the bar it holds), and "Reply rate"
+// wrapping onto two lines. Fixed by snugging Progress's column width to
+// the bar's real content width and adding whitespace-nowrap to every
+// header label so the browser grows a column instead of wrapping it.
+
+test("the Progress column is snugly sized to the bar's real content width, not the old oversized w-[300px]", () => {
+  assert.match(LIST_PAGE_SOURCE, /Progress:\s*"w-\[170px\]"/);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /Progress:\s*"w-\[300px\]"/);
+});
+
+test("every header label -- sortable and static -- is whitespace-nowrap so none can wrap onto a second line", () => {
+  assert.match(sortHeaderButtonClass(), /whitespace-nowrap/);
+  // Every <th> in the header row also carries whitespace-nowrap directly.
+  const headSection = LIST_PAGE_SOURCE.slice(LIST_PAGE_SOURCE.indexOf("<thead"), LIST_PAGE_SOURCE.indexOf("</thead>"));
+  const thCount = headSection.match(/<th className/g)?.length ?? 0;
+  const nowrapThCount = headSection.match(/<th className=\{?"?[^>]*whitespace-nowrap/g)?.length ?? 0;
+  assert.equal(nowrapThCount, thCount, "every <th> should carry whitespace-nowrap");
+});
+
+function sortHeaderButtonClass(): string {
+  const start = LIST_PAGE_SOURCE.indexOf("function SortHeader");
+  const end = LIST_PAGE_SOURCE.indexOf("function ProgressCell");
+  return LIST_PAGE_SOURCE.slice(start, end);
+}
+
+test("Reply rate and Open rate columns are widened just enough for their two-word labels", () => {
+  assert.match(LIST_PAGE_SOURCE, /"Reply rate":\s*"w-\[110px\]"/);
+  assert.match(LIST_PAGE_SOURCE, /"Open rate":\s*"w-\[90px\]"/);
 });
 
 test("the ProgressCell call site passes real finished_leads/in_progress_leads/total_leads, never a raw progress_percent prop", () => {
