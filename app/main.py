@@ -480,12 +480,13 @@ async def lifespan(app: FastAPI):
         mailbox_store=mailbox_store,
     )
 
-    # Proactive OAuth expiration warnings (2026-09-17) -- read-only, no
-    # new persistence. See MailCampaignMailboxNextSendService's own
-    # module docstring.
+    # Proactive OAuth expiration warnings (2026-09-17, mailbox-attribution
+    # fix 2026-09-18) -- read-only, no new persistence. See
+    # MailCampaignMailboxNextSendService's own module docstring.
     app.state.mail_campaign_mailbox_next_send_service = MailCampaignMailboxNextSendService(
         campaign_store=mail_campaign_store,
         channel_store=mail_campaign_mailbox_store,
+        enrollment_store=mail_enrollment_store,
         enrollment_step_store=mail_enrollment_step_store,
     )
 

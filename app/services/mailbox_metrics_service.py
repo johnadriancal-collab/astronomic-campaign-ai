@@ -20,34 +20,26 @@ already use -- same V1 pilot-scale, loop-and-aggregate-in-Python stance
 as every other read service this session. One pass over all campaigns
 (three store calls per campaign), not a per-mailbox loop over campaigns.
 
-Queue counting is deliberately conservative -- see _attribute_queue_step
-below for exactly which steps get attributed to which mailbox and why.
-Deliverability Index has no field here: zero real signal exists anywhere
-in this codebase for Astronomic Mail (see frontend/lib/mailboxes.ts's
-own DELIVERABILITY_TOOLTIP), so the frontend keeps showing "Not
-available" rather than this service fabricating a score.
+Queue counting is deliberately conservative -- see
+app/services/mail_step_mailbox_attribution.py's attribute_step_to_mailbox()
+for exactly which steps get attributed to which mailbox and why (the
+SAME logic MailCampaignMailboxNextSendService uses for its own proactive
+OAuth expiration warnings, so the two features never drift apart on
+this). Deliverability Index has no field here: zero real signal exists
+anywhere in this codebase for Astronomic Mail (see
+frontend/lib/mailboxes.ts's own DELIVERABILITY_TOOLTIP), so the frontend
+keeps showing "Not available" rather than this service fabricating a
+score.
 """
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.models.mail import MailEnrollmentStepStatus
 from app.repositories.mail_campaign_mailbox_store import MailCampaignMailboxStore
 from app.repositories.mail_campaign_store import MailCampaignStore
 from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
-
-# Steps that haven't been sent yet and aren't in a terminal state --
-# PENDING (not yet eligible), QUEUED (eligible, due now or later), CLAIMED
-# (a worker won it, running safety checks, no provider call made yet).
-# Deliberately excludes SENDING (a provider call is actively in flight --
-# "sending", not "waiting") and every terminal status (SENT, FAILED,
-# SKIPPED_REPLIED, SKIPPED_SUPPRESSED, UNKNOWN).
-_WAITING_STEP_STATUSES = {
-    MailEnrollmentStepStatus.PENDING,
-    MailEnrollmentStepStatus.QUEUED,
-    MailEnrollmentStepStatus.CLAIMED,
-}
+from app.services.mail_step_mailbox_attribution import WAITING_STEP_STATUSES, attribute_step_to_mailbox
 
 
 def _utc_day_start(at: datetime) -> datetime:
@@ -95,9 +87,9 @@ class MailboxMetricsService:
 
             steps = await self.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
             for step in steps:
-                if step.status not in _WAITING_STEP_STATUSES:
+                if step.status not in WAITING_STEP_STATUSES:
                     continue
-                mailbox_id = _attribute_queue_step(
+                mailbox_id = attribute_step_to_mailbox(
                     assigned_mailbox_by_enrollment.get(step.enrollment_id), channel_mailbox_ids
                 )
                 if mailbox_id is not None:
@@ -113,24 +105,3 @@ class MailboxMetricsService:
                 queue_count=queue_by_mailbox.get(mailbox_id, 0),
             )
         return result
-
-
-def _attribute_queue_step(assigned_mailbox_id: str | None, channel_mailbox_ids: list[str]) -> str | None:
-    """Which mailbox (if any) this waiting step should be counted against.
-
-    Exact, never guessed: a step whose enrollment already has a sticky
-    assigned_mailbox_id (set once that lead's Step 1 is claimed -- see
-    MailEnrollment.assigned_mailbox_id's own docstring) is attributed
-    there. An enrollment that hasn't been assigned yet is only
-    attributed when the campaign has exactly one channel mailbox --
-    the sole possible candidate. A not-yet-assigned enrollment on a
-    campaign with multiple channel mailboxes is left unattributed
-    (returns None) rather than guessed, since the eventual sender
-    depends on MailSendingService._pick_mailbox_deterministic()'s
-    runtime choice.
-    """
-    if assigned_mailbox_id is not None:
-        return assigned_mailbox_id
-    if len(channel_mailbox_ids) == 1:
-        return channel_mailbox_ids[0]
-    return None
