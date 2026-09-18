@@ -235,10 +235,15 @@ test("reply reading no longer happens in a modal anywhere (Inbox V2 UX change, 2
 test("the Inbox list row is a real navigation (next/link Link), not a modal-opening button", () => {
   const rowBlock = INBOX_PAGE_SOURCE.slice(
     INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)"),
-    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)") + 400
+    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)") + 800
   );
+  // Every cell wraps its content in a <Link> to the SAME row href (2026-
+  // 09-18: real <table> with an explicit header row, per cell clickable
+  // rather than one div-shaped anchor) -- still a real next/link
+  // navigation, never a modal.
+  assert.match(rowBlock, /const href = `\/manager\/inbox\/\$\{reply\.enrollment_id\}`/);
   assert.match(rowBlock, /<Link\b/);
-  assert.match(rowBlock, /href=\{`\/manager\/inbox\/\$\{reply\.enrollment_id\}`\}/);
+  assert.match(rowBlock, /href=\{href\}/);
   assert.doesNotMatch(rowBlock, /onClick=\{\(\) => setSelected/);
 });
 
@@ -329,40 +334,95 @@ test("the campaign filter <select> has a base full-width class, not just a sm: w
   assert.match(selectBlock, /className="[^"]*\bw-full\b[^"]*sm:w-56/);
 });
 
-test("the reply row is always a single-line horizontal row (2026-09-18 density pass) -- never stacks name/email/campaign vertically on narrow screens", () => {
-  // Table-density standard established on Campaigns/Emails/Leads: name,
-  // email, campaign, and timestamp all stay on ONE line at every width;
-  // the row's own container scrolls horizontally instead (see the
-  // overflow-x-auto/min-w test below), rather than wrapping content.
-  const rowButtonOpenTag = INBOX_PAGE_SOURCE.slice(
-    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)"),
-    INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)") + 400
+// --- Explicit table headers + Subject column (2026-09-18) --------------------
+
+test("the Inbox list renders an explicit header row with exactly Lead, Email, Subject, Campaign, Last reply, in that order", () => {
+  const theadBlock = INBOX_PAGE_SOURCE.slice(INBOX_PAGE_SOURCE.indexOf("<thead"), INBOX_PAGE_SOURCE.indexOf("</thead>"));
+  const headers = [...theadBlock.matchAll(/<th[^>]*>([^<]+)<\/th>/g)].map((m) => m[1].trim());
+  assert.deepEqual(headers, ["Lead", "Email", "Subject", "Campaign", "Last reply"]);
+});
+
+test("the Replied badge no longer renders in the Inbox list", () => {
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, />Replied</);
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /bg-emerald-100/);
+});
+
+test("each row renders the real subject (falling back to an em dash, never a fabricated string built from the campaign name)", () => {
+  assert.match(INBOX_PAGE_SOURCE, /const subject = reply\.subject \?\? "—"/);
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /reply\.campaign_name.*subject|subject.*=.*campaign_name/);
+});
+
+test("every cell (Lead, Email, Subject, Campaign, Last reply) wraps its content in a Link to the same row href -- the whole row is clickable, still a real navigation", () => {
+  const mapStart = INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)");
+  const rowBlock = INBOX_PAGE_SOURCE.slice(mapStart, INBOX_PAGE_SOURCE.indexOf("</tr>", mapStart) + 10);
+  const linkCount = [...rowBlock.matchAll(/<Link\b/g)].length;
+  assert.equal(linkCount, 5);
+  const hrefCount = [...rowBlock.matchAll(/href=\{href\}/g)].length;
+  assert.equal(hrefCount, 5);
+});
+
+test("Lead, Email, Subject, and Campaign each truncate to one line with their own title tooltip", () => {
+  assert.match(INBOX_PAGE_SOURCE, /title=\{name\}/);
+  assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.email\}/);
+  assert.match(INBOX_PAGE_SOURCE, /title=\{subject\}/);
+  assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.campaign_name\}/);
+  // Every truncating cell also carries the CSS that actually makes
+  // truncation happen -- not just a tooltip with no ellipsis behind it.
+  for (const marker of ["title={name}", "title={reply.email}", "title={subject}", "title={reply.campaign_name}"]) {
+    const idx = INBOX_PAGE_SOURCE.indexOf(marker);
+    const cellBlock = INBOX_PAGE_SOURCE.slice(idx - 40, idx + 200);
+    assert.match(cellBlock, /truncate/);
+    assert.match(cellBlock, /whitespace-nowrap/);
+  }
+});
+
+test("stored contact names/emails/subjects/campaign names are never manually shortened -- truncation is CSS-only", () => {
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /\.slice\(0,|\.substring\(0,/);
+});
+
+test("Last reply shows a real relative-time string derived from replied_at, with the exact local date/time as a title tooltip", () => {
+  assert.match(INBOX_PAGE_SOURCE, /formatRelativeTime\(reply\.replied_at\)/);
+  assert.match(INBOX_PAGE_SOURCE, /const exactReplyTime = new Date\(reply\.replied_at\)\.toLocaleString\(\)/);
+  assert.match(INBOX_PAGE_SOURCE, /title=\{exactReplyTime\}/);
+});
+
+test("formatRelativeTime produces QuickMail-style phrasing and never mutates/replaces the stored timestamp", () => {
+  const fnBlock = INBOX_PAGE_SOURCE.slice(
+    INBOX_PAGE_SOURCE.indexOf("function formatRelativeTime"),
+    INBOX_PAGE_SOURCE.indexOf("export default function InboxPage")
   );
-  assert.match(rowButtonOpenTag, /flex w-full items-center gap-3 whitespace-nowrap/);
-  assert.doesNotMatch(rowButtonOpenTag, /flex-col/);
+  assert.match(fnBlock, /just now/);
+  assert.match(fnBlock, /about \$\{minutes\} minute/);
+  assert.match(fnBlock, /about \$\{hours\} hour/);
+  assert.match(fnBlock, /about 1 day ago/);
+  assert.match(fnBlock, /\$\{days\} days ago/);
+  // Purely a derived display string -- never writes back to `reply` or
+  // calls a setter with a recomputed timestamp.
+  assert.doesNotMatch(fnBlock, /setReplies|reply\.replied_at\s*=/);
+});
+
+test("search now also matches on subject, in addition to the existing name/email/campaign fields", () => {
+  const filterBlock = INBOX_PAGE_SOURCE.slice(INBOX_PAGE_SOURCE.indexOf("const filtered = useMemo"), INBOX_PAGE_SOURCE.indexOf("}, [replies, search, campaignFilter]);"));
+  assert.match(filterBlock, /r\.contact_name/);
+  assert.match(filterBlock, /r\.email\.toLowerCase/);
+  assert.match(filterBlock, /r\.campaign_name\.toLowerCase/);
+  assert.match(filterBlock, /r\.subject \?\? ""/);
 });
 
 test("the reply list scrolls horizontally in its own container rather than corrupting the page on narrow screens", () => {
   assert.match(INBOX_PAGE_SOURCE, /overflow-x-auto/);
-  assert.match(INBOX_PAGE_SOURCE, /min-w-\[880px\]/);
-});
-
-test("Name, Email, and Campaign name each truncate to one line with their own title tooltip", () => {
-  assert.match(INBOX_PAGE_SOURCE, /truncate font-medium" title=\{name\}/);
-  assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.email\}/);
-  assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.campaign_name\}/);
-});
-
-test("stored contact names/emails/campaign names are never manually shortened -- truncation is CSS-only", () => {
-  assert.doesNotMatch(INBOX_PAGE_SOURCE, /\.slice\(0,|\.substring\(0,/);
-});
-
-test("the reply timestamp renders a compact single-line date (no year, no wrapping)", () => {
-  assert.match(INBOX_PAGE_SOURCE, /month: "short", day: "numeric", hour: "numeric", minute: "2-digit"/);
+  assert.match(INBOX_PAGE_SOURCE, /min-w-\[1080px\]/);
 });
 
 test("row cell padding is tighter than the original px-6/px-8 py-4 pass", () => {
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /px-6 py-4/);
   assert.doesNotMatch(INBOX_PAGE_SOURCE, /sm:px-8/);
-  assert.match(INBOX_PAGE_SOURCE, /px-4 py-2\b/);
+  assert.match(INBOX_PAGE_SOURCE, /px-3 py-1\.5/);
+});
+
+test("Subject and Campaign are the wider columns; Last reply stays compact", () => {
+  const theadBlock = INBOX_PAGE_SOURCE.slice(INBOX_PAGE_SOURCE.indexOf("<thead"), INBOX_PAGE_SOURCE.indexOf("</thead>"));
+  assert.match(theadBlock, /max-w-\[360px\][^>]*>Subject/);
+  assert.match(theadBlock, /w-\[220px\][^>]*>Campaign/);
+  assert.match(theadBlock, /w-\[140px\][^>]*>Last reply/);
 });
