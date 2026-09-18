@@ -311,9 +311,9 @@ test("MailInboxService.get_reply is the single-row counterpart to list_replies, 
   assert.match(SERVICE_SOURCE, /_build_view/);
 });
 
-test("the toolbar's search and campaign filter widen on desktop and stack on narrow widths", () => {
-  assert.match(INBOX_PAGE_SOURCE, /flex-col gap-3 md:flex-row/);
-  assert.match(INBOX_PAGE_SOURCE, /sm:w-72 md:w-96/); // search
+test("the toolbar's search and campaign filter widen on desktop and stack on narrow widths -- same convention as the Campaigns/Leads toolbars (2026-09-18 density pass)", () => {
+  assert.match(INBOX_PAGE_SOURCE, /flex-col gap-3 lg:flex-row/);
+  assert.match(INBOX_PAGE_SOURCE, /w-full min-w-0 sm:w-64/); // search, matching Leads' own search input width
 });
 
 test("no fixed pixel widths or edge-to-edge full-bleed containers were introduced", () => {
@@ -329,10 +329,40 @@ test("the campaign filter <select> has a base full-width class, not just a sm: w
   assert.match(selectBlock, /className="[^"]*\bw-full\b[^"]*sm:w-56/);
 });
 
-test("the reply row stacks vertically below sm: and only becomes a horizontal split at sm: and up", () => {
+test("the reply row is always a single-line horizontal row (2026-09-18 density pass) -- never stacks name/email/campaign vertically on narrow screens", () => {
+  // Table-density standard established on Campaigns/Emails/Leads: name,
+  // email, campaign, and timestamp all stay on ONE line at every width;
+  // the row's own container scrolls horizontally instead (see the
+  // overflow-x-auto/min-w test below), rather than wrapping content.
   const rowButtonOpenTag = INBOX_PAGE_SOURCE.slice(
     INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)"),
     INBOX_PAGE_SOURCE.indexOf("filtered.map((reply)") + 400
   );
-  assert.match(rowButtonOpenTag, /flex-col gap-1[^"]*sm:flex-row/);
+  assert.match(rowButtonOpenTag, /flex w-full items-center gap-3 whitespace-nowrap/);
+  assert.doesNotMatch(rowButtonOpenTag, /flex-col/);
+});
+
+test("the reply list scrolls horizontally in its own container rather than corrupting the page on narrow screens", () => {
+  assert.match(INBOX_PAGE_SOURCE, /overflow-x-auto/);
+  assert.match(INBOX_PAGE_SOURCE, /min-w-\[880px\]/);
+});
+
+test("Name, Email, and Campaign name each truncate to one line with their own title tooltip", () => {
+  assert.match(INBOX_PAGE_SOURCE, /truncate font-medium" title=\{name\}/);
+  assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.email\}/);
+  assert.match(INBOX_PAGE_SOURCE, /title=\{reply\.campaign_name\}/);
+});
+
+test("stored contact names/emails/campaign names are never manually shortened -- truncation is CSS-only", () => {
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /\.slice\(0,|\.substring\(0,/);
+});
+
+test("the reply timestamp renders a compact single-line date (no year, no wrapping)", () => {
+  assert.match(INBOX_PAGE_SOURCE, /month: "short", day: "numeric", hour: "numeric", minute: "2-digit"/);
+});
+
+test("row cell padding is tighter than the original px-6/px-8 py-4 pass", () => {
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /px-6 py-4/);
+  assert.doesNotMatch(INBOX_PAGE_SOURCE, /sm:px-8/);
+  assert.match(INBOX_PAGE_SOURCE, /px-4 py-2\b/);
 });

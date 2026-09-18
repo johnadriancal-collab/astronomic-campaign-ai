@@ -8,7 +8,6 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { ApiError, listInboxReplies, type MailInboxReplyView } from "@/lib/api";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
-import { cn } from "@/lib/utils";
 
 // Inbox V1 (2026-09-17) -- a real, unified reply inbox across every
 // Astronomic Mail campaign, sourced from GET /mail/inbox/replies (a
@@ -22,11 +21,11 @@ import { cn } from "@/lib/utils";
 // not a Dialog open. There is no unread/read model anywhere in this
 // codebase, so this page never invents one.
 
+// Compact -- omits the year, same convention as the Campaigns/Leads list
+// pages' own formatDateTime, so the reply timestamp stays single-line at
+// the tighter row height below.
 function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
+  return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
 export default function InboxPage() {
@@ -111,17 +110,17 @@ export default function InboxPage() {
 
       {!error && replies !== null && replies.length > 0 && (
         <>
-          <div className="mb-4 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <h2 className="text-sm font-medium text-muted-foreground">
               Inbox ({filtered.length}
               {filtered.length !== replies.length ? ` of ${replies.length}` : ""})
             </h2>
-            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
               <Input
                 placeholder="Search name, email, or campaign…"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="sm:w-72 md:w-96"
+                className="w-full min-w-0 sm:w-64"
               />
               {campaigns.length > 1 && (
                 <select
@@ -148,35 +147,40 @@ export default function InboxPage() {
             </Card>
           ) : (
             <Card>
-              <CardContent className="p-0">
-                <div className="divide-y divide-border">
-                  {filtered.map((reply) => (
-                    <Link
-                      key={reply.enrollment_id}
-                      href={`/manager/inbox/${reply.enrollment_id}`}
-                      className="flex w-full min-w-0 flex-col gap-1 px-6 py-4 text-left text-sm transition-colors hover:bg-secondary/40 sm:flex-row sm:items-center sm:justify-between sm:gap-6 sm:px-8"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate font-medium">{reply.contact_name ?? reply.email}</span>
-                          <span
-                            className={cn(
-                              "shrink-0 rounded-full px-2 py-0.5 text-xs font-medium",
-                              "bg-emerald-100 text-emerald-800"
-                            )}
-                          >
-                            Replied
-                          </span>
-                        </div>
-                        <div className="mt-0.5 truncate text-xs text-muted-foreground">
-                          {reply.email} · {reply.campaign_name}
-                        </div>
-                      </div>
-                      <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground sm:w-36 sm:text-right">
-                        {formatDateTime(reply.replied_at)}
-                      </span>
-                    </Link>
-                  ))}
+              <CardContent className="overflow-x-auto p-0">
+                <div className="min-w-[880px] divide-y divide-border">
+                  {filtered.map((reply) => {
+                    const name = reply.contact_name ?? reply.email;
+                    return (
+                      <Link
+                        key={reply.enrollment_id}
+                        href={`/manager/inbox/${reply.enrollment_id}`}
+                        className="flex w-full items-center gap-3 whitespace-nowrap px-4 py-2 text-left text-sm transition-colors hover:bg-secondary/40"
+                      >
+                        <span className="min-w-0 w-[170px] shrink-0 truncate font-medium" title={name}>
+                          {name}
+                        </span>
+                        <span className="shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-800">
+                          Replied
+                        </span>
+                        <span
+                          className="min-w-0 w-[210px] shrink-0 truncate text-xs text-muted-foreground"
+                          title={reply.email}
+                        >
+                          {reply.email}
+                        </span>
+                        <span
+                          className="min-w-0 w-[220px] shrink-0 truncate text-xs text-muted-foreground"
+                          title={reply.campaign_name}
+                        >
+                          {reply.campaign_name}
+                        </span>
+                        <span className="ml-auto shrink-0 whitespace-nowrap text-right text-xs text-muted-foreground">
+                          {formatDateTime(reply.replied_at)}
+                        </span>
+                      </Link>
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>

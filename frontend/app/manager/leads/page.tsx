@@ -44,9 +44,27 @@ const STATUS_OPTIONS: { value: MailEnrollmentStatus; label: string }[] = [
 
 const PAGE_SIZE_OPTIONS = [25, 50];
 
+// Compact -- omits the year, same convention as the Campaigns list page's
+// own formatDateTime, so Last Activity stays single-line at the tighter
+// row height below.
 function formatDateTime(iso: string): string {
-  return new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+  return new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
+
+// Campaign Manager table density standard (2026-09-17/18, established on
+// Campaigns/Emails) -- identity/context columns (Name, Email, Last
+// Campaign) get real width; compact columns (Status, Campaigns count) are
+// pinned narrow so they never steal space from those.
+const COLUMN_WIDTH_CLASS = {
+  name: "w-[160px]",
+  email: "w-[200px]",
+  company: "w-[130px]",
+  title: "w-[130px]",
+  status: "w-[100px]",
+  lastCampaign: "w-[220px]",
+  campaigns: "w-[90px]",
+  lastActivity: "w-[150px]",
+};
 
 function SortHeader({
   label,
@@ -241,17 +259,25 @@ export default function LeadsPage() {
         <>
           <Card>
             <CardContent className="overflow-x-auto p-0">
-              <table className="w-full min-w-[900px] text-sm">
+              <table className="w-full min-w-[1180px] text-sm">
                 <thead className="border-b border-border bg-secondary/30 text-xs">
                   <tr>
-                    <th className="px-4 py-2.5 text-left">
+                    <th className={cn(COLUMN_WIDTH_CLASS.name, "px-3 py-2 text-left")}>
                       <SortHeader label="Name" column="name" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                     </th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Email</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Company</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Title</th>
-                    <th className="px-4 py-2.5 text-left font-medium text-muted-foreground">Status</th>
-                    <th className="px-4 py-2.5 text-left">
+                    <th className={cn(COLUMN_WIDTH_CLASS.email, "px-3 py-2 text-left font-medium text-muted-foreground")}>
+                      Email
+                    </th>
+                    <th className={cn(COLUMN_WIDTH_CLASS.company, "px-3 py-2 text-left font-medium text-muted-foreground")}>
+                      Company
+                    </th>
+                    <th className={cn(COLUMN_WIDTH_CLASS.title, "px-3 py-2 text-left font-medium text-muted-foreground")}>
+                      Title
+                    </th>
+                    <th className={cn(COLUMN_WIDTH_CLASS.status, "whitespace-nowrap px-3 py-2 text-left font-medium text-muted-foreground")}>
+                      Status
+                    </th>
+                    <th className={cn(COLUMN_WIDTH_CLASS.lastCampaign, "px-3 py-2 text-left")}>
                       <SortHeader
                         label="Last Campaign"
                         column="last_campaign"
@@ -260,8 +286,10 @@ export default function LeadsPage() {
                         onSort={handleSort}
                       />
                     </th>
-                    <th className="px-4 py-2.5 text-right font-medium text-muted-foreground">Campaigns</th>
-                    <th className="px-4 py-2.5 text-right">
+                    <th className={cn(COLUMN_WIDTH_CLASS.campaigns, "whitespace-nowrap px-3 py-2 text-right font-medium text-muted-foreground")}>
+                      Campaigns
+                    </th>
+                    <th className={cn(COLUMN_WIDTH_CLASS.lastActivity, "px-3 py-2 text-right")}>
                       <SortHeader
                         label="Last Activity"
                         column="last_activity"
@@ -274,43 +302,68 @@ export default function LeadsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-border">
-                  {items.map((lead) => (
-                    <tr key={lead.crm_contact_id} className="hover:bg-secondary/20">
-                      <td className="p-0">
-                        <Link
-                          href={`/manager/leads/${lead.crm_contact_id}`}
-                          className="flex items-center gap-1.5 px-4 py-2.5 font-medium hover:underline"
+                  {items.map((lead) => {
+                    const name = lead.name ?? lead.email ?? "(unknown)";
+                    return (
+                      <tr key={lead.crm_contact_id} className="hover:bg-secondary/20">
+                        <td className={cn(COLUMN_WIDTH_CLASS.name, "max-w-[160px] p-0")}>
+                          <Link
+                            href={`/manager/leads/${lead.crm_contact_id}`}
+                            title={name}
+                            className="flex items-center gap-1.5 whitespace-nowrap px-3 py-1.5 font-medium hover:underline"
+                          >
+                            <span className="min-w-0 truncate">{name}</span>
+                            {lead.replied && (
+                              <MessageSquare className="h-3.5 w-3.5 shrink-0 text-emerald-700" aria-label="Has replied" />
+                            )}
+                          </Link>
+                        </td>
+                        <td
+                          className={cn(COLUMN_WIDTH_CLASS.email, "max-w-[200px] truncate whitespace-nowrap px-3 py-1.5 text-muted-foreground")}
+                          title={lead.email ?? undefined}
                         >
-                          {lead.name ?? lead.email ?? "(unknown)"}
-                          {lead.replied && (
-                            <MessageSquare className="h-3.5 w-3.5 shrink-0 text-emerald-700" aria-label="Has replied" />
-                          )}
-                        </Link>
-                      </td>
-                      <td className="px-4 py-2.5 text-muted-foreground">{lead.email ?? "—"}</td>
-                      <td className="px-4 py-2.5 text-muted-foreground">{lead.company ?? "—"}</td>
-                      <td className="px-4 py-2.5 text-muted-foreground">{lead.title ?? "—"}</td>
-                      <td className="px-4 py-2.5">
-                        <span
-                          className={cn(
-                            "rounded-full px-2 py-0.5 text-xs font-medium",
-                            mailEnrollmentStatusBadgeClass(lead.status)
-                          )}
+                          {lead.email ?? "—"}
+                        </td>
+                        <td
+                          className={cn(COLUMN_WIDTH_CLASS.company, "max-w-[130px] truncate whitespace-nowrap px-3 py-1.5 text-muted-foreground")}
+                          title={lead.company ?? undefined}
                         >
-                          {mailEnrollmentStatusLabel(lead.status)}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <Link href={`/manager/campaigns/mail/${lead.last_campaign_id}`} className="hover:underline">
-                          {lead.last_campaign_name}
-                        </Link>
-                      </td>
-                      <td className="px-4 py-2.5 text-right text-muted-foreground">{lead.campaigns_count}</td>
-                      <td className="px-4 py-2.5 text-right text-muted-foreground">
-                        {formatDateTime(lead.last_activity_at)}
-                      </td>
-                    </tr>
-                  ))}
+                          {lead.company ?? "—"}
+                        </td>
+                        <td
+                          className={cn(COLUMN_WIDTH_CLASS.title, "max-w-[130px] truncate whitespace-nowrap px-3 py-1.5 text-muted-foreground")}
+                          title={lead.title ?? undefined}
+                        >
+                          {lead.title ?? "—"}
+                        </td>
+                        <td className={cn(COLUMN_WIDTH_CLASS.status, "whitespace-nowrap px-3 py-1.5")}>
+                          <span
+                            className={cn(
+                              "rounded-full px-2 py-0.5 text-xs font-medium",
+                              mailEnrollmentStatusBadgeClass(lead.status)
+                            )}
+                          >
+                            {mailEnrollmentStatusLabel(lead.status)}
+                          </span>
+                        </td>
+                        <td className={cn(COLUMN_WIDTH_CLASS.lastCampaign, "max-w-[220px] p-0")}>
+                          <Link
+                            href={`/manager/campaigns/mail/${lead.last_campaign_id}`}
+                            title={lead.last_campaign_name}
+                            className="block truncate whitespace-nowrap px-3 py-1.5 hover:underline"
+                          >
+                            {lead.last_campaign_name}
+                          </Link>
+                        </td>
+                        <td className={cn(COLUMN_WIDTH_CLASS.campaigns, "whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground")}>
+                          {lead.campaigns_count}
+                        </td>
+                        <td className={cn(COLUMN_WIDTH_CLASS.lastActivity, "whitespace-nowrap px-3 py-1.5 text-right text-muted-foreground")}>
+                          {formatDateTime(lead.last_activity_at)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </CardContent>
