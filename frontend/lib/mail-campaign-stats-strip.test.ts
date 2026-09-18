@@ -96,6 +96,22 @@ test("the stale 'no scheduler yet' claim is removed from the Dashboard tab", () 
   assert.doesNotMatch(DASHBOARD_TAB_SOURCE, /no scheduler yet/i);
 });
 
+test("the Audience & Sequence explanatory paragraph is removed entirely, not replaced with new prose", () => {
+  assert.doesNotMatch(DASHBOARD_TAB_SOURCE, /planning statistic/i);
+  assert.doesNotMatch(DASHBOARD_TAB_SOURCE, /projected send date/i);
+  // The five real metrics themselves must still be there -- only the
+  // explanatory <p> underneath them was removed.
+  for (const field of [
+    "total_contacts",
+    "contacts_missing_email",
+    "contacts_eligible",
+    "sequence_step_count",
+    "theoretical_total_sends",
+  ]) {
+    assert.match(DASHBOARD_TAB_SOURCE, new RegExp(field));
+  }
+});
+
 // --- API client ------------------------------------------------------------------
 
 test("getMailCampaignStats calls the campaign-scoped stats route", () => {

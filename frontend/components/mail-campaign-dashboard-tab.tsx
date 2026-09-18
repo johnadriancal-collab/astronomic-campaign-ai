@@ -78,11 +78,6 @@ export function MailCampaignDashboardTab({
             <Stat label="Sequence steps" value={review?.sequence_step_count ?? 0} />
             <Stat label="Theoretical total sends" value={review?.theoretical_total_sends ?? 0} emphasize />
           </dl>
-          <p className="mt-3 text-xs text-muted-foreground/70">
-            Theoretical total sends is a planning statistic (eligible recipients &times; sequence steps) -- actual
-            sends still depend on the campaign&apos;s schedule, mailbox pacing, and real replies/suppressions along
-            the way, so this is not a projected send date or a guarantee.
-          </p>
         </CardContent>
       </Card>
 
