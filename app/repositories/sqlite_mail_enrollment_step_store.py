@@ -74,9 +74,23 @@ CREATE INDEX IF NOT EXISTS idx_mail_enrollment_steps_claimed
     ON mail_enrollment_steps(status, claimed_at)
 """
 
+# Open tracking (2026-09-18) -- this table already has real production
+# data (unlike when it was first created), so open_tracking_token is
+# added via ALTER TABLE ... ADD COLUMN (checked against PRAGMA
+# table_info first, so it's idempotent and never destroys existing
+# rows), same convention as sqlite_mail_enrollment_batch_store.py's own
+# idempotency_key/status migration. A UNIQUE index tolerates multiple
+# NULLs fine (SQLite treats NULL as distinct from every other NULL in a
+# UNIQUE index) -- every pre-existing/tracking-disabled row stays NULL
+# here with zero conflict.
+CREATE_INDEX_OPEN_TOKEN_SQL = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mail_enrollment_steps_open_token
+    ON mail_enrollment_steps(open_tracking_token)
+"""
+
 _ALL_COLUMNS = (
     "enrollment_step_id, mail_campaign_id, enrollment_id, step_id, step_number, "
-    "status, next_send_at, mailbox_id, sent_at, claimed_at, data"
+    "status, next_send_at, mailbox_id, sent_at, claimed_at, open_tracking_token, data"
 )
 
 
@@ -92,6 +106,7 @@ def _row_values(step: MailEnrollmentStep) -> tuple:
         step.mailbox_id,
         step.sent_at.isoformat() if step.sent_at else None,
         step.claimed_at.isoformat() if step.claimed_at else None,
+        step.open_tracking_token,
         step.model_dump_json(),
     )
 
@@ -109,7 +124,22 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
         await self._conn.execute(CREATE_INDEX_CAMPAIGN_STEP_SQL)
         await self._conn.execute(CREATE_INDEX_ENROLLMENT_SQL)
         await self._conn.execute(CREATE_INDEX_CLAIMED_SQL)
+        await self._migrate_add_open_tracking_token_column()
         await self._conn.commit()
+
+    async def _migrate_add_open_tracking_token_column(self) -> None:
+        """Safe for a table that already existed before open_tracking_token
+        was added -- adds the column only if missing, never touches
+        existing rows. See this module's own CREATE_INDEX_OPEN_TOKEN_SQL
+        comment for why a fresh NULL-valued column is fine under a
+        UNIQUE index."""
+        cursor = await self._conn.execute("PRAGMA table_info(mail_enrollment_steps)")
+        existing_columns = {row["name"] for row in await cursor.fetchall()}
+        await cursor.close()
+
+        if "open_tracking_token" not in existing_columns:
+            await self._conn.execute("ALTER TABLE mail_enrollment_steps ADD COLUMN open_tracking_token TEXT")
+        await self._conn.execute(CREATE_INDEX_OPEN_TOKEN_SQL)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -126,7 +156,7 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
         try:
             async with sqlite_write(self._connection):
                 cursor = await self._connection.execute(
-                    f"INSERT INTO mail_enrollment_steps ({_ALL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    f"INSERT INTO mail_enrollment_steps ({_ALL_COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     _row_values(step),
                 )
         except aiosqlite.IntegrityError:
@@ -150,11 +180,20 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
         await cursor.close()
         return MailEnrollmentStep.model_validate_json(row["data"]) if row else None
 
+    async def get_by_open_tracking_token(self, open_tracking_token: str) -> MailEnrollmentStep | None:
+        cursor = await self._connection.execute(
+            "SELECT data FROM mail_enrollment_steps WHERE open_tracking_token = ?", (open_tracking_token,)
+        )
+        row = await cursor.fetchone()
+        await cursor.close()
+        return MailEnrollmentStep.model_validate_json(row["data"]) if row else None
+
     async def save(self, step: MailEnrollmentStep) -> None:
         async with sqlite_write(self._connection):
             cursor = await self._connection.execute(
                 "UPDATE mail_enrollment_steps SET mail_campaign_id=?, enrollment_id=?, step_id=?, step_number=?, "
-                "status=?, next_send_at=?, mailbox_id=?, sent_at=?, claimed_at=?, data=? WHERE enrollment_step_id=?",
+                "status=?, next_send_at=?, mailbox_id=?, sent_at=?, claimed_at=?, open_tracking_token=?, data=? "
+                "WHERE enrollment_step_id=?",
                 (
                     step.mail_campaign_id,
                     step.enrollment_id,
@@ -165,6 +204,7 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
                     step.mailbox_id,
                     step.sent_at.isoformat() if step.sent_at else None,
                     step.claimed_at.isoformat() if step.claimed_at else None,
+                    step.open_tracking_token,
                     step.model_dump_json(),
                     step.enrollment_step_id,
                 ),
@@ -177,14 +217,15 @@ class SQLiteMailEnrollmentStepStore(MailEnrollmentStepStore):
     ) -> bool:
         async with sqlite_write(self._connection):
             cursor = await self._connection.execute(
-                "UPDATE mail_enrollment_steps SET status=?, next_send_at=?, mailbox_id=?, sent_at=?, claimed_at=?, data=? "
-                "WHERE enrollment_step_id=? AND status=?",
+                "UPDATE mail_enrollment_steps SET status=?, next_send_at=?, mailbox_id=?, sent_at=?, claimed_at=?, "
+                "open_tracking_token=?, data=? WHERE enrollment_step_id=? AND status=?",
                 (
                     updated.status.value,
                     updated.next_send_at.isoformat() if updated.next_send_at else None,
                     updated.mailbox_id,
                     updated.sent_at.isoformat() if updated.sent_at else None,
                     updated.claimed_at.isoformat() if updated.claimed_at else None,
+                    updated.open_tracking_token,
                     updated.model_dump_json(),
                     enrollment_step_id,
                     expected_status.value,

@@ -1,16 +1,19 @@
 """
 Campaigns list V1 (2026-09-17), sequence-completion progress
-redefinition (2026-09-18b), Available redefinition (2026-09-18c) --
-MailCampaignListService.list_campaigns(). Plain in-memory stores
-directly, same convention as test_mail_leads_service.py. A pure
-read-side aggregation over existing MailCampaign/MailEnrollment/
-MailSequenceStep data -- these tests exercise exactly that
-join/aggregation logic, never touch persistence.
+redefinition (2026-09-18b), Available redefinition (2026-09-18c), real
+Open rate (2026-09-18) -- MailCampaignListService.list_campaigns(). Plain
+in-memory stores directly, same convention as test_mail_leads_service.py.
+A pure read-side aggregation over existing MailCampaign/MailEnrollment/
+MailEnrollmentStep/MailSequenceStep/MailOpenEvent data -- these tests
+exercise exactly that join/aggregation logic, never touch persistence.
 
 2026-09-18c: Available now means the SAME thing as in_progress_leads
-("has NOT finished the sequence," i.e. status != COMPLETED) -- the
-service no longer reads MailEnrollmentStepStore at all, so these tests
-no longer construct any MailEnrollmentStep rows.
+("has NOT finished the sequence," i.e. status != COMPLETED).
+
+Open rate (2026-09-18) re-adds a per-campaign read of
+MailEnrollmentStepStore -- ONLY to compute Open rate's SENT-based
+denominator, a completely separate question from Available/Progress
+above.
 """
 
 from datetime import datetime, timezone
@@ -23,10 +26,14 @@ from app.models.mail import (
     MailCampaignStatus,
     MailEnrollment,
     MailEnrollmentStatus,
+    MailEnrollmentStep,
+    MailEnrollmentStepStatus,
     MailSequenceStep,
 )
 from app.repositories.mail_campaign_store import MemoryMailCampaignStore
+from app.repositories.mail_enrollment_step_store import MemoryMailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MemoryMailEnrollmentStore
+from app.repositories.mail_open_event_store import MemoryMailOpenEventStore
 from app.repositories.mail_sequence_step_store import MemoryMailSequenceStepStore
 from app.services.mail_campaign_list_service import MailCampaignListService
 
@@ -57,6 +64,27 @@ def make_enrollment(enrollment_id: str, campaign_id: str, contact_id: str, **ove
     return MailEnrollment(**fields)
 
 
+def make_step(enrollment_id: str, campaign_id: str, step_number: int = 1, **overrides) -> MailEnrollmentStep:
+    fields = dict(
+        enrollment_step_id=f"{enrollment_id}-step{step_number}",
+        mail_campaign_id=campaign_id,
+        enrollment_id=enrollment_id,
+        crm_contact_id=f"contact-{enrollment_id}",
+        step_id=f"step-{step_number}",
+        step_number=step_number,
+        subject="Quick hello from Astronomic",
+        body="Hi {{first_name}},",
+        delay_days=0,
+        reply_in_thread=True,
+        status=MailEnrollmentStepStatus.SENT,
+        sent_at=NOW,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    fields.update(overrides)
+    return MailEnrollmentStep(**fields)
+
+
 def make_sequence_step(campaign_id: str, step_id: str, step_number: int, **overrides) -> MailSequenceStep:
     fields = dict(
         step_id=step_id,
@@ -78,6 +106,8 @@ async def stores():
     return {
         "campaign_store": MemoryMailCampaignStore(),
         "enrollment_store": MemoryMailEnrollmentStore(),
+        "enrollment_step_store": MemoryMailEnrollmentStepStore(),
+        "open_event_store": MemoryMailOpenEventStore(),
         "sequence_step_store": MemoryMailSequenceStepStore(),
     }
 
@@ -292,6 +322,51 @@ async def test_reply_rate_matches_replied_over_total(stores, service):
     [item] = (await service.list_campaigns()).items
     assert item.replied == 2
     assert item.reply_rate_percent == 40.0
+
+
+# --- Open rate (2026-09-18) -------------------------------------------------
+
+
+async def test_open_rate_is_none_and_disabled_when_campaign_tracking_is_off(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Tracking Off Test", open_tracking_enabled=False))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
+    await stores["enrollment_step_store"].create(make_step("e1", "c1"))
+    await stores["open_event_store"].record_open(enrollment_step_id="e1-step1", mail_campaign_id="c1", enrollment_id="e1", at=NOW)
+
+    [item] = (await service.list_campaigns()).items
+    assert item.open_tracking_enabled is False
+    assert item.open_rate_percent is None
+
+
+async def test_open_rate_is_none_when_tracking_on_but_nothing_sent_yet(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "No Sends Yet Test", open_tracking_enabled=True))
+    await stores["enrollment_store"].create(make_enrollment("e1", "c1", "contact1"))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.open_tracking_enabled is True
+    assert item.open_rate_percent is None
+
+
+async def test_open_rate_counts_unique_opened_leads_over_unique_sent_leads(stores, service):
+    await stores["campaign_store"].create(make_campaign("c1", "Open Rate Test", open_tracking_enabled=True))
+    for i in range(4):
+        await stores["enrollment_store"].create(make_enrollment(f"e{i}", "c1", f"contact{i}"))
+        await stores["enrollment_step_store"].create(make_step(f"e{i}", "c1"))
+    await stores["open_event_store"].record_open(enrollment_step_id="e0-step1", mail_campaign_id="c1", enrollment_id="e0", at=NOW)
+
+    [item] = (await service.list_campaigns()).items
+    assert item.open_rate_percent == 25.0
+
+
+async def test_open_rate_never_fabricated_to_zero_percent_when_disabled(stores, service):
+    """The user's own explicit requirement: OFF must render as '--',
+    never a fake 0% -- this is the exact backend signal (None, not 0.0)
+    the frontend depends on to tell the two apart."""
+    await stores["campaign_store"].create(make_campaign("c1", "Zero Leads Tracking Off", open_tracking_enabled=False))
+
+    [item] = (await service.list_campaigns()).items
+    assert item.open_rate_percent is None
+    assert item.open_rate_percent != 0.0
 
 
 # --- Suppressed / Failed (unchanged buckets) --------------------------------

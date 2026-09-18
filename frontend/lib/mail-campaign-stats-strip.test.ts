@@ -69,12 +69,12 @@ test("Reply rate and Unsub rate are wired to real MailCampaignStats fields", () 
   assert.match(STRIP_SOURCE, /stats\.unsub_rate_percent/);
 });
 
-test("Open rate and Bounce rate are hardcoded 'Not tracked' -- never derived from stats, never a fabricated percentage", () => {
-  assert.match(STRIP_SOURCE, /label="Open rate" value="Not tracked"/);
+test("Open rate (2026-09-18) is real, wired through the shared openRateDisplay() helper -- Bounce rate stays hardcoded 'Not tracked'", () => {
+  assert.match(STRIP_SOURCE, /import \{ openRateDisplay \} from "@\/lib\/mail"/);
+  assert.match(STRIP_SOURCE, /openRateDisplay\(stats\)/);
   assert.match(STRIP_SOURCE, /label="Bounce rate" value="Not tracked"/);
-  // No percent-sign literal anywhere near either forbidden label -- if
-  // one were ever added, it would mean a fabricated number crept in.
-  assert.doesNotMatch(STRIP_SOURCE, /Open rate.*stats\./);
+  // Bounce rate never derives from stats -- if it ever did, that would
+  // mean a fabricated number crept in.
   assert.doesNotMatch(STRIP_SOURCE, /Bounce rate.*stats\./);
 });
 
@@ -118,9 +118,11 @@ test("getMailCampaignStats calls the campaign-scoped stats route", () => {
   assert.match(API_SOURCE, /`\/mail\/campaigns\/\$\{mailCampaignId\}\/stats`/);
 });
 
-test("MailCampaignStats (api.ts) has no open_rate/bounce_rate field", () => {
+test("MailCampaignStats (api.ts) carries the real open_rate_percent/open_tracking_enabled fields and no bounce_rate field", () => {
   const typeBlock = API_SOURCE.slice(API_SOURCE.indexOf("interface MailCampaignStats"), API_SOURCE.indexOf("export function getMailCampaignStats"));
-  assert.doesNotMatch(typeBlock, /open_rate|bounce_rate/i);
+  assert.match(typeBlock, /open_tracking_enabled: boolean/);
+  assert.match(typeBlock, /open_rate_percent: number \| null/);
+  assert.doesNotMatch(typeBlock, /bounce_rate/i);
 });
 
 // --- Backend model / route / service ---------------------------------------------
@@ -130,9 +132,11 @@ test("GET /mail/campaigns/{id}/stats exists, is read-only", () => {
   assert.doesNotMatch(API_ROUTE_SOURCE, /@router\.(post|patch|put|delete)\("\/campaigns\/\{mail_campaign_id\}\/stats/);
 });
 
-test("MailCampaignStats (backend model) has no open_rate/bounce_rate field", () => {
-  const modelBlock = MODEL_SOURCE.slice(MODEL_SOURCE.indexOf("class MailCampaignStats"), MODEL_SOURCE.indexOf("class MailCampaignStats") + 700);
-  assert.doesNotMatch(modelBlock, /open_rate|bounce_rate/i);
+test("MailCampaignStats (backend model) carries the real open_rate_percent/open_tracking_enabled fields and no bounce_rate field", () => {
+  const modelBlock = MODEL_SOURCE.slice(MODEL_SOURCE.indexOf("class MailCampaignStats"), MODEL_SOURCE.indexOf("class MailCampaignStats") + 1200);
+  assert.match(modelBlock, /open_tracking_enabled: bool/);
+  assert.match(modelBlock, /open_rate_percent: float \| None/);
+  assert.doesNotMatch(modelBlock, /bounce_rate/i);
 });
 
 test("MailCampaignStatsService is a pure read -- no write methods, no new persistence", () => {

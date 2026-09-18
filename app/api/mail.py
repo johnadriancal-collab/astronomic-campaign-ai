@@ -149,6 +149,7 @@ class MailCampaignCreateRequest(BaseModel):
     all_hours: bool | None = None
     start_immediately: bool | None = None
     daily_lead_start_limit: int | None = None
+    open_tracking_enabled: bool | None = None
 
 
 @router.get("/campaigns", response_model=list[MailCampaign])

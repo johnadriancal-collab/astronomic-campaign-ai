@@ -21,9 +21,16 @@ enrollment that stopped before finishing every step counts as
 Available/in-progress -- intentional under the current Progress
 definition, not a gap to silently patch here.
 
-This dropped the service's only reason to read per-step execution rows
-(the old Step-1-SENT check) -- no per-step data is read here any more
-at all, only enrollment-level status.
+Open rate (2026-09-18, open tracking) re-adds a per-campaign read of
+MailEnrollmentStepStore -- ONLY to compute "leads with >=1 SENT email,"
+Open rate's denominator; `available_leads`/`in_progress_leads`/
+`finished_leads` above never touch step data at all. `open_rate_percent`
+is None whenever `campaign.open_tracking_enabled` is False (never a
+fabricated 0%) OR when the denominator is zero (no send yet) -- the
+frontend distinguishes those two None cases using `open_tracking_enabled`
+itself, which is passed through unchanged. Numerator is UNIQUE opened
+leads (grouped by `enrollment_id`, never raw pixel-hit count) that also
+appear in the SENT-denominator set.
 
 `reply_rate_percent` matches MailCampaignStatsService.get_stats()'s own
 formula exactly. The Mailbox column (mailbox_id/mailbox_email/
@@ -33,7 +40,8 @@ this read model (2026-09-18) -- Mailbox is a Channels-tab concept now.
 V1 pilot scale, same stance as MailInboxService/MailLeadsService: every
 read here loops MailCampaignStore.list() and calls the EXISTING
 per-campaign list_for_campaign() on MailEnrollmentStore/
-MailSequenceStepStore -- no new store methods.
+MailEnrollmentStepStore/MailSequenceStepStore/MailOpenEventStore -- no
+new store methods.
 """
 
 from app.models.mail import (
@@ -41,12 +49,15 @@ from app.models.mail import (
     MailCampaignListItem,
     MailCampaignListPage,
     MailEnrollmentStatus,
+    MailEnrollmentStepStatus,
 )
 from app.repositories.mail_campaign_store import MailCampaignStore
+from app.repositories.mail_enrollment_step_store import MailEnrollmentStepStore
 from app.repositories.mail_enrollment_store import MailEnrollmentStore
+from app.repositories.mail_open_event_store import MailOpenEventStore
 from app.repositories.mail_sequence_step_store import MailSequenceStepStore
 
-MailCampaignSortBy = str  # "name" | "status" | "available" | "total_leads" | "progress" | "reply_rate" | "replied" | "created_at" | "updated_at"
+MailCampaignSortBy = str  # "name" | "status" | "available" | "total_leads" | "progress" | "reply_rate" | "open_rate" | "replied" | "created_at" | "updated_at"
 
 
 class MailCampaignListService:
@@ -54,10 +65,14 @@ class MailCampaignListService:
         self,
         campaign_store: MailCampaignStore,
         enrollment_store: MailEnrollmentStore,
+        enrollment_step_store: MailEnrollmentStepStore,
+        open_event_store: MailOpenEventStore,
         sequence_step_store: MailSequenceStepStore,
     ):
         self.campaign_store = campaign_store
         self.enrollment_store = enrollment_store
+        self.enrollment_step_store = enrollment_step_store
+        self.open_event_store = open_event_store
         self.sequence_step_store = sequence_step_store
 
     async def _build_item(self, campaign: MailCampaign) -> MailCampaignListItem:
@@ -81,6 +96,16 @@ class MailCampaignListService:
         not_finished = total - finished
         progress_percent = round((finished / total) * 100, 1) if total > 0 else 0.0
 
+        open_rate_percent = None
+        if campaign.open_tracking_enabled:
+            steps = await self.enrollment_step_store.list_for_campaign(campaign.mail_campaign_id)
+            sent_enrollment_ids = {step.enrollment_id for step in steps if step.status == MailEnrollmentStepStatus.SENT}
+            if sent_enrollment_ids:
+                open_events = await self.open_event_store.list_for_campaign(campaign.mail_campaign_id)
+                opened_enrollment_ids = {event.enrollment_id for event in open_events}
+                unique_opens = len(opened_enrollment_ids & sent_enrollment_ids)
+                open_rate_percent = round((unique_opens / len(sent_enrollment_ids)) * 100, 1)
+
         sequence_steps = await self.sequence_step_store.list_for_campaign(campaign.mail_campaign_id)
 
         return MailCampaignListItem(
@@ -89,6 +114,8 @@ class MailCampaignListService:
             status=campaign.status,
             total_leads=total,
             available_leads=not_finished,
+            open_tracking_enabled=campaign.open_tracking_enabled,
+            open_rate_percent=open_rate_percent,
             replied=replied,
             reply_rate_percent=reply_rate_percent,
             suppressed=counts[MailEnrollmentStatus.SUPPRESSED],
@@ -139,6 +166,11 @@ class MailCampaignListService:
             items.sort(key=lambda item: item.total_leads, reverse=reverse)
         elif sort_by == "reply_rate":
             items.sort(key=lambda item: item.reply_rate_percent, reverse=reverse)
+        elif sort_by == "open_rate":
+            # None (tracking disabled or no sent denominator yet) sorts
+            # as -1 -- always last on a descending sort, never mixed in
+            # among real percentages.
+            items.sort(key=lambda item: item.open_rate_percent if item.open_rate_percent is not None else -1, reverse=reverse)
         elif sort_by == "replied":
             items.sort(key=lambda item: item.replied, reverse=reverse)
         elif sort_by == "progress":

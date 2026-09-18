@@ -312,6 +312,7 @@ _CAMPAIGN_PATCH_FIELDS = {
     "sharing",
     "start_immediately",
     "daily_lead_start_limit",
+    "open_tracking_enabled",
 }
 
 # Once a campaign has ANY explicit MailSendWindow row, these fields are

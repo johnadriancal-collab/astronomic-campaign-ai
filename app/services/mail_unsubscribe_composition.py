@@ -104,7 +104,19 @@ def build_unsubscribe_urls(email: str, *, public_origin: str | None = None) -> t
     )
 
 
-def build_html_body(snapshot_body: str, confirm_url: str) -> str:
+def build_open_tracking_pixel_url(open_tracking_token: str, *, public_origin: str | None = None) -> str:
+    """Open tracking (2026-09-18) -- the pixel `<img src>` URL for one
+    outbound message. Same origin-resolution rule as
+    build_unsubscribe_urls() (`public_origin` always wins over settings,
+    the seam tests use). Deliberately a query-string token, not a path
+    segment -- matching the unsubscribe routes' own reason (see this
+    module's docstring): app/session_auth_middleware.py's PUBLIC_PATHS
+    only matches an exact `request.url.path`, never a wildcard."""
+    origin = _resolve_origin(public_origin)
+    return f"{origin}/mail/track/open?token={open_tracking_token}"
+
+
+def build_html_body(snapshot_body: str, confirm_url: str, open_tracking_pixel_url: str | None = None) -> str:
     """Builds the HTML alternative for one outbound message, from the
     SAME two raw inputs the plain-text body/footer are built from --
     never by transforming the already-composed plain-text string (which
@@ -127,23 +139,55 @@ def build_html_body(snapshot_body: str, confirm_url: str) -> str:
     (see STANDARD_UNSUBSCRIBE_FOOTER, used unchanged for the text/plain
     part) -- there is no way to render a clickable link in plain text, so
     printing the full URL there is the correct, necessary fallback, not
-    an oversight."""
+    an oversight.
+
+    `open_tracking_pixel_url` (2026-09-18): when given, appends a single
+    1x1, `display:none` `<img>` tag AFTER the unsubscribe block -- a pure
+    addition to this same string, never a rewrite of the body/footer
+    above it. None (the default) means open tracking is disabled for
+    this campaign (see MailCampaign.open_tracking_enabled) and this
+    function's output is byte-identical to before this feature existed.
+    The URL is escaped exactly like `confirm_url` above, on the same
+    "never trust a caller-supplied string as safe markup" discipline,
+    even though in practice it's always this codebase's own origin plus
+    an opaque token."""
     escaped_body = html.escape(snapshot_body).replace("\n", "<br>\n")
     escaped_url = html.escape(confirm_url, quote=True)
-    return f"<p>{escaped_body}</p>\n{STANDARD_UNSUBSCRIBE_FOOTER_HTML.format(url=escaped_url)}"
+    html_out = f"<p>{escaped_body}</p>\n{STANDARD_UNSUBSCRIBE_FOOTER_HTML.format(url=escaped_url)}"
+    if open_tracking_pixel_url:
+        escaped_pixel_url = html.escape(open_tracking_pixel_url, quote=True)
+        html_out += f'\n<img src="{escaped_pixel_url}" width="1" height="1" alt="" style="display:none">'
+    return html_out
 
 
-def compose_outbound_email(*, snapshot_body: str, recipient_email: str, public_origin: str | None = None) -> ComposedOutboundEmail:
+def compose_outbound_email(
+    *,
+    snapshot_body: str,
+    recipient_email: str,
+    public_origin: str | None = None,
+    open_tracking_token: str | None = None,
+) -> ComposedOutboundEmail:
     """The one entry point Phase C/D would call per real send. Composes
     the final plain-text body (snapshot + standardized footer), its HTML
     alternative (Phase C/D, see build_html_body()), and both List-
     Unsubscribe header values -- all from the SAME snapshot and the SAME
     one shared token (see this module's docstring for why sharing the
-    token, not the URL path, is the invariant that matters)."""
+    token, not the URL path, is the invariant that matters).
+
+    `open_tracking_token` (2026-09-18): None (the default, and the ONLY
+    value ever passed for a campaign with open_tracking_enabled=False)
+    means the returned `html_body` carries no tracking pixel at all --
+    the plain-text `body` NEVER carries one regardless, by construction
+    (see build_html_body()'s own docstring)."""
     confirm_url, one_click_url = build_unsubscribe_urls(recipient_email, public_origin=public_origin)
+    pixel_url = (
+        build_open_tracking_pixel_url(open_tracking_token, public_origin=public_origin)
+        if open_tracking_token
+        else None
+    )
     return ComposedOutboundEmail(
         body=snapshot_body + STANDARD_UNSUBSCRIBE_FOOTER.format(url=confirm_url),
-        html_body=build_html_body(snapshot_body, confirm_url),
+        html_body=build_html_body(snapshot_body, confirm_url, pixel_url),
         list_unsubscribe_header=f"<{one_click_url}>",
         list_unsubscribe_post_header="List-Unsubscribe=One-Click",
     )

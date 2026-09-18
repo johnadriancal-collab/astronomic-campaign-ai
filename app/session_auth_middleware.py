@@ -280,6 +280,7 @@ PUBLIC_PATHS = frozenset(
         "/sync/luma-calendar-event",
         "/mail/unsubscribe",
         "/mail/unsubscribe/one-click",
+        "/mail/track/open",
         "/integrations/contacts/photo",
         "/sync/sale-onboarding",
     }

@@ -25,6 +25,8 @@ export function MailCampaignSettingsTab({
   dailyLeadStartLimit,
   setDailyLeadStartLimit,
   leadStartMode,
+  openTrackingEnabled,
+  setOpenTrackingEnabled,
   savingSettings,
   settingsError,
   onSaveSettings,
@@ -44,6 +46,8 @@ export function MailCampaignSettingsTab({
   dailyLeadStartLimit: string;
   setDailyLeadStartLimit: (value: string) => void;
   leadStartMode: "immediate" | "triggered";
+  openTrackingEnabled: boolean;
+  setOpenTrackingEnabled: (value: boolean) => void;
   savingSettings: boolean;
   settingsError: string | null;
   onSaveSettings: () => void;
@@ -112,6 +116,23 @@ export function MailCampaignSettingsTab({
             <Switch
               checked={startImmediately}
               onCheckedChange={(v) => setStartImmediately(Boolean(v))}
+              disabled={!editable}
+              className="mt-0.5 shrink-0"
+            />
+          </div>
+          <div className="flex items-start justify-between gap-4 rounded-md border border-border/60 p-3">
+            <div>
+              <p className="text-sm font-medium">Track email opens</p>
+              <p className="text-xs text-muted-foreground">
+                When enabled, Astronomic Mail adds an invisible tracking image to measure approximate opens.
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground/70">
+                Open tracking is approximate because some email clients may preload or block images.
+              </p>
+            </div>
+            <Switch
+              checked={openTrackingEnabled}
+              onCheckedChange={(v) => setOpenTrackingEnabled(Boolean(v))}
               disabled={!editable}
               className="mt-0.5 shrink-0"
             />

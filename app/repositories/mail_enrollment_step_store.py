@@ -52,6 +52,16 @@ class MailEnrollmentStepStore(ABC):
         callers that need the EXISTING row back, not just a bool, use this)."""
 
     @abstractmethod
+    async def get_by_open_tracking_token(self, open_tracking_token: str) -> MailEnrollmentStep | None:
+        """Open tracking (2026-09-18) -- the ONE lookup the public pixel
+        endpoint makes per request, so it must stay fast (a real indexed
+        column on SQLiteMailEnrollmentStepStore, not a JSON-blob scan).
+        None for an unknown/never-issued token -- the pixel endpoint
+        treats this identically to a real, found token (same tiny GIF
+        response either way; see app/api/mail_open_tracking.py's own
+        docstring for why this can never become an oracle)."""
+
+    @abstractmethod
     async def save(self, step: MailEnrollmentStep) -> None:
         """Unconditional overwrite. Raises MailEnrollmentStepNotFoundError
         if the row doesn't exist. Callers that need "only if the row is
@@ -185,6 +195,12 @@ class MemoryMailEnrollmentStepStore(MailEnrollmentStepStore):
     async def get_by_enrollment_and_step(self, enrollment_id: str, step_id: str) -> MailEnrollmentStep | None:
         for row in self._rows.values():
             if row.enrollment_id == enrollment_id and row.step_id == step_id:
+                return row
+        return None
+
+    async def get_by_open_tracking_token(self, open_tracking_token: str) -> MailEnrollmentStep | None:
+        for row in self._rows.values():
+            if row.open_tracking_token == open_tracking_token:
                 return row
         return None
 

@@ -10,6 +10,7 @@ from cryptography.fernet import Fernet
 from app.services.mail_unsubscribe_composition import (
     PublicOriginNotConfiguredError,
     build_html_body,
+    build_open_tracking_pixel_url,
     build_unsubscribe_urls,
     compose_outbound_email,
 )
@@ -187,3 +188,70 @@ def test_compose_outbound_email_html_body_reflects_the_same_snapshot_content():
         snapshot_body="Hi there, join us for dinner.", recipient_email="a@example.com", public_origin=FAKE_ORIGIN
     )
     assert "Hi there, join us for dinner." in result.html_body
+
+
+# --- Open tracking pixel (2026-09-18) ---------------------------------------
+
+
+def test_build_open_tracking_pixel_url_points_at_the_track_open_route():
+    url = build_open_tracking_pixel_url("tok123", public_origin=FAKE_ORIGIN)
+    assert url == f"{FAKE_ORIGIN}/mail/track/open?token=tok123"
+
+
+def test_html_body_has_no_pixel_when_token_is_none():
+    html_body = build_html_body("Body.", "https://fake-backend.test/mail/unsubscribe?token=abc", None)
+    assert "<img" not in html_body
+
+
+def test_html_body_includes_a_1x1_invisible_pixel_when_a_token_is_given():
+    pixel_url = "https://fake-backend.test/mail/track/open?token=tok123"
+    html_body = build_html_body("Body.", "https://fake-backend.test/mail/unsubscribe?token=abc", pixel_url)
+    assert f'<img src="{pixel_url}" width="1" height="1" alt="" style="display:none">' in html_body
+
+
+def test_html_body_pixel_is_appended_after_the_unsubscribe_block_never_replacing_it():
+    pixel_url = "https://fake-backend.test/mail/track/open?token=tok123"
+    confirm_url = "https://fake-backend.test/mail/unsubscribe?token=abc"
+    html_body = build_html_body("Body.", confirm_url, pixel_url)
+    assert html_body.index(confirm_url) < html_body.index(pixel_url)
+    assert "Unsubscribe</a>" in html_body
+
+
+def test_html_body_pixel_url_is_escaped_like_every_other_caller_supplied_url():
+    pixel_url_with_specials = 'https://fake-backend.test/mail/track/open?token=abc&x="y"'
+    html_body = build_html_body("Body.", "https://fake-backend.test/mail/unsubscribe?token=abc", pixel_url_with_specials)
+    assert 'src="https://fake-backend.test/mail/track/open?token=abc&amp;x=&quot;y&quot;"' in html_body
+
+
+def test_compose_outbound_email_has_no_pixel_when_open_tracking_token_is_none():
+    """The default -- and the ONLY value ever passed for a campaign with
+    open_tracking_enabled=False."""
+    result = compose_outbound_email(snapshot_body="Body.", recipient_email="a@example.com", public_origin=FAKE_ORIGIN)
+    assert "<img" not in result.html_body
+    assert "/mail/track/open" not in result.html_body
+
+
+def test_compose_outbound_email_plain_text_body_never_carries_a_pixel_even_when_tracking_is_on():
+    result = compose_outbound_email(
+        snapshot_body="Body.", recipient_email="a@example.com", public_origin=FAKE_ORIGIN, open_tracking_token="tok123"
+    )
+    assert "<img" not in result.body
+    assert "/mail/track/open" not in result.body
+
+
+def test_compose_outbound_email_html_body_carries_the_pixel_when_a_token_is_given():
+    result = compose_outbound_email(
+        snapshot_body="Body.", recipient_email="a@example.com", public_origin=FAKE_ORIGIN, open_tracking_token="tok123"
+    )
+    assert f"{FAKE_ORIGIN}/mail/track/open?token=tok123" in result.html_body
+
+
+def test_compose_outbound_email_pixel_never_affects_unsubscribe_urls_or_headers():
+    with_token = compose_outbound_email(
+        snapshot_body="Body.", recipient_email="a@example.com", public_origin=FAKE_ORIGIN, open_tracking_token="tok123"
+    )
+    without_token = compose_outbound_email(snapshot_body="Body.", recipient_email="a@example.com", public_origin=FAKE_ORIGIN)
+    # Both get a freshly generated (different) unsubscribe token, but the
+    # STRUCTURE -- header values, URL shape -- must be identical either way.
+    assert with_token.list_unsubscribe_post_header == without_token.list_unsubscribe_post_header
+    assert with_token.list_unsubscribe_header.startswith(f"<{FAKE_ORIGIN}/mail/unsubscribe/one-click?token=")

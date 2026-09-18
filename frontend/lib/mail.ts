@@ -4,12 +4,30 @@
 
 import type { MailCampaignStatus, MailEnrollmentStatus, MailExecutionStepStatus, MailSuppressionReason } from "@/lib/api";
 
-// 2026-09-18 -- same "no fabricated engagement metric" stance as
-// frontend/lib/mailboxes.ts's DELIVERABILITY_TOOLTIP: zero open-tracking
-// signal exists anywhere for Astronomic Mail (see MailCampaignStats's own
-// backend docstring), so the Campaigns list's Open rate column always
-// renders this static copy instead of a real value.
-export const OPEN_RATE_TOOLTIP = "Open tracking not available yet.";
+// Open tracking (2026-09-18) -- real, opt-in per campaign. Three
+// distinct states the Campaigns list/Dashboard stats strip both render
+// through this ONE shared helper, so they can never drift apart on the
+// copy: OFF (never a fake 0%), ON with no denominator yet (a real "no
+// data" state, distinct from OFF), and ON with a real percentage. The
+// approximate-tracking disclosure is the exact wording the org
+// requested -- shown whenever tracking is ON, since it's a property of
+// the mechanism itself, not of whether data exists yet.
+const OPEN_RATE_APPROXIMATE_TOOLTIP =
+  "Open tracking is approximate. Some mail clients may preload or block tracking images.";
+const OPEN_RATE_DISABLED_TOOLTIP = "Open tracking disabled for this campaign.";
+
+export function openRateDisplay(campaign: { open_tracking_enabled: boolean; open_rate_percent: number | null }): {
+  text: string;
+  tooltip: string;
+} {
+  if (!campaign.open_tracking_enabled) {
+    return { text: "—", tooltip: OPEN_RATE_DISABLED_TOOLTIP };
+  }
+  if (campaign.open_rate_percent === null) {
+    return { text: "—", tooltip: OPEN_RATE_APPROXIMATE_TOOLTIP };
+  }
+  return { text: `${campaign.open_rate_percent}%`, tooltip: OPEN_RATE_APPROXIMATE_TOOLTIP };
+}
 
 export const MAIL_CAMPAIGN_STATUS_OPTIONS: { value: MailCampaignStatus; label: string }[] = [
   { value: "draft", label: "Draft" },

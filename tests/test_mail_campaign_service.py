@@ -351,6 +351,51 @@ async def test_update_rejects_non_positive_daily_lead_start_limit(service, bad_l
         await service.update_campaign(campaign.mail_campaign_id, {"daily_lead_start_limit": bad_limit})
 
 
+# --- Open tracking (2026-09-18) ---------------------------------------------
+
+
+async def test_new_campaign_defaults_to_open_tracking_disabled(service):
+    campaign = await service.create_campaign("Draft")
+    assert campaign.open_tracking_enabled is False
+
+
+async def test_draft_campaign_can_enable_open_tracking(service):
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"open_tracking_enabled": True})
+    assert updated.open_tracking_enabled is True
+
+
+async def test_draft_campaign_can_disable_open_tracking_again(service):
+    campaign = await service.create_campaign("Draft")
+    await service.update_campaign(campaign.mail_campaign_id, {"open_tracking_enabled": True})
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"open_tracking_enabled": False})
+    assert updated.open_tracking_enabled is False
+
+
+async def test_enabling_open_tracking_never_changes_status(service):
+    campaign = await service.create_campaign("Draft")
+    updated = await service.update_campaign(campaign.mail_campaign_id, {"open_tracking_enabled": True})
+    assert updated.status == MailCampaignStatus.DRAFT
+
+
+async def test_archived_campaign_cannot_change_open_tracking(service):
+    """Same whole-method DRAFT lock every other preference field
+    (start_immediately, daily_lead_start_limit, sharing) already gets --
+    no bespoke lock needed for this field."""
+    campaign = await service.create_campaign("Draft")
+    await service.archive_campaign(campaign.mail_campaign_id)
+    with pytest.raises(MailCampaignNotEditableError):
+        await service.update_campaign(campaign.mail_campaign_id, {"open_tracking_enabled": True})
+
+
+async def test_active_campaign_cannot_change_open_tracking(service, crm):
+    campaign, _ = await _make_valid_schedule_campaign(service, crm)
+    ready = await service.mark_ready(campaign.mail_campaign_id, suppressed_emails=set())
+    await service.activate_campaign(ready.mail_campaign_id)
+    with pytest.raises(MailCampaignNotEditableError):
+        await service.update_campaign(campaign.mail_campaign_id, {"open_tracking_enabled": True})
+
+
 # --- Stage 5B (2026-09-04): read-only legacy-limit compatibility report ----
 
 

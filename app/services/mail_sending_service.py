@@ -41,6 +41,7 @@ manually invoking it is not an acceptable substitute.
 """
 
 import hashlib
+import secrets
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -709,6 +710,20 @@ def resolve_rfc_message_id(step: MailEnrollmentStep, mailbox: Mailbox) -> str:
     MailSendRequest's MANDATORY PHASE C INVARIANT docstring for why a
     single, un-duplicated call site matters."""
     return step.rfc_message_id or generate_rfc_message_id(mailbox.email.rsplit("@", 1)[-1])
+
+
+def resolve_open_tracking_token(step: MailEnrollmentStep, campaign: MailCampaign) -> str | None:
+    """Open tracking (2026-09-18) -- the SAME 'reuse the persisted value
+    if this row already has one, never regenerate on retry' invariant as
+    resolve_rfc_message_id() above. Returns None whenever
+    campaign.open_tracking_enabled is False -- the ONE gate that decides
+    whether a step ever gets a token at all (see MailCampaign.
+    open_tracking_enabled's own docstring); once a campaign leaves
+    DRAFT this can never change mid-flight, so there is no "tracking was
+    on when this token was minted but is off now" case to handle."""
+    if not campaign.open_tracking_enabled:
+        return None
+    return step.open_tracking_token or secrets.token_urlsafe(24)
 
 
 def _parse_allowlist(raw: str | None, *, normalize: bool = False) -> set[str]:
@@ -2067,8 +2082,14 @@ class MailSendingService:
         # and MailEnrollmentStepStore.persist_prepared_fields()'s own
         # docstring.
         rfc_message_id = resolve_rfc_message_id(step, mailbox)
+        open_tracking_token = resolve_open_tracking_token(step, campaign)
         prepared_step = step.model_copy(
-            update={"mailbox_id": mailbox.mailbox_id, "rfc_message_id": rfc_message_id, "updated_at": now}
+            update={
+                "mailbox_id": mailbox.mailbox_id,
+                "rfc_message_id": rfc_message_id,
+                "open_tracking_token": open_tracking_token,
+                "updated_at": now,
+            }
         )
         persisted = await self.step_store.persist_prepared_fields(step.enrollment_step_id, prepared_step)
         if not persisted:
@@ -2116,7 +2137,11 @@ class MailSendingService:
             else:
                 rendered_subject = render_mail_template(step.subject, variables)
             rendered_body = render_mail_template(step.body, variables)
-            composed = compose_outbound_email(snapshot_body=rendered_body, recipient_email=enrollment.email_at_enrollment)
+            composed = compose_outbound_email(
+                snapshot_body=rendered_body,
+                recipient_email=enrollment.email_at_enrollment,
+                open_tracking_token=open_tracking_token,
+            )
         except Exception as e:
             return await self._handle_prepare_failure(step, enrollment, campaign.mail_campaign_id, e, now)
 

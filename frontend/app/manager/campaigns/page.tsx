@@ -14,21 +14,20 @@ import {
   type MailCampaignListSortBy,
   type MailCampaignStatus,
 } from "@/lib/api";
-import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel, OPEN_RATE_TOOLTIP } from "@/lib/mail";
+import { mailCampaignStatusBadgeClass, mailCampaignStatusLabel, openRateDisplay } from "@/lib/mail";
 import { MAIL_CAMPAIGN_DETAIL_CONTAINER_CLASS } from "@/lib/mail-campaign-layout";
 import { cn } from "@/lib/utils";
 
 // Campaign Manager Campaigns V1 (2026-09-17), sequence-completion
 // progress redefinition (2026-09-18b), Available redefinition
-// (2026-09-18c) -- one row per campaign, wide table -- see
-// MailCampaignListService's backend docstring for exactly what each row
-// aggregates and MailCampaignListItem's own docstring for the
-// available_leads/finished_leads/progress_percent/reply_rate_percent
-// definitions. Every count here is real workload/step data already
-// tracked elsewhere; this view shows nothing that isn't genuinely
-// measured anywhere in this system -- Open rate is the one exception,
-// which is why it's a static "not tracked" cell rather than a field on
-// the model at all.
+// (2026-09-18c), real Open rate (2026-09-18) -- one row per campaign,
+// wide table -- see MailCampaignListService's backend docstring for
+// exactly what each row aggregates and MailCampaignListItem's own
+// docstring for the available_leads/finished_leads/progress_percent/
+// reply_rate_percent/open_rate_percent definitions. Every count here is
+// real workload/step data already tracked elsewhere -- Open rate is
+// real too now, opt-in per campaign (see lib/mail.ts's
+// openRateDisplay()), never a fabricated number when tracking is off.
 //
 // Available and Progress now share the SAME finished-sequence
 // semantics (2026-09-18c): Available is the raw count of leads that
@@ -315,8 +314,15 @@ export default function CampaignsPage() {
                     <th className={cn("whitespace-nowrap px-3 py-2 text-left", COLUMN_WIDTH_CLASS.Progress)}>
                       <SortHeader label="Progress" column="progress" sortBy={sortBy} sortDir={sortDir} onSort={handleSort} />
                     </th>
-                    <th className={cn("whitespace-nowrap px-3 py-2 text-right font-semibold text-muted-foreground", COLUMN_WIDTH_CLASS["Open rate"])}>
-                      Open rate
+                    <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Open rate"])}>
+                      <SortHeader
+                        label="Open rate"
+                        column="open_rate"
+                        sortBy={sortBy}
+                        sortDir={sortDir}
+                        onSort={handleSort}
+                        align="right"
+                      />
                     </th>
                     <th className={cn("whitespace-nowrap px-3 py-2 text-right", COLUMN_WIDTH_CLASS["Reply rate"])}>
                       <SortHeader
@@ -405,10 +411,10 @@ export default function CampaignsPage() {
                         />
                       </td>
                       <td
-                        className={cn("whitespace-nowrap px-3 py-2 text-right text-muted-foreground", COLUMN_WIDTH_CLASS["Open rate"])}
-                        title={OPEN_RATE_TOOLTIP}
+                        className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS["Open rate"])}
+                        title={openRateDisplay(campaign).tooltip}
                       >
-                        —
+                        {openRateDisplay(campaign).text}
                       </td>
                       <td className={cn("whitespace-nowrap px-3 py-2 text-right tabular-nums text-muted-foreground", COLUMN_WIDTH_CLASS["Reply rate"])}>
                         {campaign.reply_rate_percent}%

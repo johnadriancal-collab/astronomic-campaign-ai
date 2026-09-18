@@ -90,6 +90,7 @@ export default function MailCampaignDetailPage() {
   const [sharing, setSharing] = useState<MailCampaignSharing>("everyone");
   const [startImmediately, setStartImmediately] = useState(false);
   const [dailyLeadStartLimit, setDailyLeadStartLimit] = useState("");
+  const [openTrackingEnabled, setOpenTrackingEnabled] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
 
@@ -184,6 +185,7 @@ export default function MailCampaignDetailPage() {
       setSharing(c.sharing);
       setStartImmediately(c.start_immediately);
       setDailyLeadStartLimit(c.daily_lead_start_limit === null ? "" : String(c.daily_lead_start_limit));
+      setOpenTrackingEnabled(c.open_tracking_enabled);
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? `Couldn't load this campaign (${err.status}): ${err.message}` : "Couldn't reach the backend.");
@@ -353,6 +355,7 @@ export default function MailCampaignDetailPage() {
         sharing,
         start_immediately: startImmediately,
         daily_lead_start_limit: dailyLeadStartLimit.trim() === "" ? null : Number(dailyLeadStartLimit),
+        open_tracking_enabled: openTrackingEnabled,
       });
       setCampaign(updated);
     } catch (err) {
@@ -734,6 +737,8 @@ export default function MailCampaignDetailPage() {
             dailyLeadStartLimit={dailyLeadStartLimit}
             setDailyLeadStartLimit={setDailyLeadStartLimit}
             leadStartMode={campaign.lead_start_mode}
+            openTrackingEnabled={openTrackingEnabled}
+            setOpenTrackingEnabled={setOpenTrackingEnabled}
             savingSettings={savingSettings}
             settingsError={settingsError}
             onSaveSettings={handleSaveSettings}

@@ -60,6 +60,7 @@ from app.api.leads import router as leads_router
 from app.api.luma import mapping_router as luma_mapping_router
 from app.api.luma import router as luma_router
 from app.api.mail import router as mail_router
+from app.api.mail_open_tracking import router as mail_open_tracking_router
 from app.api.mail_unsubscribe import router as mail_unsubscribe_router
 from app.api.mailboxes import router as mailboxes_router
 from app.api.sale_onboarding import router as sale_onboarding_router
@@ -105,6 +106,7 @@ from app.repositories.sqlite_mail_send_window_store import SQLiteMailSendWindowS
 from app.repositories.sqlite_mail_sequence_step_store import SQLiteMailSequenceStepStore
 from app.repositories.sqlite_mail_trigger_occurrence_store import SQLiteMailTriggerOccurrenceStore
 from app.repositories.sqlite_mail_suppression_store import SQLiteMailSuppressionStore
+from app.repositories.sqlite_mail_open_event_store import SQLiteMailOpenEventStore
 from app.repositories.sqlite_mail_reply_store import SQLiteMailReplyStore
 from app.repositories.sqlite_mailbox_credential_store import SQLiteMailboxCredentialStore
 from app.repositories.sqlite_mailbox_send_policy_store import SQLiteMailboxSendPolicyStore
@@ -152,6 +154,7 @@ from app.services.mail_leads_service import MailLeadsService
 from app.services.mail_reply_detection_service import MailReplyDetectionService
 from app.services.mail_reply_preview_backfill import backfill_reply_previews
 from app.services.mail_sending_service import MailSendingService
+from app.services.mail_open_tracking_service import MailOpenTrackingService
 from app.services.mail_suppression_service import MailSuppressionService
 from app.services.mail_trigger_service import MailTriggerService
 from app.services.mailbox_service import MailboxService
@@ -191,6 +194,7 @@ async def lifespan(app: FastAPI):
     mail_enrollment_store = SQLiteMailEnrollmentStore(settings.database_path)
     mail_suppression_store = SQLiteMailSuppressionStore(settings.database_path)
     mail_reply_store = SQLiteMailReplyStore(settings.database_path)
+    mail_open_event_store = SQLiteMailOpenEventStore(settings.database_path)
     mail_campaign_mailbox_store = SQLiteMailCampaignMailboxStore(settings.database_path)
     mail_send_window_store = SQLiteMailSendWindowStore(settings.database_path)
     mail_enrollment_step_store = SQLiteMailEnrollmentStepStore(settings.database_path)
@@ -242,6 +246,7 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_store.connect()
     await mail_suppression_store.connect()
     await mail_reply_store.connect()
+    await mail_open_event_store.connect()
     await mail_campaign_mailbox_store.connect()
     await mail_send_window_store.connect()
     await mail_enrollment_step_store.connect()
@@ -355,6 +360,14 @@ async def lifespan(app: FastAPI):
     app.state.mail_suppression_service = MailSuppressionService(
         store=mail_suppression_store,
         activity_log=activity_log_service,
+    )
+    # Open tracking (2026-09-18) -- read-only against
+    # mail_enrollment_step_store (never mutates a step), the one write
+    # path for mail_open_event_store. See MailOpenTrackingService's own
+    # module docstring.
+    app.state.mail_open_tracking_service = MailOpenTrackingService(
+        enrollment_step_store=mail_enrollment_step_store,
+        open_event_store=mail_open_event_store,
     )
     # Phase A (durable execution model). At the time Phase A shipped, this
     # MailSendingService had no concrete MailSenderPort and nothing called
@@ -474,6 +487,8 @@ async def lifespan(app: FastAPI):
     app.state.mail_campaign_list_service = MailCampaignListService(
         campaign_store=mail_campaign_store,
         enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        open_event_store=mail_open_event_store,
         sequence_step_store=mail_sequence_step_store,
     )
 
@@ -493,6 +508,8 @@ async def lifespan(app: FastAPI):
     app.state.mail_campaign_stats_service = MailCampaignStatsService(
         campaign_store=mail_campaign_store,
         enrollment_store=mail_enrollment_store,
+        enrollment_step_store=mail_enrollment_step_store,
+        open_event_store=mail_open_event_store,
         suppression_store=mail_suppression_store,
     )
 
@@ -699,6 +716,7 @@ async def lifespan(app: FastAPI):
     await mail_enrollment_store.close()
     await mail_suppression_store.close()
     await mail_reply_store.close()
+    await mail_open_event_store.close()
     await mail_campaign_mailbox_store.close()
     await mail_send_window_store.close()
     await mail_enrollment_step_store.close()
@@ -746,6 +764,7 @@ app.include_router(email_intake_sync_router)
 app.include_router(email_intake_crm_router)
 app.include_router(mail_router)
 app.include_router(mail_unsubscribe_router)
+app.include_router(mail_open_tracking_router)
 app.include_router(mailboxes_router)
 app.include_router(luma_router)
 app.include_router(luma_mapping_router)

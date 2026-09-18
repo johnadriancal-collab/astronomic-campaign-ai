@@ -214,6 +214,21 @@ class MailCampaign(BaseModel):
     start_immediately: bool = False
     daily_lead_start_limit: int | None = None
 
+    # Open tracking (2026-09-18) -- OFF by default, explicit opt-in per
+    # campaign, never inferred from whether open events happen to exist.
+    # An old, already-persisted campaign (JSON-blob storage -- see
+    # SQLiteMailCampaignStore) simply lacks this key and deserializes as
+    # False, exactly like `all_hours`/`start_immediately` above -- zero
+    # migration, and the live pilot (already past DRAFT) is untouched by
+    # this default. Same DRAFT-only edit lock as every other preference
+    # field here -- see MailCampaignService.update_campaign()'s
+    # _CAMPAIGN_PATCH_FIELDS. When True, MailSendingService.
+    # prepare_and_send_step() mints and persists a per-step
+    # open_tracking_token (see MailEnrollmentStep's own docstring) and
+    # compose_outbound_email() embeds a 1x1 tracking pixel in the HTML
+    # alternative only -- never the plaintext body, never when False.
+    open_tracking_enabled: bool = False
+
     # Trigger feature foundation (Stage 5A, 2026-09-04) -- see
     # MailLeadStartTrigger's own docstring for the full feature. Both
     # fields default such that an old, already-persisted campaign (this
@@ -891,6 +906,17 @@ class MailEnrollmentStep(BaseModel):
     gmail_message_id: str | None = None
     gmail_thread_id: str | None = None
     rfc_message_id: str | None = None
+    # Open tracking (2026-09-18) -- an opaque, non-guessable token minted
+    # and persisted at the EXACT same point as rfc_message_id (still
+    # CLAIMED, via persist_prepared_fields(), before compose_outbound_
+    # email() is ever called) -- same "resolve, never regenerate on
+    # retry" invariant as resolve_rfc_message_id(). None whenever this
+    # step's campaign has open_tracking_enabled=False, and for every row
+    # that predates this feature. Looked up (never decoded -- it carries
+    # no embedded payload) via MailEnrollmentStepStore.
+    # get_by_open_tracking_token() on every pixel request, so it must
+    # stay opaque and DB-indexed, not derived from any other field.
+    open_tracking_token: str | None = None
     # 2026-09-15 threading fix -- the EXACT subject line actually
     # transmitted to Gmail for this SENT message (post-personalization,
     # post any threaded-subject-inheritance -- see
@@ -1079,6 +1105,36 @@ class MailReply(BaseModel):
     detected_at: datetime
     created_at: datetime
     reply_preview: str | None = None
+
+
+class MailOpenEvent(BaseModel):
+    """Open tracking (2026-09-18) -- COMPACT per-step open-tracking state,
+    exactly one row per MailEnrollmentStep that has ever recorded a pixel
+    load, NOT an unbounded per-load event log. `first_opened_at`/
+    `open_count` are what make a "unique open" well-defined: the FIRST
+    pixel load for a given step creates this row (`first_opened_at` set
+    once, never overwritten); every subsequent load for the SAME step
+    only bumps `last_opened_at` and increments `open_count` -- see
+    MailOpenEventStore.record_open()'s own docstring for the exact
+    upsert semantics. `mail_campaign_id`/`enrollment_id` are carried here
+    (not re-derived via a join on every aggregation) so Open rate
+    computation can group by `enrollment_id` for UNIQUE opened leads
+    without a second store lookup per row -- same denormalization
+    rationale as MailEnrollmentStep carrying its own `mail_campaign_id`.
+
+    Written ONLY by the public, unauthenticated pixel endpoint (via
+    MailOpenTrackingService) -- this is INHERENTLY approximate (Apple
+    Mail Privacy Protection, image-proxying/prefetching clients can
+    trigger a load with no human ever viewing the message) and must
+    never be presented as confirmed engagement -- see the Open rate
+    UI's own tooltip copy for the exact disclosure."""
+
+    enrollment_step_id: str
+    mail_campaign_id: str
+    enrollment_id: str
+    first_opened_at: datetime
+    last_opened_at: datetime
+    open_count: int
 
 
 class MailInboxReplyView(BaseModel):
@@ -1304,12 +1360,16 @@ class MailCampaignListItem(BaseModel):
     MailCampaignStatsService.get_stats()'s own reply_rate_percent (the
     campaign Dashboard stats strip), so the two never silently disagree.
 
-    No field on this model represents an open rate at all: zero
-    open-tracking signal exists anywhere for Astronomic Mail (same
-    investigation as MailCampaignStats -- see that model's own
-    docstring) -- the frontend renders a static "not tracked" state for
-    that column rather than this model carrying an always-null/
-    always-zero placeholder.
+    `open_tracking_enabled`/`open_rate_percent` (2026-09-18, open
+    tracking): the campaign's own real, persisted setting, passed through
+    unchanged, plus `unique opened / unique sent * 100` when tracking is
+    on -- see MailCampaignListService's own module docstring for the
+    exact query. `open_rate_percent` is None in TWO distinct cases the
+    frontend must tell apart using `open_tracking_enabled`: tracking is
+    OFF (never fabricate a number for a campaign that was never
+    instrumented), or tracking is ON but nothing has SENT yet (a real
+    "no denominator" state, distinct from a true 0%). Never a fabricated
+    0% either way.
 
     Mailbox is deliberately NOT on this row any more (2026-09-18) -- a
     campaign's channel mailboxes are a Channels-tab concept now shown
@@ -1320,6 +1380,8 @@ class MailCampaignListItem(BaseModel):
     status: MailCampaignStatus
     total_leads: int
     available_leads: int
+    open_tracking_enabled: bool
+    open_rate_percent: float | None
     replied: int
     reply_rate_percent: float
     suppressed: int
@@ -1362,15 +1424,16 @@ class MailCampaignMailboxNextSend(BaseModel):
     next_send_at: datetime | None
 
 
-# --- Campaign stats strip (2026-09-17) -- reply rate / unsub rate only ------
+# --- Campaign stats strip (2026-09-17) -- reply rate / unsub rate / open --
 #
 # See MailCampaignStatsService's own module docstring for the full
-# investigation this is based on: Astronomic Mail has NO open-tracking or
-# real provider-bounce tracking anywhere (confirmed absent, not merely
-# unwired) -- this model deliberately has no open_rate_percent/
-# bounce_rate_percent fields at all, rather than a field that's always
-# fabricated to some placeholder value. The frontend renders "Not tracked"
-# for those two as static copy, never derived from this model.
+# investigation this is based on: Astronomic Mail has NO real
+# provider-bounce tracking anywhere (confirmed absent, not merely
+# unwired) -- this model deliberately has no bounce_rate_percent field at
+# all, rather than a field that's always fabricated to some placeholder
+# value. The frontend renders "Not tracked" for that one as static copy,
+# never derived from this model. Open tracking (2026-09-18) is real and
+# DOES have fields here now -- see below.
 
 
 class MailCampaignStats(BaseModel):
@@ -1387,6 +1450,12 @@ class MailCampaignStats(BaseModel):
     # complaint are each a different thing; see MailCampaignStatsService).
     unsubscribed: int
     unsub_rate_percent: float
+    # Open tracking (2026-09-18) -- same exact fields/semantics as
+    # MailCampaignListItem.open_tracking_enabled/open_rate_percent (see
+    # that model's own docstring for the two distinct None cases the
+    # frontend must tell apart).
+    open_tracking_enabled: bool
+    open_rate_percent: float | None
 
 
 # --- Review (pure, read-only calculation -- see mail_campaign_service.py) --

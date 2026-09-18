@@ -1180,6 +1180,11 @@ export interface MailCampaign {
   sharing: MailCampaignSharing;
   start_immediately: boolean;
   daily_lead_start_limit: number | null;
+  // Open tracking (2026-09-18) -- OFF by default, opt-in per campaign,
+  // editable only in DRAFT (same lock as every other preference field
+  // here). See MailCampaign.open_tracking_enabled's own backend
+  // docstring.
+  open_tracking_enabled: boolean;
   // Lead-start Triggers (Stage 5A-5F): "immediate" is today's only real
   // behavior (every PENDING enrollment starts eagerly); "triggered" means
   // at least one MailLeadStartTrigger has ever been created for this
@@ -1590,6 +1595,12 @@ export interface MailCampaignListItem {
   status: MailCampaignStatus;
   total_leads: number;
   available_leads: number;
+  // Open tracking (2026-09-18) -- open_rate_percent is None in TWO
+  // distinct cases the UI must tell apart via open_tracking_enabled:
+  // tracking is OFF (never show 0%), or tracking is ON but nothing has
+  // SENT yet (a real "no denominator" state).
+  open_tracking_enabled: boolean;
+  open_rate_percent: number | null;
   replied: number;
   reply_rate_percent: number;
   suppressed: number;
@@ -1615,6 +1626,7 @@ export type MailCampaignListSortBy =
   | "available"
   | "total_leads"
   | "reply_rate"
+  | "open_rate"
   | "replied"
   | "progress"
   | "created_at"
@@ -2090,6 +2102,10 @@ export interface MailCampaignStats {
   reply_rate_percent: number;
   unsubscribed: number;
   unsub_rate_percent: number;
+  // Open tracking (2026-09-18) -- same two-distinct-None-cases contract
+  // as MailCampaignListItem.open_tracking_enabled/open_rate_percent.
+  open_tracking_enabled: boolean;
+  open_rate_percent: number | null;
 }
 
 export function getMailCampaignStats(mailCampaignId: string): Promise<MailCampaignStats> {

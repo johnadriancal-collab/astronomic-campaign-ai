@@ -771,3 +771,73 @@ async def test_sender_exception_leaves_row_in_sending_never_guesses_at_outcome(s
     assert outcome.sender_error is not None
     persisted = await step_store.get(row.enrollment_step_id)
     assert persisted.status == MailEnrollmentStepStatus.SENDING, "must stay SENDING -- provider outcome unknown, never guessed at"
+
+
+# --- Open tracking (2026-09-18) ---------------------------------------------
+
+
+async def test_open_tracking_disabled_by_default_no_pixel_no_token(svc, basic_setup, step_store, campaign_store):
+    """make_campaign()'s own default -- open_tracking_enabled is not
+    passed, so it's False -- must send byte-identical to before this
+    feature existed."""
+    step1 = make_step("s1", 1)
+    enrollment = make_enrollment("e1")
+    await svc.enrollment_store.create(enrollment)
+    row = await svc.create_step1_execution(enrollment=enrollment, step1=step1, windows=all_day_windows(), timezone_name=TZ, now=NOW)
+
+    sender = FakeMailSender()
+    outcome = await svc.process_one_due_step(row, sender=sender, claimed_by="w1", sequence_steps=[step1], windows=all_day_windows(), timezone_name=TZ, now=NOW)
+
+    assert outcome.sent
+    assert "<img" not in sender.calls[0].html_body
+    assert "/mail/track/open" not in sender.calls[0].html_body
+    persisted = await step_store.get(row.enrollment_step_id)
+    assert persisted.open_tracking_token is None
+
+
+async def test_open_tracking_enabled_injects_pixel_and_persists_token(svc, basic_setup, step_store, campaign_store):
+    await campaign_store.save(make_campaign(status=MailCampaignStatus.ACTIVE).model_copy(update={"open_tracking_enabled": True}))
+    step1 = make_step("s1", 1)
+    enrollment = make_enrollment("e1")
+    await svc.enrollment_store.create(enrollment)
+    row = await svc.create_step1_execution(enrollment=enrollment, step1=step1, windows=all_day_windows(), timezone_name=TZ, now=NOW)
+
+    sender = FakeMailSender()
+    outcome = await svc.process_one_due_step(row, sender=sender, claimed_by="w1", sequence_steps=[step1], windows=all_day_windows(), timezone_name=TZ, now=NOW)
+
+    assert outcome.sent
+    sent_request = sender.calls[0]
+    assert "<img" in sent_request.html_body
+    assert "/mail/track/open?token=" in sent_request.html_body
+    # Plain-text body must NEVER carry a pixel, tracking on or not.
+    assert "<img" not in sent_request.body
+    assert "/mail/track/open" not in sent_request.body
+
+    persisted = await step_store.get(row.enrollment_step_id)
+    assert persisted.open_tracking_token is not None
+    assert persisted.open_tracking_token in sent_request.html_body
+
+
+async def test_open_tracking_token_survives_a_prepare_failure_retry_unchanged(svc, basic_setup, step_store, campaign_store, enrollment_store):
+    """Same invariant as resolve_rfc_message_id() -- a retried attempt on
+    the SAME row must reuse the already-persisted token, never mint a
+    second one."""
+    await campaign_store.save(make_campaign(status=MailCampaignStatus.ACTIVE).model_copy(update={"open_tracking_enabled": True}))
+    step1 = make_step("s1", 1)
+    enrollment = make_enrollment("e1")
+    await enrollment_store.create(enrollment)
+    row = await svc.create_step1_execution(enrollment=enrollment, step1=step1, windows=all_day_windows(), timezone_name=TZ, now=NOW)
+
+    failing_sender = FakeMailSender(fail=True, fail_at="prepare")
+    await svc.process_one_due_step(row, sender=failing_sender, claimed_by="w1", sequence_steps=[step1], windows=all_day_windows(), timezone_name=TZ, now=NOW)
+    after_first_attempt = await step_store.get(row.enrollment_step_id)
+    first_token = after_first_attempt.open_tracking_token
+    assert first_token is not None
+
+    working_sender = FakeMailSender()
+    retried = after_first_attempt.model_copy(update={"status": MailEnrollmentStepStatus.QUEUED, "next_send_at": NOW})
+    await step_store.save(retried)
+    await svc.process_one_due_step(retried, sender=working_sender, claimed_by="w2", sequence_steps=[step1], windows=all_day_windows(), timezone_name=TZ, now=NOW)
+
+    after_retry = await step_store.get(row.enrollment_step_id)
+    assert after_retry.open_tracking_token == first_token

@@ -108,12 +108,13 @@ test("Available renders the campaign's own real available_leads field", () => {
   assert.match(LIST_PAGE_SOURCE, /campaign\.available_leads/);
 });
 
-test("Open rate is a static unsupported-state cell, never a real-looking percentage or a fabricated 0%", () => {
-  const cellIndex = LIST_PAGE_SOURCE.indexOf("title={OPEN_RATE_TOOLTIP}");
-  assert.ok(cellIndex !== -1, "expected an Open rate cell with title={OPEN_RATE_TOOLTIP}");
-  const cellBlock = LIST_PAGE_SOURCE.slice(cellIndex, cellIndex + 120);
-  assert.match(cellBlock, /—/);
-  assert.doesNotMatch(LIST_PAGE_SOURCE, /open_rate/);
+test("Open rate is real (2026-09-18) -- rendered through the shared openRateDisplay() helper, never a hardcoded 'not tracked' placeholder", () => {
+  assert.match(LIST_PAGE_SOURCE, /import \{ mailCampaignStatusBadgeClass, mailCampaignStatusLabel, openRateDisplay \} from "@\/lib\/mail"/);
+  assert.match(LIST_PAGE_SOURCE, /openRateDisplay\(campaign\)\.text/);
+  assert.match(LIST_PAGE_SOURCE, /openRateDisplay\(campaign\)\.tooltip/);
+  assert.doesNotMatch(LIST_PAGE_SOURCE, /OPEN_RATE_TOOLTIP/);
+  assert.match(LIST_PAGE_SOURCE, /label="Open rate"/);
+  assert.match(LIST_PAGE_SOURCE, /column="open_rate"/);
 });
 
 test("Reply rate renders the campaign's own real reply_rate_percent field", () => {
@@ -142,7 +143,7 @@ test("the header row renders columns in the exact required order", () => {
   // whitespace/newlines between the ">" and the label. Locate each by
   // whichever marker actually appears, tolerating that whitespace, and
   // confirm their positions are in the exact required order.
-  const sortableLabels = new Set(["Status", "Campaign", "Available", "Total", "Progress", "Reply rate", "Replied", "Campaign created", "Last updated"]);
+  const sortableLabels = new Set(["Status", "Campaign", "Available", "Total", "Progress", "Open rate", "Reply rate", "Replied", "Campaign created", "Last updated"]);
   const order = ["Status", "Campaign", "Available", "Total", "Progress", "Open rate", "Reply rate", "Replied", "Suppressed", "Failed", "Steps", "Campaign created", "Last updated"];
   const headSection = LIST_PAGE_SOURCE.slice(LIST_PAGE_SOURCE.indexOf("<thead"), LIST_PAGE_SOURCE.indexOf("</thead>"));
   const indices = order.map((label) => {
@@ -168,7 +169,7 @@ test("MailCampaignListItem/MailCampaignListPage (api.ts) are distinct types from
   assert.match(API_SOURCE, /export interface MailCampaign\b/);
 });
 
-test("MailCampaignListItem (api.ts) carries available_leads/finished_leads/in_progress_leads/reply_rate_percent and no mailbox/sent/completed fields", () => {
+test("MailCampaignListItem (api.ts) carries available_leads/finished_leads/in_progress_leads/reply_rate_percent/open_rate_percent and no mailbox/sent/completed fields", () => {
   const start = API_SOURCE.indexOf("export interface MailCampaignListItem");
   const end = API_SOURCE.indexOf("export interface MailCampaignListPage");
   const block = API_SOURCE.slice(start, end);
@@ -176,6 +177,8 @@ test("MailCampaignListItem (api.ts) carries available_leads/finished_leads/in_pr
   assert.match(block, /finished_leads: number/);
   assert.match(block, /in_progress_leads: number/);
   assert.match(block, /reply_rate_percent: number/);
+  assert.match(block, /open_tracking_enabled: boolean/);
+  assert.match(block, /open_rate_percent: number \| null/);
   assert.doesNotMatch(block, /mailbox_id|mailbox_email|mailbox_count|\bsent:|\bcompleted:/);
 });
 
@@ -186,13 +189,15 @@ test("listMailCampaignList sends page/search/filter/sort as query params to GET 
 
 // --- Backend model / route -----------------------------------------------------
 
-test("MailCampaignListItem (backend model) has no open/click-rate field, but does carry the real reply_rate_percent", () => {
+test("MailCampaignListItem (backend model) has no click-rate field, but does carry the real reply_rate_percent/open_rate_percent", () => {
   const modelBlock = MODEL_SOURCE.slice(
     MODEL_SOURCE.indexOf("class MailCampaignListItem"),
     MODEL_SOURCE.indexOf("class MailCampaignListPage")
   );
-  assert.doesNotMatch(modelBlock, /open_rate|click_rate/i);
+  assert.doesNotMatch(modelBlock, /click_rate/i);
   assert.match(modelBlock, /reply_rate_percent: float/);
+  assert.match(modelBlock, /open_tracking_enabled: bool/);
+  assert.match(modelBlock, /open_rate_percent: float \| None/);
   assert.match(modelBlock, /available_leads: int/);
   assert.match(modelBlock, /finished_leads: int/);
   assert.match(modelBlock, /in_progress_leads: int/);
@@ -216,8 +221,10 @@ test("available_leads (2026-09-18c) is total minus finished (not-finished-sequen
     SERVICE_SOURCE.indexOf("async def list_campaigns")
   );
   assert.match(methodBlock, /available_leads=not_finished/);
+  // The old Step-1-sent definition keyed on step_number == 1 specifically
+  // -- gone. Open rate (2026-09-18) legitimately re-reads step data, but
+  // ONLY by status == SENT, never by step_number.
   assert.doesNotMatch(SERVICE_SOURCE, /step_number == 1/);
-  assert.doesNotMatch(SERVICE_SOURCE, /MailEnrollmentStepStore/);
 });
 
 test("progress_percent is finished/total (sequence-completion progress), never lead-start progress or a step-send count", () => {
@@ -312,8 +319,11 @@ test("sortable column headers (SortHeader) carry a stronger, semibold weight", (
   assert.match(sortHeaderBlock, /font-semibold/);
 });
 
-test("static (non-sortable) headers -- Open rate/Suppressed/Failed/Steps -- also carry the semibold weight", () => {
-  assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\["Open rate"\]/);
+test("static (non-sortable) headers -- Suppressed/Failed/Steps -- also carry the semibold weight", () => {
+  // Open rate moved from static text to a sortable SortHeader
+  // (2026-09-18, real Open rate) -- its own weight is covered by the
+  // "sortable column headers carry a stronger, semibold weight" test
+  // above, via SortHeader's shared className.
   assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\.Suppressed/);
   assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\.Failed/);
   assert.match(LIST_PAGE_SOURCE, /text-right font-semibold text-muted-foreground",\s*COLUMN_WIDTH_CLASS\.Steps/);
